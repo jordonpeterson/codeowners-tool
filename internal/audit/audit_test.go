@@ -313,3 +313,39 @@ func TestR0_FixOpsAreValidEngineAOps(t *testing.T) {
 		t.Fatalf("want one remove op per affected rule, got %v", ops)
 	}
 }
+
+// Review finding: a CODEOWNERS file matched by a zero-owner rule is exactly
+// as unowned as an unmatched one — A-11 must fire either way.
+func TestA11_ZeroOwnerMatchStillUnowned(t *testing.T) {
+	rep := audit.Run(audit.Input{
+		Content:        []byte("* @team\n/.github/CODEOWNERS\n"),
+		Tree:           []string{"a.go", ".github/CODEOWNERS"},
+		CodeownersPath: ".github/CODEOWNERS",
+	})
+	if len(findingsFor(rep, "A-11")) != 1 {
+		t.Errorf("A-11 must fire for a zero-owner-matched CODEOWNERS; findings = %+v", rep.Findings)
+	}
+}
+
+// Review finding: when the tree's real casing is NOT simply lowercase
+// (/Docs/ vs DOCS/), A-5 must still fire but must NOT claim a lowercased
+// suggestion "would match" — it wouldn't.
+func TestT9_A5NoFalseSuggestionForNonLowercaseTree(t *testing.T) {
+	rep := audit.Run(audit.Input{
+		Content: []byte("/Docs/ @a\n"),
+		Tree:    []string{"DOCS/readme.md"},
+	})
+	fs := findingsFor(rep, "A-5")
+	if len(fs) != 1 {
+		t.Fatalf("A-5 must fire, findings = %+v", rep.Findings)
+	}
+	if fs[0].SuggestedPattern != "" {
+		t.Errorf("suggestion %q would match nothing; must be empty", fs[0].SuggestedPattern)
+	}
+	if strings.Contains(fs[0].Message, "would match") {
+		t.Errorf("message falsely promises a match: %s", fs[0].Message)
+	}
+	if len(findingsFor(rep, "A-4")) != 0 {
+		t.Error("case-only miss must not double-report as A-4")
+	}
+}

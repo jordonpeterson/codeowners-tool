@@ -172,3 +172,46 @@ func TestR15_DiskCacheTTL(t *testing.T) {
 		t.Error("expired entry must miss")
 	}
 }
+
+// Review finding: GitHub answers 302 on /orgs/{org}/members/{login} when the
+// requester cannot see the membership; following the redirect lands on
+// /public_members, where a CONCEALED member 404s — a false definitive
+// negative that would propose removing a real member. Redirects are never
+// followed and always inconclusive.
+func TestR12_MembershipRedirectIsInconclusive(t *testing.T) {
+	s := server(t, map[string]func(http.ResponseWriter, *http.Request){
+		"/orgs/o/members/concealed": func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Location", "/orgs/o/public_members/concealed")
+			w.WriteHeader(302)
+		},
+		"/orgs/o/public_members/concealed": status(404),
+	})
+	c := ghapi.New(s.URL, "tok", ghapi.NewMemCache())
+	_, err := c.UserIsOrgMember("o", "concealed")
+	var inc *ghapi.Inconclusive
+	if !errors.As(err, &inc) {
+		t.Fatalf("302 on membership must be Inconclusive, got %v (a false 'not a member' here proposes removing a real member)", err)
+	}
+}
+
+// Review finding: cache keys must be scoped to (BaseURL, token) — a cache
+// directory shared across hosts or tokens must never serve one context's
+// definitive answers (or probe successes) to another.
+func TestR15_CacheScopedByHostAndToken(t *testing.T) {
+	shared := ghapi.NewMemCache()
+	sA := server(t, map[string]func(http.ResponseWriter, *http.Request){
+		"/users/alice": ok(`{"login":"alice"}`),
+	})
+	sB := server(t, map[string]func(http.ResponseWriter, *http.Request){
+		"/users/alice": status(404),
+	})
+	a := ghapi.New(sA.URL, "tokA", shared)
+	b := ghapi.New(sB.URL, "tokB", shared)
+	if got, err := a.UserExists("alice"); err != nil || !got {
+		t.Fatalf("host A: got=%v err=%v", got, err)
+	}
+	got, err := b.UserExists("alice")
+	if err != nil || got {
+		t.Fatalf("host B must get ITS OWN answer (false), not host A's cached true: got=%v err=%v", got, err)
+	}
+}

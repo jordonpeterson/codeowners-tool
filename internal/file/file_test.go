@@ -186,3 +186,15 @@ func TestDeleteLine(t *testing.T) {
 		t.Errorf("got %q", got)
 	}
 }
+
+// Inserting at EOF when the final line lacks a newline appends ONLY a
+// newline to that line — its inline spacing survives byte-for-byte. (Review
+// finding: the old code re-rendered the final rule line, collapsing
+// "@b  @c" to "@b @c" invisibly to the plan's diff.)
+func TestINV5_InsertAtEOFPreservesFinalLineBytes(t *testing.T) {
+	f := file.Parse([]byte("/x/ @a\n/y/ @b  @c"))
+	f.InsertRule(2, "/z/", []string{"@d"})
+	if got := string(f.Bytes()); got != "/x/ @a\n/y/ @b  @c\n/z/ @d\n" {
+		t.Errorf("got %q — final line's double space must survive", got)
+	}
+}

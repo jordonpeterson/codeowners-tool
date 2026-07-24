@@ -150,3 +150,42 @@ func TestExitCodes_AuditClean(t *testing.T) {
 		t.Errorf("clean audit: want 0, got %d\n%s", code, out)
 	}
 }
+
+// Review finding: `--checks A-4` — the canonical dashed spelling the tool
+// itself prints — used to normalize to "A--4", silently disabling every
+// check and exiting 0 "audit clean". All spellings must work, and an
+// unknown check name must be a hard error, never a vacuous pass.
+func TestExitCodes_ChecksSpellings(t *testing.T) {
+	repo := initRepo(t, map[string]string{
+		".github/CODEOWNERS": "/ghost/ @a\n* @b\n",
+		"real.txt":           "",
+	})
+	for _, spelling := range []string{"a4", "A4", "a-4", "A-4"} {
+		if code, out, _ := runCLI(t, "audit", "--repo", repo, "--checks", spelling); code != cli.ExitFindings {
+			t.Errorf("--checks %s: want exit 4 (A-4 finding), got %d\n%s", spelling, code, out)
+		}
+	}
+	if code, _, _ := runCLI(t, "audit", "--repo", repo, "--checks", "a99"); code != cli.ExitInvalid {
+		t.Error("unknown check must be invalid input (exit 3), not a vacuous clean audit")
+	}
+	if code, _, _ := runCLI(t, "audit", "--repo", repo, "--checks", "bogus"); code != cli.ExitInvalid {
+		t.Error("garbage check name must be invalid input (exit 3)")
+	}
+}
+
+// Review finding: a typo'd --scope must be a loud exit-3 error, not silently
+// dropped (which turned every change into an inexplicable violation).
+func TestExitCodes_VerifyBadScope(t *testing.T) {
+	dir := t.TempDir()
+	snap := filepath.Join(dir, "s.json")
+	if err := os.WriteFile(snap, []byte(`{"ownership":{"a.go":["@x"]}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	code, _, errOut := runCLI(t, "verify", "--before", snap, "--after", snap, "--scope", "!bad")
+	if code != cli.ExitInvalid {
+		t.Errorf("bad scope: want exit 3, got %d", code)
+	}
+	if !strings.Contains(errOut, "invalid --scope") {
+		t.Errorf("stderr must name the bad scope: %s", errOut)
+	}
+}

@@ -1,2 +1,3 @@
 bin/
 plan.json
+*.tar.gz

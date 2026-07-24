@@ -128,3 +128,29 @@ func TestApply_RefusesOversizedPlan(t *testing.T) {
 		t.Fatalf("oversized apply must be refused, got %v", err)
 	}
 }
+
+// Review finding: apply must write atomically and, when the CODEOWNERS path
+// is a symlink, replace the TARGET's content while preserving the link.
+func TestApply_SymlinkPreserved(t *testing.T) {
+	dir := t.TempDir()
+	real := filepath.Join(dir, "REAL_CODEOWNERS")
+	link := filepath.Join(dir, "CODEOWNERS")
+	content := "/x/ @a\n"
+	if err := os.WriteFile(real, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(real, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	p := makePlan(t, content, []string{"x/a.go"}, "add_owner(/x/, @b)")
+	if err := apply.Apply(p, link); err != nil {
+		t.Fatal(err)
+	}
+	if fi, err := os.Lstat(link); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+		t.Error("symlink must be preserved, not replaced by a regular file")
+	}
+	got, _ := os.ReadFile(real)
+	if string(got) != p.AfterContent {
+		t.Errorf("target content = %q, want %q", got, p.AfterContent)
+	}
+}

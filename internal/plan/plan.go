@@ -153,6 +153,17 @@ func Build(content []byte, tree []string, opList []ops.Op, opts Options) (*Plan,
 				if !scopeSets[j][p] {
 					continue
 				}
+				// simulate() cannot model --on-empty=inherit (inheritance
+				// resurrects owners from OTHER rules, which a pure owner-set
+				// transform cannot see), so a remove overlapping anything
+				// under inherit is unprovably order-independent — reject it
+				// rather than resolve by input order (found in review).
+				if opts.OnEmpty == "inherit" &&
+					(opList[i].Kind == ops.RemoveOwner || opList[j].Kind == ops.RemoveOwner) {
+					return nil, &InvalidError{Msg: fmt.Sprintf(
+						"ops %q and %q overlap on %q and --on-empty=inherit makes their order-independence unprovable (R-8) — run them as separate invocations",
+						opList[i].Raw, opList[j].Raw, p)}
+				}
 				ij := simulate(opList[j], simulate(opList[i], beforeOwners[p]))
 				ji := simulate(opList[i], simulate(opList[j], beforeOwners[p]))
 				if !resolve.OwnersEqual(ij, ji) {
@@ -193,9 +204,14 @@ func Build(content []byte, tree []string, opList []ops.Op, opts Options) (*Plan,
 		}
 	}
 
-	// ASSERT: the gate. Re-resolve the mutated file over the real tree and
-	// prove INV-1/INV-2 against the independently computed desired state.
-	after := resolve.All(f, tree)
+	// ASSERT: the gate. Serialize, RE-PARSE, and re-resolve over the real
+	// tree, proving INV-1/INV-2 against the independently computed desired
+	// state. Gating on the re-parsed bytes — not the in-memory model — is
+	// essential: it also proves the plan survives serialization (a rule that
+	// re-parses differently than it was modeled is caught here, not on disk;
+	// found in review).
+	afterBytes := f.Bytes()
+	after := resolve.All(file.Parse(afterBytes), tree)
 	var violations []string
 	for _, p := range tree {
 		want := desired[p]
@@ -220,7 +236,6 @@ func Build(content []byte, tree []string, opList []ops.Op, opts Options) (*Plan,
 		return nil, &RefusalError{Msg: "refusing: synthesized edits do not satisfy the invariants", Details: violations}
 	}
 
-	afterBytes := f.Bytes()
 	if bytes.Equal(afterBytes, content) {
 		return nil, &NoOpError{Msg: "nothing to change: file already satisfies the requested ops"}
 	}
@@ -431,19 +446,45 @@ func synthRemove(f *file.File, tree []string, op ops.Op, scope map[string]bool, 
 			return &RefusalError{Msg: fmt.Sprintf(
 				"refusing: remove_owner(%s, %s) did not converge — file structure defeats the writer", op.Scope, op.Owner)}
 		}
-		changed, err := removePass(f, tree, op, scope, desired, onEmpty, pl)
+		changed, err := removePass(f, tree, op, scope, onEmpty, pl)
 		if err != nil {
 			return err
 		}
 		if !changed {
-			return nil
+			break
 		}
 	}
+
+	// Desired state for removal is settled AFTER the fixpoint, not
+	// incrementally per pass: a pass may delete a rule (recording its
+	// fallthrough) and then amend that very fallthrough rule in the same
+	// pass, so per-pass snapshots go stale and produce spurious refusals
+	// (found in review). Where the outcome is the pure transform
+	// desired∖{owner}, keep it — that preserves the gate's independence.
+	// Where inheritance legitimately resurrected other owners, assert the
+	// removal contract (op.Owner owns nothing in scope — INV-1 for remove)
+	// and accept the fallthrough set. INV-2 is untouched: desired outside
+	// scope never changes here.
+	final := resolve.All(f, tree)
+	for p := range scope {
+		want := minus(desired[p], op.Owner)
+		got := final[p].Owners
+		if resolve.OwnersEqual(got, want) {
+			desired[p] = want
+			continue
+		}
+		if contains(got, op.Owner) {
+			return &RefusalError{Msg: fmt.Sprintf(
+				"refusing: %s would still own %q after remove_owner(%s, %s)", op.Owner, p, op.Scope, op.Owner)}
+		}
+		desired[p] = got // inherit fallthrough: owners come from surviving rules
+	}
+	return nil
 }
 
 // removePass performs one round of removal edits; reports whether any edit
 // was made.
-func removePass(f *file.File, tree []string, op ops.Op, scope map[string]bool, desired map[string][]string, onEmpty string, pl *Plan) (bool, error) {
+func removePass(f *file.File, tree []string, op ops.Op, scope map[string]bool, onEmpty string, pl *Plan) (bool, error) {
 	cur := resolve.All(f, tree)
 	winners := winnersByLine(cur)
 
@@ -476,9 +517,6 @@ func removePass(f *file.File, tree []string, op ops.Op, scope map[string]bool, d
 					OldLine: old, NewLine: f.LineText(l),
 					Reason: fmt.Sprintf("every path governed by %q is inside scope; removed %s in place", r.PatternText, op.Owner),
 				})
-				for _, p := range winners[l] {
-					desired[p] = minus(desired[p], op.Owner)
-				}
 				continue
 			}
 			// Owner set would become empty: explicit policy required (R-6).
@@ -500,23 +538,14 @@ func removePass(f *file.File, tree []string, op ops.Op, scope map[string]bool, d
 					OldLine: old, NewLine: f.LineText(l),
 					Reason: fmt.Sprintf("owner set emptied; pattern kept with zero owners per --on-empty=unowned — a legal, deliberate un-owning (S-9)"),
 				})
-				for _, p := range winners[l] {
-					desired[p] = []string{}
-				}
 			case "inherit":
 				old := f.LineText(l)
-				affected := winners[l]
 				pl.Changes = append(pl.Changes, Change{
 					Action: "delete", Line: l + 1, Pattern: r.PatternText,
 					OldOwners: r.OwnersCopy(), OldLine: old,
 					Reason: "owner set emptied; rule deleted per --on-empty=inherit so the preceding broader rule takes over (R-6) — the resulting reassignment appears in the ownership rows",
 				})
 				f.DeleteLine(l)
-				rules := f.Rules()
-				for _, p := range affected {
-					res := resolve.One(rules, p)
-					desired[p] = res.Owners // nil if now unmatched
-				}
 			default:
 				return false, &InvalidError{Msg: fmt.Sprintf("unknown --on-empty policy %q", onEmpty)}
 			}
@@ -551,13 +580,7 @@ func removePass(f *file.File, tree []string, op ops.Op, scope map[string]bool, d
 				NewLine: f.LineText(l + 1),
 				Reason:  fmt.Sprintf("rule %q also governs out-of-scope paths; inserted narrowing rule %q after it (R-2); out-of-scope resolution untouched", r.PatternText, inter),
 			})
-			for _, p := range groups[l] {
-				if len(newOwners) == 0 {
-					desired[p] = []string{}
-				} else {
-					desired[p] = minus(desired[p], op.Owner)
-				}
-			}
+
 		}
 	}
 	return true, nil

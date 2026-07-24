@@ -20,6 +20,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -282,7 +283,10 @@ func cmdVerify(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		return errExit(&plan.InvalidError{Msg: err.Error()}, stderr)
 	}
-	res := verify.Compare(before, after, scopes)
+	res, err := verify.Compare(before, after, scopes)
+	if err != nil {
+		return errExit(&plan.InvalidError{Msg: err.Error()}, stderr)
+	}
 	for _, c := range res.Changed {
 		fmt.Fprintf(stdout, "changed: %s  %s → %s\n", c.Path, fmtOwners(c.Before), fmtOwners(c.After))
 	}
@@ -327,9 +331,20 @@ func cmdAudit(args []string, stdout, stderr io.Writer) int {
 	if *checksFlag != "" {
 		in.Checks = map[string]bool{}
 		for _, c := range strings.Split(*checksFlag, ",") {
-			c = strings.ToUpper(strings.TrimSpace(c))
-			c = strings.Replace(c, "A", "A-", 1)
-			in.Checks[c] = true
+			// Accept a4, A4, a-4, A-4 — including the canonical dashed form
+			// the tool itself prints. An unrecognized name is a hard error:
+			// silently matching nothing would make audits pass vacuously
+			// (found in review).
+			norm := strings.ReplaceAll(strings.ToUpper(strings.TrimSpace(c)), "-", "")
+			n := 0
+			if len(norm) >= 2 && norm[0] == 'A' {
+				n, _ = strconv.Atoi(norm[1:])
+			}
+			if n < 1 || n > 12 {
+				fmt.Fprintf(stderr, "error: unknown check %q (want a1..a12)\n", c)
+				return ExitInvalid
+			}
+			in.Checks[fmt.Sprintf("A-%d", n)] = true
 		}
 	}
 	apiChecksWanted := in.Checks == nil || in.Checks["A-1"] || in.Checks["A-2"] || in.Checks["A-3"]

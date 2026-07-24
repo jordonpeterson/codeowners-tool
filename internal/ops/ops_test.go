@@ -83,3 +83,16 @@ func TestParse_Malformed(t *testing.T) {
 		}
 	}
 }
+
+// Unescaped whitespace in a scope cannot survive serialization: the written
+// line "a b @x" re-parses as pattern "a" owned by "b" — a different, valid
+// rule that silently breaks both invariants (review finding). CODEOWNERS
+// spells such patterns with escaped spaces, and so must ops.
+func TestParse_UnescapedWhitespaceScopeRejected(t *testing.T) {
+	if _, err := ops.Parse(`add_owner(/a b/, @x)`); err == nil {
+		t.Error("unescaped-space scope must be rejected")
+	}
+	if _, err := ops.Parse(`add_owner(/a\ b/, @x)`); err != nil {
+		t.Errorf("escaped-space scope must be accepted: %v", err)
+	}
+}

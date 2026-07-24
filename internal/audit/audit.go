@@ -17,6 +17,7 @@ import (
 
 	"github.com/jordonpropm/codeowners-tool/internal/file"
 	"github.com/jordonpropm/codeowners-tool/internal/ghapi"
+	"github.com/jordonpropm/codeowners-tool/internal/ops"
 	"github.com/jordonpropm/codeowners-tool/internal/pattern"
 	"github.com/jordonpropm/codeowners-tool/internal/plan"
 	"github.com/jordonpropm/codeowners-tool/internal/resolve"
@@ -94,11 +95,19 @@ func Run(in Input) *Report {
 			}
 		}
 		if matches == 0 {
-			if sugg := caseCorrected(r, in.Tree); sugg != "" {
+			if sugg, caseOnly := caseCorrected(r, in.Tree); caseOnly {
 				if in.enabled("A-5") {
+					msg := fmt.Sprintf("pattern %q matches zero files ONLY because of case — CODEOWNERS is case-sensitive (S-6)", r.PatternText)
+					if sugg != "" {
+						msg += fmt.Sprintf("; %q would match", sugg)
+					} else {
+						// The real tree casing is not simply lowercase; a
+						// mechanical suggestion would be wrong (found in
+						// review) — the user must correct the casing by hand.
+						msg += "; correct the pattern to the tree's actual casing"
+					}
 					rep.add(Finding{Check: "A-5", Severity: "warning", Line: r.LineIndex + 1, Pattern: r.PatternText,
-						SuggestedPattern: sugg,
-						Message:          fmt.Sprintf("pattern %q matches zero files ONLY because of case — CODEOWNERS is case-sensitive (S-6); %q would match", r.PatternText, sugg)})
+						SuggestedPattern: sugg, Message: msg})
 				}
 			} else if in.enabled("A-4") {
 				// R-11: report-only, permanently. A dead pattern may be
@@ -172,9 +181,10 @@ func Run(in Input) *Report {
 				strings.Join(in.AllPresent, ", "), in.AllPresent[0])})
 	}
 
-	// A-11: the CODEOWNERS file itself is unowned.
+	// A-11: the CODEOWNERS file itself is unowned. A zero-owner match is
+	// exactly as unowned as no match at all (found in review).
 	if in.enabled("A-11") && in.CodeownersPath != "" {
-		if r, ok := res[in.CodeownersPath]; !ok || !r.Matched {
+		if r, ok := res[in.CodeownersPath]; !ok || !r.Matched || len(r.Owners) == 0 {
 			rep.add(Finding{Check: "A-11", Severity: "warning",
 				Message: fmt.Sprintf("%s itself has no owner — anyone with write access can change ownership rules unreviewed", in.CodeownersPath)})
 		}
@@ -249,16 +259,16 @@ func auditOwners(in *Input, rep *Report, f *file.File, rules []*file.Rule, winne
 }
 
 func auditUser(in *Input, rep *Report, s *ownerSites, login string, rules []*file.Rule, winners map[int][]string) {
-	unknown := func(reason string) {
+	unknown := func(check, reason string) {
 		rep.inconclusive(reason)
-		rep.add(Finding{Check: "A-1", Severity: "warning", Owner: s.owner, Status: "unknown",
+		rep.add(Finding{Check: check, Severity: "warning", Owner: s.owner, Status: "unknown",
 			Message: fmt.Sprintf("%s could not be verified (%s) — no removal proposed (R-12)", s.owner, reason)})
 	}
 
 	if in.enabled("A-1") {
 		exists, err := in.Client.UserExists(login)
 		if err != nil {
-			unknown(errReason(err))
+			unknown("A-1", errReason(err))
 			return
 		}
 		if !exists {
@@ -274,12 +284,12 @@ func auditUser(in *Input, rep *Report, s *ownerSites, login string, rules []*fil
 	org := in.RepoOwner
 	if in.enabled("A-2") && org != "" {
 		if err := in.Client.ProbeOrg(org); err != nil {
-			unknown(errReason(err))
+			unknown("A-2", errReason(err))
 			return
 		}
 		member, err := in.Client.UserIsOrgMember(org, login)
 		if err != nil {
-			unknown(errReason(err))
+			unknown("A-2", errReason(err))
 			return
 		}
 		if !member {
@@ -293,12 +303,12 @@ func auditUser(in *Input, rep *Report, s *ownerSites, login string, rules []*fil
 
 	if in.enabled("A-3") && in.RepoOwner != "" && in.RepoName != "" {
 		if err := in.Client.ProbeRepo(in.RepoOwner, in.RepoName); err != nil {
-			unknown(errReason(err))
+			unknown("A-3", errReason(err))
 			return
 		}
 		hasWrite, err := in.Client.UserHasWrite(in.RepoOwner, in.RepoName, login)
 		if err != nil {
-			unknown(errReason(err))
+			unknown("A-3", errReason(err))
 			return
 		}
 		if !hasWrite {
@@ -312,22 +322,22 @@ func auditUser(in *Input, rep *Report, s *ownerSites, login string, rules []*fil
 }
 
 func auditTeam(in *Input, rep *Report, s *ownerSites, org, slug string, rules []*file.Rule, winners map[int][]string) {
-	unknown := func(reason string) {
+	unknown := func(check, reason string) {
 		rep.inconclusive(reason)
-		rep.add(Finding{Check: "A-1", Severity: "warning", Owner: s.owner, Status: "unknown",
+		rep.add(Finding{Check: check, Severity: "warning", Owner: s.owner, Status: "unknown",
 			Message: fmt.Sprintf("%s could not be verified (%s) — no removal proposed (R-12)", s.owner, reason)})
 	}
 
 	// A team 404 is only meaningful after proving we can enumerate the org.
 	if err := in.Client.ProbeOrg(org); err != nil {
-		unknown(errReason(err))
+		unknown("A-1", errReason(err))
 		return
 	}
 
 	if in.enabled("A-1") {
 		exists, err := in.Client.TeamExists(org, slug)
 		if err != nil {
-			unknown(errReason(err))
+			unknown("A-1", errReason(err))
 			return
 		}
 		if !exists {
@@ -343,7 +353,7 @@ func auditTeam(in *Input, rep *Report, s *ownerSites, org, slug string, rules []
 	if in.enabled("A-3") && in.RepoOwner != "" && in.RepoName != "" {
 		hasWrite, err := in.Client.TeamHasWrite(org, slug, in.RepoOwner, in.RepoName)
 		if err != nil {
-			unknown(errReason(err))
+			unknown("A-3", errReason(err))
 			return
 		}
 		if !hasWrite {
@@ -363,7 +373,13 @@ func proposeRemoval(s *ownerSites, allRules []*file.Rule, winners map[int][]stri
 	var fixes []string
 	var rows []plan.Row
 	for _, r := range s.rules {
-		fixes = append(fixes, fmt.Sprintf("remove_owner(%s, %s)", r.PatternText, s.owner))
+		fix := fmt.Sprintf("remove_owner(%s, %s)", r.PatternText, s.owner)
+		// Patterns containing a top-level comma are unrepresentable in the op
+		// DSL; emitting an unparseable fix op would fail downstream (found in
+		// review) — omit it and leave the reassignment preview as the guide.
+		if _, err := ops.Parse(fix); err == nil {
+			fixes = append(fixes, fix)
+		}
 		if len(r.Owners) != 1 {
 			continue
 		}
@@ -384,31 +400,29 @@ func proposeRemoval(s *ownerSites, allRules []*file.Rule, winners map[int][]stri
 	return fixes, rows
 }
 
-// caseCorrected returns a corrected pattern if the rule matches zero files
-// case-sensitively but would match with case folded (A-5 / S-6), else "".
-func caseCorrected(r *file.Rule, tree []string) string {
+// caseCorrected reports whether the rule matches zero files ONLY because of
+// case (A-5 / S-6), and — separately — a suggested corrected pattern, which
+// is non-empty only when it VERIFIABLY matches real tree paths
+// case-sensitively. A case-only miss whose real casing isn't simply
+// lowercase yields ("", true): the finding fires, but no unverified
+// suggestion is made.
+func caseCorrected(r *file.Rule, tree []string) (suggestion string, caseOnly bool) {
 	lowered := strings.ToLower(r.PatternText)
-	if lowered == r.PatternText {
-		return ""
-	}
 	p, err := pattern.Compile(lowered)
 	if err != nil {
-		return ""
+		return "", false
 	}
-	// The suggestion must actually match real tree paths case-sensitively.
 	for _, path := range tree {
-		if p.Match(path) {
-			return lowered
+		if lowered != r.PatternText && p.Match(path) {
+			return lowered, true
 		}
 	}
-	// Fall back: detect the case-only miss even when the real casing isn't
-	// simply lowercase.
 	for _, path := range tree {
 		if p.Match(strings.ToLower(path)) {
-			return lowered
+			return "", true
 		}
 	}
-	return ""
+	return "", false
 }
 
 func splitTeam(owner string) (org, slug string, ok bool) {

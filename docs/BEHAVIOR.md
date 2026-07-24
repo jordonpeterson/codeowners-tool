@@ -25,6 +25,11 @@ and the invariants would no longer be proven.
 
 SPEC S-4: apply re-checks size independently of plan — belt and braces.
 
+### `TestApply_SymlinkPreserved`
+
+Review finding: apply must write atomically and, when the CODEOWNERS path
+is a symlink, replace the TARGET's content while preserving the link.
+
 ### `TestApply_WritesPlannedContent`
 
 (no doc comment)
@@ -89,6 +94,11 @@ uses only the first by precedence and never merges.
 SPEC A-11: the CODEOWNERS file itself being unowned means nobody guards
 the guardrails.
 
+### `TestA11_ZeroOwnerMatchStillUnowned`
+
+Review finding: a CODEOWNERS file matched by a zero-owner rule is exactly
+as unowned as an unmatched one — A-11 must fire either way.
+
 ### `TestA12_SizeWarning`
 
 SPEC A-12 (S-4): size approaching 3 MB is a warning before it becomes a
@@ -110,6 +120,12 @@ SPEC R-13: email owners are exempt from A-1/A-2/A-3 — reported
 SPEC T-8 (R-12): a token lacking org read access makes every org-dependent
 answer inconclusive: exit-5 state, and ZERO removal ops proposed. An
 expired token must never strip owners.
+
+### `TestT9_A5NoFalseSuggestionForNonLowercaseTree`
+
+Review finding: when the tree's real casing is NOT simply lowercase
+(/Docs/ vs DOCS/), A-5 must still fire but must NOT claim a lowercased
+suggestion "would match" — it wouldn't.
 
 ### `TestT9_CaseMismatchIsA5NotA4`
 
@@ -146,9 +162,21 @@ A clean audit exits 0.
 
 SPEC R-17 exit 4: offline audit findings.
 
+### `TestExitCodes_ChecksSpellings`
+
+Review finding: `--checks A-4` — the canonical dashed spelling the tool
+itself prints — used to normalize to "A--4", silently disabling every
+check and exiting 0 "audit clean". All spellings must work, and an
+unknown check name must be a hard error, never a vacuous pass.
+
 ### `TestExitCodes_NoOpAndInvalid`
 
 SPEC R-17: exit 1 no-op, exit 3 invalid input.
+
+### `TestExitCodes_VerifyBadScope`
+
+Review finding: a typo'd --scope must be a loud exit-3 error, not silently
+dropped (which turned every change into an inexplicable violation).
 
 ## internal/file
 
@@ -184,6 +212,13 @@ Amending a zero-owner rule to have owners inserts a separator.
 Amending a line keeps its leading whitespace, pattern spelling, and inline
 comment; only the owner list changes (INV-5 for the modified line itself:
 untouched portions stay put).
+
+### `TestINV5_InsertAtEOFPreservesFinalLineBytes`
+
+Inserting at EOF when the final line lacks a newline appends ONLY a
+newline to that line — its inline spacing survives byte-for-byte. (Review
+finding: the old code re-rendered the final rule line, collapsing
+"@b  @c" to "@b @c" invisibly to the plan's diff.)
 
 ### `TestINV5_RoundTrip_ByteIdentical`
 
@@ -243,6 +278,14 @@ doesn't exist".
 SPEC R-12 + R-15: inconclusive results are NEVER cached — a transient
 failure must not poison later runs.
 
+### `TestR12_MembershipRedirectIsInconclusive`
+
+Review finding: GitHub answers 302 on /orgs/{org}/members/{login} when the
+requester cannot see the membership; following the redirect lands on
+/public_members, where a CONCEALED member 404s — a false definitive
+negative that would propose removing a real member. Redirects are never
+followed and always inconclusive.
+
 ### `TestR12_ProbeOrgGatesTeamLookups`
 
 ProbeOrg is the precondition that lets a later team/member 404 count as a
@@ -252,6 +295,12 @@ true negative: it proves the token can enumerate the org at all (R-12).
 
 SPEC R-12: rate limiting is inconclusive — a rate-limited 403 looks like a
 forbidden 403 and neither is a negative.
+
+### `TestR15_CacheScopedByHostAndToken`
+
+Review finding: cache keys must be scoped to (BaseURL, token) — a cache
+directory shared across hosts or tokens must never serve one context's
+definitive answers (or probe successes) to another.
 
 ### `TestR15_DefinitiveResultsCached`
 
@@ -335,6 +384,13 @@ set.
 set_owners with an empty list is legal: it is the explicit S-9 "un-own this
 subtree" intent.
 
+### `TestParse_UnescapedWhitespaceScopeRejected`
+
+Unescaped whitespace in a scope cannot survive serialization: the written
+line "a b @x" re-parses as pattern "a" owned by "b" — a different, valid
+rule that silently breaks both invariants (review finding). CODEOWNERS
+spells such patterns with escaped spaces, and so must ops.
+
 ## internal/pattern
 
 > Package pattern_test defines the CODEOWNERS pattern-matching semantics.
@@ -385,15 +441,30 @@ dead rule that looks fine on a case-insensitive filesystem.
 
 ## internal/plan
 
-> Property tests for the planner (T-4, T-5): thousands of generated
-> (file, tree, op) cases, all checked against independently computed
-> expectations. Deterministic seeds — failures reproduce exactly.
+> Package plan_test encodes the spec's acceptance tests for Engine A.
+> 
+> The planner takes intent-level ops, computes the resolved ownership
+> before/after over the real tree, synthesizes line edits, and GATES the
+> result on two invariants:
+> 
+> 	INV-1: every path in scope resolves to exactly what the op requires.
+> 	INV-2: every path outside scope resolves to exactly what it did before.
+> 
+> A plan that cannot be proven is refused (exit 2), never guessed at.
 
 ### `TestAddOwner_CoversUnownedPaths`
 
 add_owner covering previously-UNOWNED paths: a scope rule is inserted
 where later rules keep precedence, so owned paths in scope are not
 double-captured.
+
+### `TestGate_ProvesSerializedBytesNotModel`
+
+The gate proves invariants on the RE-PARSED serialized bytes, not the
+in-memory model (review finding: a scope with unescaped whitespace modeled
+as one rule serializes to a line that re-parses as a DIFFERENT valid rule,
+which the in-memory gate could not see). Ops built via Parse are already
+rejected; a hand-constructed Op must be caught by the gate itself.
 
 ### `TestGate_RefusesInexpressibleIntent`
 
@@ -428,6 +499,13 @@ Without this, repeated automated runs grow the file without bound.
 
 SPEC R-6: remove_owner emptying an owner set requires an explicit policy.
 
+### `TestR6_InheritDeleteThenAmendFallthroughSamePass`
+
+Review finding: under --on-empty=inherit, a single remove_owner may delete
+a narrow rule AND amend its broader fallthrough rule in the same pass. The
+per-pass desired snapshot went stale and refused a perfectly expressible
+op. Must now succeed with both edits.
+
 ### `TestR7_DuplicatePatternsEditEffective`
 
 SPEC R-7: with duplicate patterns, edit the EFFECTIVE (last) one and
@@ -437,6 +515,13 @@ report the shadowed duplicate — never silently fix it.
 
 SPEC R-8: order-dependent overlapping batches are rejected, not resolved
 by input order. Commuting batches are fine.
+
+### `TestR8_InheritOverlapRejected`
+
+Review finding: simulate() cannot model inherit (inheritance resurrects
+owners from rules the owner-set transform cannot see), so an overlapping
+batch containing remove_owner under --on-empty=inherit was accepted while
+being order-dependent. R-8 now rejects it outright.
 
 ### `TestR16_PlanIsMachineReadable`
 
@@ -569,4 +654,4 @@ DIFFERENT states; transitioning between them is a real ownership change.
 
 ---
 
-93 documented test cases across 11 packages.
+105 documented test cases across 11 packages.

@@ -17,13 +17,16 @@ func snap(ownership map[string][]string) *verify.Snapshot {
 func TestR18_NoScope_AssertNoChange(t *testing.T) {
 	before := snap(map[string][]string{"a.go": {"@x"}, "b.go": {"@y"}})
 	same := snap(map[string][]string{"a.go": {"@x"}, "b.go": {"@y"}})
-	res := verify.Compare(before, same, nil)
+	res, err := verify.Compare(before, same, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !res.OK() || len(res.Changed) != 0 {
 		t.Errorf("identical snapshots must verify clean, got %+v", res)
 	}
 
 	drifted := snap(map[string][]string{"a.go": {"@x", "@z"}, "b.go": {"@y"}})
-	res = verify.Compare(before, drifted, nil)
+	res, _ = verify.Compare(before, drifted, nil)
 	if res.OK() {
 		t.Error("changed ownership with no declared scope must fail verification")
 	}
@@ -37,13 +40,16 @@ func TestR18_NoScope_AssertNoChange(t *testing.T) {
 func TestR18_ScopedChangesConfined(t *testing.T) {
 	before := snap(map[string][]string{"x/a.go": {"@a"}, "y/b.go": {"@y"}})
 	after := snap(map[string][]string{"x/a.go": {"@a", "@b"}, "y/b.go": {"@y"}})
-	res := verify.Compare(before, after, []string{"/x/"})
+	res, err := verify.Compare(before, after, []string{"/x/"})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !res.OK() {
 		t.Errorf("in-scope change must pass: %+v", res.Violations)
 	}
 
 	badAfter := snap(map[string][]string{"x/a.go": {"@a", "@b"}, "y/b.go": {"@CHANGED"}})
-	res = verify.Compare(before, badAfter, []string{"/x/"})
+	res, _ = verify.Compare(before, badAfter, []string{"/x/"})
 	if res.OK() {
 		t.Error("out-of-scope change must fail")
 	}
@@ -56,7 +62,7 @@ func TestR18_ScopedChangesConfined(t *testing.T) {
 func TestR18_OwnerOrderIrrelevant(t *testing.T) {
 	before := snap(map[string][]string{"a.go": {"@a", "@b"}})
 	after := snap(map[string][]string{"a.go": {"@b", "@a"}})
-	if res := verify.Compare(before, after, nil); !res.OK() {
+	if res, _ := verify.Compare(before, after, nil); !res.OK() {
 		t.Errorf("owner order must not count as change: %+v", res.Changed)
 	}
 }
@@ -66,7 +72,7 @@ func TestR18_OwnerOrderIrrelevant(t *testing.T) {
 func TestR18_UnownedVsZeroOwnersDistinct(t *testing.T) {
 	before := snap(map[string][]string{"a.go": nil})
 	after := snap(map[string][]string{"a.go": {}})
-	if res := verify.Compare(before, after, nil); res.OK() {
+	if res, _ := verify.Compare(before, after, nil); res.OK() {
 		t.Error("nil→[] must register as a change (unowned vs explicitly zero-owned)")
 	}
 }
@@ -75,7 +81,7 @@ func TestR18_UnownedVsZeroOwnersDistinct(t *testing.T) {
 func TestR18_TreeChangesSurface(t *testing.T) {
 	before := snap(map[string][]string{"a.go": {"@a"}})
 	after := snap(map[string][]string{"a.go": {"@a"}, "new.go": {"@a"}})
-	res := verify.Compare(before, after, nil)
+	res, _ := verify.Compare(before, after, nil)
 	if res.OK() {
 		t.Error("new path must surface as a change")
 	}

@@ -13,7 +13,7 @@ import (
 // ListTracked returns the repo-relative paths (forward slashes) of every
 // tracked file at ref. A bad ref or non-repo is a hard error.
 func ListTracked(repoDir, ref string) ([]string, error) {
-	out, err := gitOutput(repoDir, "ls-tree", "-r", "--name-only", "-z", ref)
+	out, err := gitOutput(repoDir, "ls-tree", "-r", "--name-only", "-z", ref, "--")
 	if err != nil {
 		return nil, err
 	}

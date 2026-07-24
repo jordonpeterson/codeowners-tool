@@ -61,12 +61,16 @@ func Load(path string) (*Snapshot, error) {
 // Compare diffs two snapshots. scopes, when non-empty, are CODEOWNERS
 // patterns declaring where change is allowed; every change outside them is a
 // violation (INV-2 from raw data). With no scopes, ANY change is a violation.
-func Compare(before, after *Snapshot, scopes []string) *Result {
+// A scope that fails to compile is a hard error — silently dropping it would
+// misreport which changes are in scope (found in review).
+func Compare(before, after *Snapshot, scopes []string) (*Result, error) {
 	var pats []*pattern.Pattern
 	for _, s := range scopes {
-		if p, err := pattern.Compile(s); err == nil {
-			pats = append(pats, p)
+		p, err := pattern.Compile(s)
+		if err != nil {
+			return nil, fmt.Errorf("invalid --scope %q: %v", s, err)
 		}
+		pats = append(pats, p)
 	}
 	inScope := func(path string) bool {
 		for _, p := range pats {
@@ -103,5 +107,5 @@ func Compare(before, after *Snapshot, scopes []string) *Result {
 			res.Violations = append(res.Violations, c)
 		}
 	}
-	return res
+	return res, nil
 }

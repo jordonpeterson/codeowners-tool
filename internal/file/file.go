@@ -305,13 +305,10 @@ func (f *File) InsertRule(i int, patternText string, owners []string) *Rule {
 		}
 	}
 	if i == len(f.Lines) && len(f.Lines) > 0 && f.Lines[len(f.Lines)-1].EOL == "" {
-		last := f.Lines[len(f.Lines)-1]
-		last.EOL = eol
-		last.dirty = last.dirty || last.Kind == LineRule
-		if last.Kind != LineRule {
-			// Non-rule line: keep Raw, just append EOL via non-dirty path.
-			last.dirty = false
-		}
+		// Append ONLY a newline to the final line; its Raw bytes are emitted
+		// untouched (marking it dirty would re-render it and collapse its
+		// inline spacing — found in review).
+		f.Lines[len(f.Lines)-1].EOL = eol
 	}
 	r := &Rule{
 		PatternText: patternText,

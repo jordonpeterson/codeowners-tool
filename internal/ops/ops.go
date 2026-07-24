@@ -114,6 +114,21 @@ func checkScope(scope string) error {
 	if scope == "" {
 		return fmt.Errorf("empty scope")
 	}
+	// Unescaped whitespace cannot survive serialization: a written rule line
+	// "a b @x" re-parses as pattern "a" with owner "b" — a DIFFERENT valid
+	// rule, silently violating both invariants (found in review). CODEOWNERS
+	// spells such patterns with escaped spaces; require the same here.
+	esc := false
+	for i := 0; i < len(scope); i++ {
+		switch {
+		case esc:
+			esc = false
+		case scope[i] == '\\':
+			esc = true
+		case scope[i] == ' ' || scope[i] == '\t':
+			return fmt.Errorf("scope %q contains unescaped whitespace; write spaces as '\\ ' (as CODEOWNERS itself requires)", scope)
+		}
+	}
 	if _, err := pattern.Compile(scope); err != nil {
 		return fmt.Errorf("invalid scope %q: %v", scope, err)
 	}

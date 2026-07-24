@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/jordonpropm/codeowners-tool/internal/file"
 	"github.com/jordonpropm/codeowners-tool/internal/plan"
@@ -25,9 +26,19 @@ func (e *ValidationError) Error() string { return e.Msg }
 
 // Apply writes a plan's after-content to filePath. Refuses if the file
 // drifted from the plan's pinned hash, re-checks the size cap, validates the
-// result, and rolls back on any new syntax error.
+// content BEFORE writing, and writes atomically (temp file + rename in the
+// same directory), so no failure mode leaves a truncated or half-written
+// CODEOWNERS file — a partial write would silently change ownership (found
+// in review: the previous in-place write could truncate on a full disk).
+// Symlinks are resolved first so the link itself is preserved and its target
+// is replaced.
 func Apply(p *plan.Plan, filePath string) error {
-	current, err := os.ReadFile(filePath)
+	target := filePath
+	if resolved, err := filepath.EvalSymlinks(filePath); err == nil {
+		target = resolved
+	}
+
+	current, err := os.ReadFile(target)
 	if err != nil {
 		return &plan.InvalidError{Msg: fmt.Sprintf("read %s: %v", filePath, err)}
 	}
@@ -50,29 +61,64 @@ func Apply(p *plan.Plan, filePath string) error {
 		}
 	}
 
-	info, err := os.Stat(filePath)
+	info, err := os.Stat(target)
 	if err != nil {
-		return err
-	}
-	if err := os.WriteFile(filePath, []byte(p.AfterContent), info.Mode()); err != nil {
-		return err
+		return &plan.InvalidError{Msg: err.Error()}
 	}
 
-	// Post-write verification: read back and re-validate; roll back on any
-	// discrepancy (torn write, filesystem surprise).
-	written, err := os.ReadFile(filePath)
+	// Atomic write: temp file in the same directory, then rename. Any
+	// failure before the rename leaves the original untouched.
+	tmp, err := os.CreateTemp(filepath.Dir(target), ".codeowners-tool-*")
+	if err != nil {
+		return fmt.Errorf("create temp file: %w", err)
+	}
+	tmpName := tmp.Name()
+	cleanup := func() { _ = os.Remove(tmpName) }
+	if _, err := tmp.Write([]byte(p.AfterContent)); err != nil {
+		tmp.Close()
+		cleanup()
+		return fmt.Errorf("write temp file (original untouched): %w", err)
+	}
+	if err := tmp.Chmod(info.Mode()); err != nil {
+		tmp.Close()
+		cleanup()
+		return fmt.Errorf("chmod temp file (original untouched): %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		cleanup()
+		return fmt.Errorf("close temp file (original untouched): %w", err)
+	}
+	if err := os.Rename(tmpName, target); err != nil {
+		cleanup()
+		return fmt.Errorf("rename into place (original untouched): %w", err)
+	}
+
+	// Post-rename verification: read back and re-validate; restore on any
+	// discrepancy, and SURFACE a failed restore rather than claiming
+	// success (found in review).
+	written, err := os.ReadFile(target)
 	if err != nil || !bytes.Equal(written, []byte(p.AfterContent)) {
-		_ = os.WriteFile(filePath, current, info.Mode())
-		return &ValidationError{Msg: "post-write readback mismatch; rolled back (R-10)"}
+		return rollback(target, current, info.Mode(),
+			&ValidationError{Msg: "post-write readback mismatch (R-10)"})
 	}
 	if newErrs := newSyntaxErrors(current, written); len(newErrs) > 0 {
-		_ = os.WriteFile(filePath, current, info.Mode())
-		return &ValidationError{
-			Msg:    fmt.Sprintf("written file has %d new syntax error(s); rolled back (R-10)", len(newErrs)),
+		return rollback(target, current, info.Mode(), &ValidationError{
+			Msg:    fmt.Sprintf("written file has %d new syntax error(s) (R-10)", len(newErrs)),
 			Errors: newErrs,
-		}
+		})
 	}
 	return nil
+}
+
+// rollback restores the original bytes. If the restore itself fails, the
+// returned error says so explicitly instead of claiming a clean rollback.
+func rollback(target string, original []byte, mode os.FileMode, cause *ValidationError) error {
+	if err := os.WriteFile(target, original, mode); err != nil {
+		cause.Msg = fmt.Sprintf("%s — AND ROLLBACK FAILED (%v): %s may be in a bad state, restore it manually", cause.Msg, err, target)
+		return cause
+	}
+	cause.Msg += "; rolled back"
+	return cause
 }
 
 // newSyntaxErrors returns syntax errors present in after but not in before,

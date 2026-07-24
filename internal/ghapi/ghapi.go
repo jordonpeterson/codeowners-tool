@@ -16,6 +16,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -107,6 +108,12 @@ type Client struct {
 	Token   string
 	HTTP    *http.Client
 	cache   Cache
+	// scope prefixes every cache key with a fingerprint of (BaseURL, token)
+	// so a cache directory shared across hosts or tokens can never serve one
+	// context's "definitive" answers to another — a probe cached from a
+	// privileged token would otherwise let an unprivileged token treat 404s
+	// as true negatives (found in review).
+	scope string
 }
 
 // New builds a client. baseURL "" means https://api.github.com.
@@ -117,8 +124,27 @@ func New(baseURL, token string, cache Cache) *Client {
 	if cache == nil {
 		cache = NewMemCache()
 	}
-	return &Client{BaseURL: baseURL, Token: token, HTTP: &http.Client{Timeout: 30 * time.Second}, cache: cache}
+	fp := sha256.Sum256([]byte(baseURL + "\x00" + token))
+	return &Client{
+		BaseURL: baseURL,
+		Token:   token,
+		HTTP: &http.Client{
+			Timeout: 30 * time.Second,
+			// Never follow redirects: GitHub uses 302 on the org-membership
+			// endpoint to mean "requester cannot see this membership", and
+			// following it to /public_members turns a concealed member into a
+			// definitive-looking 404 (found in review). All 3xx are
+			// classified inconclusive in get().
+			CheckRedirect: func(req *http.Request, via []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+		},
+		cache: cache,
+		scope: hex.EncodeToString(fp[:8]),
+	}
 }
+
+func (c *Client) key(k string) string { return c.scope + ":" + k }
 
 // get performs a GET, classifying failures per R-12. Definitive statuses are
 // 2xx and 404; everything else is inconclusive.
@@ -138,20 +164,20 @@ func (c *Client) get(path, accept string) (int, []byte, error) {
 		return 0, nil, &Inconclusive{Reason: "network: " + err.Error()}
 	}
 	defer resp.Body.Close()
-	body := make([]byte, 0, 1024)
-	buf := make([]byte, 4096)
-	for {
-		n, rerr := resp.Body.Read(buf)
-		body = append(body, buf[:n]...)
-		if rerr != nil {
-			break
-		}
+	body, rerr := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	if rerr != nil {
+		return 0, nil, &Inconclusive{Reason: "truncated response body on " + path + ": " + rerr.Error()}
 	}
 	switch {
 	case resp.StatusCode >= 200 && resp.StatusCode < 300:
 		return resp.StatusCode, body, nil
 	case resp.StatusCode == 404:
 		return 404, body, nil
+	case resp.StatusCode >= 300 && resp.StatusCode < 400:
+		// Redirects are semantic on some endpoints (302 on org membership =
+		// "requester cannot see this") and never a definitive negative.
+		return resp.StatusCode, nil, &Inconclusive{Reason: fmt.Sprintf(
+			"HTTP %d redirect on %s — the token cannot answer this definitively (e.g. concealed org membership)", resp.StatusCode, path)}
 	case resp.StatusCode == 403 && resp.Header.Get("X-RateLimit-Remaining") == "0",
 		resp.StatusCode == 429:
 		return resp.StatusCode, nil, &Inconclusive{Reason: fmt.Sprintf("rate limited on %s", path)}
@@ -165,7 +191,7 @@ func (c *Client) get(path, accept string) (int, []byte, error) {
 // cachedBool wraps a definitive boolean lookup with caching. Inconclusive
 // results are never cached (R-12).
 func (c *Client) cachedBool(key string, fetch func() (bool, error)) (bool, error) {
-	if v, ok := c.cache.Get(key); ok {
+	if v, ok := c.cache.Get(c.key(key)); ok {
 		return string(v) == "1", nil
 	}
 	val, err := fetch()
@@ -176,14 +202,14 @@ func (c *Client) cachedBool(key string, fetch func() (bool, error)) (bool, error
 	if val {
 		b = []byte("1")
 	}
-	c.cache.Set(key, b)
+	c.cache.Set(c.key(key), b)
 	return val, nil
 }
 
 // ProbeOrg proves the token can enumerate the org's teams and members. Until
 // this succeeds, org-scoped 404s must not be treated as negatives (R-12).
 func (c *Client) ProbeOrg(org string) error {
-	if _, ok := c.cache.Get("probe:" + org); ok {
+	if _, ok := c.cache.Get(c.key("probe:" + org)); ok {
 		return nil
 	}
 	for _, p := range []string{"/orgs/" + org + "/teams?per_page=1", "/orgs/" + org + "/members?per_page=1"} {
@@ -195,14 +221,14 @@ func (c *Client) ProbeOrg(org string) error {
 			return &Inconclusive{Reason: fmt.Sprintf("org %q not visible to this token (404 on %s)", org, p)}
 		}
 	}
-	c.cache.Set("probe:"+org, []byte("1"))
+	c.cache.Set(c.key("probe:"+org), []byte("1"))
 	return nil
 }
 
 // ProbeRepo proves the token can read the repo; precondition for treating
 // collaborator-permission 404s as negatives.
 func (c *Client) ProbeRepo(owner, repo string) error {
-	if _, ok := c.cache.Get("probe-repo:" + owner + "/" + repo); ok {
+	if _, ok := c.cache.Get(c.key("probe-repo:" + owner + "/" + repo)); ok {
 		return nil
 	}
 	status, _, err := c.get("/repos/"+owner+"/"+repo, "")
@@ -212,7 +238,7 @@ func (c *Client) ProbeRepo(owner, repo string) error {
 	if status == 404 {
 		return &Inconclusive{Reason: fmt.Sprintf("repo %s/%s not visible to this token", owner, repo)}
 	}
-	c.cache.Set("probe-repo:"+owner+"/"+repo, []byte("1"))
+	c.cache.Set(c.key("probe-repo:"+owner+"/"+repo), []byte("1"))
 	return nil
 }
 

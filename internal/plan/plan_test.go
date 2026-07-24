@@ -413,3 +413,68 @@ func TestR16_PlanIsMachineReadable(t *testing.T) {
 		t.Error("plan must pin the input file hash for apply-time drift detection")
 	}
 }
+
+// The gate proves invariants on the RE-PARSED serialized bytes, not the
+// in-memory model (review finding: a scope with unescaped whitespace modeled
+// as one rule serializes to a line that re-parses as a DIFFERENT valid rule,
+// which the in-memory gate could not see). Ops built via Parse are already
+// rejected; a hand-constructed Op must be caught by the gate itself.
+func TestGate_ProvesSerializedBytesNotModel(t *testing.T) {
+	tree := []string{"docs x@y.zz/f.go", "docs/free.txt", "README"}
+	op := ops.Op{Kind: ops.AddOwner, Scope: "docs\\ x@y.zz", Owner: "@a",
+		Raw: `add_owner(docs\ x@y.zz, @a)`}
+	// Escaped form: works end-to-end and survives re-parse.
+	p, err := plan.Build([]byte("README @keep\n"), tree, []ops.Op{op}, plan.Options{})
+	if err != nil {
+		t.Fatalf("escaped-space scope must plan cleanly: %v", err)
+	}
+	after := plan.ResolveContent(p.AfterContent, tree)
+	if got := after["docs x@y.zz/f.go"].Owners; len(got) != 1 || got[0] != "@a" {
+		t.Errorf("in-scope path = %v, want [@a]", got)
+	}
+	if after["docs/free.txt"].Matched {
+		t.Error("out-of-scope path must stay unmatched (INV-2)")
+	}
+	// Raw unescaped form (bypassing ops.Parse): the serialization-aware gate
+	// must refuse — never emit a plan whose bytes mean something else.
+	bad := ops.Op{Kind: ops.AddOwner, Scope: "docs x@y.zz", Owner: "@a",
+		Raw: "add_owner(docs x@y.zz, @a)"}
+	_, err = plan.Build([]byte("README @keep\n"), tree, []ops.Op{bad}, plan.Options{})
+	var ref *plan.RefusalError
+	if !errors.As(err, &ref) {
+		t.Fatalf("non-round-tripping scope must be refused by the gate, got %v", err)
+	}
+}
+
+// Review finding: under --on-empty=inherit, a single remove_owner may delete
+// a narrow rule AND amend its broader fallthrough rule in the same pass. The
+// per-pass desired snapshot went stale and refused a perfectly expressible
+// op. Must now succeed with both edits.
+func TestR6_InheritDeleteThenAmendFallthroughSamePass(t *testing.T) {
+	tree := []string{"a/f.go", "a/b/g.go"}
+	p, err := build(t, "/a/ @x @y\n/a/b/ @x\n", tree, plan.Options{OnEmpty: "inherit"},
+		"remove_owner(/a/, @x)")
+	if err != nil {
+		t.Fatalf("expressible inherit removal must not be refused: %v", err)
+	}
+	after := plan.ResolveContent(p.AfterContent, tree)
+	for _, path := range tree {
+		if got := after[path].Owners; !reflect.DeepEqual(got, []string{"@y"}) {
+			t.Errorf("%s = %v, want {@y}", path, got)
+		}
+	}
+}
+
+// Review finding: simulate() cannot model inherit (inheritance resurrects
+// owners from rules the owner-set transform cannot see), so an overlapping
+// batch containing remove_owner under --on-empty=inherit was accepted while
+// being order-dependent. R-8 now rejects it outright.
+func TestR8_InheritOverlapRejected(t *testing.T) {
+	tree := []string{"a/b/f.go", "a/g.go", "top.txt"}
+	_, err := build(t, "* @root\n/a/ @x\n", tree, plan.Options{OnEmpty: "inherit"},
+		"add_owner(/a/b/, @z)", "remove_owner(/a/, @x)")
+	var inv *plan.InvalidError
+	if !errors.As(err, &inv) {
+		t.Fatalf("overlapping batch under inherit must be invalid input (R-8), got %v", err)
+	}
+}
