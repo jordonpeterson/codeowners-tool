@@ -1,0 +1,428 @@
+// Package audit is Engine B: read-only rot detection over a CODEOWNERS file.
+//
+// It never writes (R-0). Its output is findings plus, where a fix is
+// expressible, Engine A operation strings a human reviews and feeds through
+// plan/apply — the system's single writer path.
+//
+// API-dependent checks (A-1..A-3) fail closed (R-12): an inconclusive lookup
+// produces status "unknown", a non-empty Report.Inconclusive (exit 5), and
+// never a removal proposal.
+package audit
+
+import (
+	"errors"
+	"fmt"
+	"sort"
+	"strings"
+
+	"github.com/jordonpropm/codeowners-tool/internal/file"
+	"github.com/jordonpropm/codeowners-tool/internal/ghapi"
+	"github.com/jordonpropm/codeowners-tool/internal/pattern"
+	"github.com/jordonpropm/codeowners-tool/internal/plan"
+	"github.com/jordonpropm/codeowners-tool/internal/resolve"
+)
+
+// Finding is one audit result.
+type Finding struct {
+	Check            string     `json:"check"`
+	Severity         string     `json:"severity"` // error | warning | info
+	Line             int        `json:"line,omitempty"`
+	Pattern          string     `json:"pattern,omitempty"`
+	Owner            string     `json:"owner,omitempty"`
+	Status           string     `json:"status,omitempty"` // dead | not-in-org | no-write-access | unknown | unverifiable
+	Message          string     `json:"message"`
+	SuggestedPattern string     `json:"suggested_pattern,omitempty"` // A-5
+	FixOps           []string   `json:"fix_ops,omitempty"`           // Engine A ops (R-0)
+	Reassignment     []plan.Row `json:"reassignment,omitempty"`      // R-14
+}
+
+// Report is the audit output.
+type Report struct {
+	Findings     []Finding `json:"findings"`
+	Inconclusive []string  `json:"inconclusive,omitempty"` // non-empty → exit 5 (R-12)
+}
+
+// Input configures a run.
+type Input struct {
+	Content        []byte
+	Tree           []string
+	CodeownersPath string          // for A-11
+	AllPresent     []string        // all CODEOWNERS files in the tree (A-10)
+	Checks         map[string]bool // nil = all
+	WarnSize       int             // default 2,500,000
+
+	// API-dependent checks run only when Client is set.
+	Client              *ghapi.Client
+	RepoOwner, RepoName string
+}
+
+func (in *Input) enabled(check string) bool {
+	return in.Checks == nil || in.Checks[check]
+}
+
+// Run executes the audit.
+func Run(in Input) *Report {
+	if in.WarnSize == 0 {
+		in.WarnSize = 2_500_000
+	}
+	rep := &Report{}
+	f := file.Parse(in.Content)
+	rules := f.Rules()
+	res := resolve.All(f, in.Tree)
+	winners := map[int][]string{}
+	for p, r := range res {
+		if r.Matched {
+			winners[r.LineIndex] = append(winners[r.LineIndex], p)
+		}
+	}
+
+	// A-8: syntax errors (each invalid line is skipped by GitHub, not the
+	// whole file — but every one is a rule someone thinks exists).
+	if in.enabled("A-8") {
+		for _, ln := range f.InvalidLines() {
+			rep.add(Finding{Check: "A-8", Severity: "error", Line: ln.Err.Line,
+				Message: fmt.Sprintf("%s: %s (GitHub skips this line: %q)", ln.Err.Kind, ln.Err.Message, ln.Err.Source)})
+		}
+	}
+
+	// Per-rule pattern checks: A-4 (dead), A-5 (case), A-6 (shadowed).
+	for _, r := range rules {
+		matches := 0
+		for _, p := range in.Tree {
+			if r.Pattern.Match(p) {
+				matches++
+			}
+		}
+		if matches == 0 {
+			if sugg := caseCorrected(r, in.Tree); sugg != "" {
+				if in.enabled("A-5") {
+					rep.add(Finding{Check: "A-5", Severity: "warning", Line: r.LineIndex + 1, Pattern: r.PatternText,
+						SuggestedPattern: sugg,
+						Message:          fmt.Sprintf("pattern %q matches zero files ONLY because of case — CODEOWNERS is case-sensitive (S-6); %q would match", r.PatternText, sugg)})
+				}
+			} else if in.enabled("A-4") {
+				// R-11: report-only, permanently. A dead pattern may be
+				// deliberate and forward-looking; deleting it destroys intent.
+				rep.add(Finding{Check: "A-4", Severity: "warning", Line: r.LineIndex + 1, Pattern: r.PatternText,
+					Message: fmt.Sprintf("pattern %q matches zero tracked files (report-only: may be deliberate, R-11)", r.PatternText)})
+			}
+			continue
+		}
+		if in.enabled("A-6") && len(winners[r.LineIndex]) == 0 {
+			shadowers := map[int]bool{}
+			for _, p := range in.Tree {
+				if r.Pattern.Match(p) {
+					shadowers[res[p].LineIndex] = true
+				}
+			}
+			var lines []string
+			for l := range shadowers {
+				lines = append(lines, fmt.Sprintf("line %d", l+1))
+			}
+			sort.Strings(lines)
+			rep.add(Finding{Check: "A-6", Severity: "warning", Line: r.LineIndex + 1, Pattern: r.PatternText,
+				Message: fmt.Sprintf("rule %q is fully shadowed by %s and can never take effect (S-1)", r.PatternText, strings.Join(lines, ", "))})
+		}
+	}
+
+	// A-7: duplicate patterns.
+	if in.enabled("A-7") {
+		byPattern := map[string][]int{}
+		for _, r := range rules {
+			byPattern[r.PatternText] = append(byPattern[r.PatternText], r.LineIndex+1)
+		}
+		var pats []string
+		for pat, lines := range byPattern {
+			if len(lines) > 1 {
+				pats = append(pats, pat)
+			}
+		}
+		sort.Strings(pats)
+		for _, pat := range pats {
+			lines := byPattern[pat]
+			rep.add(Finding{Check: "A-7", Severity: "warning", Pattern: pat,
+				Message: fmt.Sprintf("pattern %q appears on lines %v; only the last takes effect (S-1)", pat, lines)})
+		}
+	}
+
+	// A-9: unowned coverage.
+	if in.enabled("A-9") {
+		var unowned []string
+		for _, p := range in.Tree {
+			if !res[p].Matched {
+				unowned = append(unowned, p)
+			}
+		}
+		if len(unowned) > 0 {
+			sort.Strings(unowned)
+			sample := unowned
+			if len(sample) > 10 {
+				sample = sample[:10]
+			}
+			rep.add(Finding{Check: "A-9", Severity: "info",
+				Message: fmt.Sprintf("%d of %d tracked paths (%.0f%%) have no owner; e.g. %s",
+					len(unowned), len(in.Tree), 100*float64(len(unowned))/float64(len(in.Tree)), strings.Join(sample, ", "))})
+		}
+	}
+
+	// A-10: multiple CODEOWNERS files (S-8: first found wins, never merged).
+	if in.enabled("A-10") && len(in.AllPresent) > 1 {
+		rep.add(Finding{Check: "A-10", Severity: "error",
+			Message: fmt.Sprintf("multiple CODEOWNERS files present (%s); GitHub uses only %q and silently ignores the rest (S-8)",
+				strings.Join(in.AllPresent, ", "), in.AllPresent[0])})
+	}
+
+	// A-11: the CODEOWNERS file itself is unowned.
+	if in.enabled("A-11") && in.CodeownersPath != "" {
+		if r, ok := res[in.CodeownersPath]; !ok || !r.Matched {
+			rep.add(Finding{Check: "A-11", Severity: "warning",
+				Message: fmt.Sprintf("%s itself has no owner — anyone with write access can change ownership rules unreviewed", in.CodeownersPath)})
+		}
+	}
+
+	// A-12: size approaching the 3 MB cliff (S-4).
+	if in.enabled("A-12") {
+		size := len(in.Content)
+		switch {
+		case size > 3_000_000:
+			rep.add(Finding{Check: "A-12", Severity: "error",
+				Message: fmt.Sprintf("file is %d bytes — OVER 3 MB: GitHub is not loading it at all; ownership is silently off (S-4)", size)})
+		case size >= in.WarnSize:
+			rep.add(Finding{Check: "A-12", Severity: "warning",
+				Message: fmt.Sprintf("file is %d bytes, approaching the 3 MB limit at which GitHub silently stops loading it (S-4)", size)})
+		}
+	}
+
+	// A-1/A-2/A-3: owner liveness and access — API required, fail closed.
+	if in.Client != nil && (in.enabled("A-1") || in.enabled("A-2") || in.enabled("A-3")) {
+		auditOwners(&in, rep, f, rules, winners)
+	}
+	return rep
+}
+
+func (r *Report) add(f Finding) { r.Findings = append(r.Findings, f) }
+
+func (r *Report) inconclusive(reason string) {
+	for _, x := range r.Inconclusive {
+		if x == reason {
+			return
+		}
+	}
+	r.Inconclusive = append(r.Inconclusive, reason)
+}
+
+type ownerSites struct {
+	owner string
+	rules []*file.Rule
+}
+
+func auditOwners(in *Input, rep *Report, f *file.File, rules []*file.Rule, winners map[int][]string) {
+	sites := map[string]*ownerSites{}
+	var order []string
+	for _, r := range rules {
+		for _, o := range r.Owners {
+			if sites[o] == nil {
+				sites[o] = &ownerSites{owner: o}
+				order = append(order, o)
+			}
+			sites[o].rules = append(sites[o].rules, r)
+		}
+	}
+
+	for _, o := range order {
+		s := sites[o]
+
+		// R-13: email owners resolve via verified email; the API cannot
+		// validate them reliably. Unverifiable, never dead.
+		if file.IsEmailOwner(o) {
+			rep.add(Finding{Check: "A-1", Severity: "info", Owner: o, Status: "unverifiable",
+				Message: fmt.Sprintf("%s is an email owner; existence and access cannot be verified via the API (R-13) — verify manually", o)})
+			continue
+		}
+
+		if org, slug, isTeam := splitTeam(o); isTeam {
+			auditTeam(in, rep, s, org, slug, rules, winners)
+		} else {
+			auditUser(in, rep, s, strings.TrimPrefix(o, "@"), rules, winners)
+		}
+	}
+}
+
+func auditUser(in *Input, rep *Report, s *ownerSites, login string, rules []*file.Rule, winners map[int][]string) {
+	unknown := func(reason string) {
+		rep.inconclusive(reason)
+		rep.add(Finding{Check: "A-1", Severity: "warning", Owner: s.owner, Status: "unknown",
+			Message: fmt.Sprintf("%s could not be verified (%s) — no removal proposed (R-12)", s.owner, reason)})
+	}
+
+	if in.enabled("A-1") {
+		exists, err := in.Client.UserExists(login)
+		if err != nil {
+			unknown(errReason(err))
+			return
+		}
+		if !exists {
+			fixes, rows := proposeRemoval(s, rules, winners)
+			rep.add(Finding{Check: "A-1", Severity: "error", Owner: s.owner, Status: "dead",
+				Message:      fmt.Sprintf("user %s does not exist (deleted or renamed); review requests to it silently do nothing", s.owner),
+				FixOps:       fixes,
+				Reassignment: rows})
+			return
+		}
+	}
+
+	org := in.RepoOwner
+	if in.enabled("A-2") && org != "" {
+		if err := in.Client.ProbeOrg(org); err != nil {
+			unknown(errReason(err))
+			return
+		}
+		member, err := in.Client.UserIsOrgMember(org, login)
+		if err != nil {
+			unknown(errReason(err))
+			return
+		}
+		if !member {
+			fixes, rows := proposeRemoval(s, rules, winners)
+			rep.add(Finding{Check: "A-2", Severity: "warning", Owner: s.owner, Status: "not-in-org",
+				Message:      fmt.Sprintf("%s exists but is not a member of %s (note: outside collaborators can still hold write access — A-3 is authoritative)", s.owner, org),
+				FixOps:       fixes,
+				Reassignment: rows})
+		}
+	}
+
+	if in.enabled("A-3") && in.RepoOwner != "" && in.RepoName != "" {
+		if err := in.Client.ProbeRepo(in.RepoOwner, in.RepoName); err != nil {
+			unknown(errReason(err))
+			return
+		}
+		hasWrite, err := in.Client.UserHasWrite(in.RepoOwner, in.RepoName, login)
+		if err != nil {
+			unknown(errReason(err))
+			return
+		}
+		if !hasWrite {
+			fixes, rows := proposeRemoval(s, rules, winners)
+			rep.add(Finding{Check: "A-3", Severity: "error", Owner: s.owner, Status: "no-write-access",
+				Message:      fmt.Sprintf("%s lacks explicit write access to %s/%s — it will NEVER receive a review request (S-5)", s.owner, in.RepoOwner, in.RepoName),
+				FixOps:       fixes,
+				Reassignment: rows})
+		}
+	}
+}
+
+func auditTeam(in *Input, rep *Report, s *ownerSites, org, slug string, rules []*file.Rule, winners map[int][]string) {
+	unknown := func(reason string) {
+		rep.inconclusive(reason)
+		rep.add(Finding{Check: "A-1", Severity: "warning", Owner: s.owner, Status: "unknown",
+			Message: fmt.Sprintf("%s could not be verified (%s) — no removal proposed (R-12)", s.owner, reason)})
+	}
+
+	// A team 404 is only meaningful after proving we can enumerate the org.
+	if err := in.Client.ProbeOrg(org); err != nil {
+		unknown(errReason(err))
+		return
+	}
+
+	if in.enabled("A-1") {
+		exists, err := in.Client.TeamExists(org, slug)
+		if err != nil {
+			unknown(errReason(err))
+			return
+		}
+		if !exists {
+			fixes, rows := proposeRemoval(s, rules, winners)
+			rep.add(Finding{Check: "A-1", Severity: "error", Owner: s.owner, Status: "dead",
+				Message:      fmt.Sprintf("team %s does not exist (deleted or renamed)", s.owner),
+				FixOps:       fixes,
+				Reassignment: rows})
+			return
+		}
+	}
+
+	if in.enabled("A-3") && in.RepoOwner != "" && in.RepoName != "" {
+		hasWrite, err := in.Client.TeamHasWrite(org, slug, in.RepoOwner, in.RepoName)
+		if err != nil {
+			unknown(errReason(err))
+			return
+		}
+		if !hasWrite {
+			fixes, rows := proposeRemoval(s, rules, winners)
+			rep.add(Finding{Check: "A-3", Severity: "error", Owner: s.owner, Status: "no-write-access",
+				Message:      fmt.Sprintf("team %s lacks explicit write access to %s/%s — it will NEVER receive a review request (S-5)", s.owner, in.RepoOwner, in.RepoName),
+				FixOps:       fixes,
+				Reassignment: rows})
+		}
+	}
+}
+
+// proposeRemoval builds the Engine A ops that would remove the owner, plus —
+// where the owner is a rule's SOLE owner — the reassignment preview (R-14):
+// affected paths with before → after owner sets, never a bare line deletion.
+func proposeRemoval(s *ownerSites, allRules []*file.Rule, winners map[int][]string) ([]string, []plan.Row) {
+	var fixes []string
+	var rows []plan.Row
+	for _, r := range s.rules {
+		fixes = append(fixes, fmt.Sprintf("remove_owner(%s, %s)", r.PatternText, s.owner))
+		if len(r.Owners) != 1 {
+			continue
+		}
+		// Sole owner: show what each affected path falls through to.
+		var without []*file.Rule
+		for _, x := range allRules {
+			if x.LineIndex != r.LineIndex {
+				without = append(without, x)
+			}
+		}
+		affected := append([]string(nil), winners[r.LineIndex]...)
+		sort.Strings(affected)
+		for _, p := range affected {
+			after := resolve.One(without, p)
+			rows = append(rows, plan.Row{Path: p, Before: []string{s.owner}, After: after.Owners})
+		}
+	}
+	return fixes, rows
+}
+
+// caseCorrected returns a corrected pattern if the rule matches zero files
+// case-sensitively but would match with case folded (A-5 / S-6), else "".
+func caseCorrected(r *file.Rule, tree []string) string {
+	lowered := strings.ToLower(r.PatternText)
+	if lowered == r.PatternText {
+		return ""
+	}
+	p, err := pattern.Compile(lowered)
+	if err != nil {
+		return ""
+	}
+	// The suggestion must actually match real tree paths case-sensitively.
+	for _, path := range tree {
+		if p.Match(path) {
+			return lowered
+		}
+	}
+	// Fall back: detect the case-only miss even when the real casing isn't
+	// simply lowercase.
+	for _, path := range tree {
+		if p.Match(strings.ToLower(path)) {
+			return lowered
+		}
+	}
+	return ""
+}
+
+func splitTeam(owner string) (org, slug string, ok bool) {
+	if !strings.HasPrefix(owner, "@") || !strings.Contains(owner, "/") {
+		return "", "", false
+	}
+	parts := strings.SplitN(strings.TrimPrefix(owner, "@"), "/", 2)
+	return parts[0], parts[1], true
+}
+
+func errReason(err error) string {
+	var inc *ghapi.Inconclusive
+	if errors.As(err, &inc) {
+		return inc.Reason
+	}
+	return err.Error()
+}
