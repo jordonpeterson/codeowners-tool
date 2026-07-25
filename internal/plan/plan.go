@@ -384,6 +384,27 @@ func synthAdd(f *file.File, tree []string, op ops.Op, scope map[string]bool, des
 
 func synthSet(f *file.File, tree []string, op ops.Op, scope map[string]bool, desired map[string][]string, pl *Plan) error {
 	warnShadowedDuplicates(f, tree, scope, pl)
+
+	// Semantic no-op: if every in-scope path ALREADY resolves to exactly the
+	// requested owner set, edit nothing — an intent-level tool must not
+	// insert redundant rules just because no byte-identical rule exists
+	// (second-review finding: this previously exited 0 with a pointless
+	// insert instead of 1).
+	cur := resolve.All(f, tree)
+	satisfied := true
+	for p := range scope {
+		if !resolve.OwnersEqual(cur[p].Owners, op.Owners) {
+			satisfied = false
+			break
+		}
+	}
+	if satisfied {
+		for p := range scope {
+			desired[p] = append([]string{}, op.Owners...)
+		}
+		return nil
+	}
+
 	rules := f.Rules()
 
 	// Rules whose MATCH SET (not winner set) intersects scope — R-3 is about
@@ -476,6 +497,17 @@ func synthRemove(f *file.File, tree []string, op ops.Op, scope map[string]bool, 
 		if contains(got, op.Owner) {
 			return &RefusalError{Msg: fmt.Sprintf(
 				"refusing: %s would still own %q after remove_owner(%s, %s)", op.Owner, p, op.Scope, op.Owner)}
+		}
+		// Divergence from the pure transform is legitimate ONLY under
+		// inherit, where deleting a rule resurrects owners from surviving
+		// rules. Under every other policy no rule is deleted, so divergence
+		// means a synthesis bug (or a bad earlier batched edit) — accepting
+		// it here would launder the error past the gate (second-review
+		// finding: this exact acceptance weakened the gate). Refuse instead.
+		if onEmpty != "inherit" {
+			return &RefusalError{Msg: fmt.Sprintf(
+				"refusing: remove_owner(%s, %s) produced %s for %q where the operation's semantics require %s",
+				op.Scope, op.Owner, fmtOwners(got), p, fmtOwners(want))}
 		}
 		desired[p] = got // inherit fallthrough: owners come from surviving rules
 	}

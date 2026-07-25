@@ -41,6 +41,7 @@ func TestUserExists(t *testing.T) {
 	s := server(t, map[string]func(http.ResponseWriter, *http.Request){
 		"/users/alive": ok(`{"login":"alive"}`),
 		"/users/dead":  status(404),
+		"/user":        ok(`{"login":"me"}`),
 	})
 	c := ghapi.New(s.URL, "tok", ghapi.NewMemCache())
 	if got, err := c.UserExists("alive"); err != nil || !got {
@@ -201,9 +202,11 @@ func TestR15_CacheScopedByHostAndToken(t *testing.T) {
 	shared := ghapi.NewMemCache()
 	sA := server(t, map[string]func(http.ResponseWriter, *http.Request){
 		"/users/alice": ok(`{"login":"alice"}`),
+		"/user":        ok(`{"login":"me"}`),
 	})
 	sB := server(t, map[string]func(http.ResponseWriter, *http.Request){
 		"/users/alice": status(404),
+		"/user":        ok(`{"login":"me"}`),
 	})
 	a := ghapi.New(sA.URL, "tokA", shared)
 	b := ghapi.New(sB.URL, "tokB", shared)
@@ -213,5 +216,19 @@ func TestR15_CacheScopedByHostAndToken(t *testing.T) {
 	got, err := b.UserExists("alice")
 	if err != nil || got {
 		t.Fatalf("host B must get ITS OWN answer (false), not host A's cached true: got=%v err=%v", got, err)
+	}
+}
+
+// Second-review finding: a mistyped API base URL (e.g. GHES without /api/v3)
+// 404s on EVERY endpoint. Without a positive-control probe, every user owner
+// would be marked dead with removal ops — the mass false-negative R-12
+// exists to prevent. A user 404 is definitive only after GET /user succeeds.
+func TestR12_WrongBaseURLNeverDefinitive(t *testing.T) {
+	s := server(t, map[string]func(http.ResponseWriter, *http.Request){}) // everything 404s
+	c := ghapi.New(s.URL, "tok", ghapi.NewMemCache())
+	_, err := c.UserExists("anyone")
+	var inc *ghapi.Inconclusive
+	if !errors.As(err, &inc) {
+		t.Fatalf("user 404 without a working /user probe must be Inconclusive, got %v", err)
 	}
 }

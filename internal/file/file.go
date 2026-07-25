@@ -236,13 +236,13 @@ func (f *File) Bytes() []byte {
 func renderRule(r *Rule) string {
 	prefix := r.prefix
 	if len(r.Owners) == 0 {
-		s := strings.TrimRight(prefix, " \t")
+		s := trimTrailingUnescapedWS(prefix)
 		if r.suffix != "" {
 			s += " " + strings.TrimLeft(r.suffix, " \t")
 		}
 		return s
 	}
-	if !strings.HasSuffix(prefix, " ") && !strings.HasSuffix(prefix, "\t") {
+	if !endsWithUnescapedWS(prefix) {
 		prefix += " "
 	}
 	s := prefix + strings.Join(r.Owners, " ")
@@ -251,6 +251,31 @@ func renderRule(r *Rule) string {
 			s += " "
 		}
 		s += r.suffix
+	}
+	return s
+}
+
+// Escape-aware whitespace handling: a pattern may legally end in an ESCAPED
+// space (`a\ ` — a path ending in a space). Naive TrimRight/HasSuffix mangled
+// such patterns into ones matching a different path (second-review finding).
+func endsWithUnescapedWS(s string) bool {
+	if s == "" {
+		return false
+	}
+	last := s[len(s)-1]
+	if last != ' ' && last != '\t' {
+		return false
+	}
+	bs := 0
+	for i := len(s) - 2; i >= 0 && s[i] == '\\'; i-- {
+		bs++
+	}
+	return bs%2 == 0
+}
+
+func trimTrailingUnescapedWS(s string) string {
+	for endsWithUnescapedWS(s) {
+		s = s[:len(s)-1]
 	}
 	return s
 }

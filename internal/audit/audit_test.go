@@ -212,6 +212,7 @@ func TestT11_DeadOwnerRemovalShowsReassignment(t *testing.T) {
 	client := apiServer(t, map[string]func(http.ResponseWriter, *http.Request){
 		"/users/default-owner": ok(`{"login":"default-owner"}`),
 		"/users/dead-owner":    status(404),
+		"/user":                ok(`{"login":"me"}`),
 	})
 	rep := audit.Run(audit.Input{
 		Content:   []byte("* @default-owner\n/x/ @dead-owner\n"),
@@ -300,6 +301,7 @@ func TestR0_FixOpsAreValidEngineAOps(t *testing.T) {
 	client := apiServer(t, map[string]func(http.ResponseWriter, *http.Request){
 		"/users/gone": status(404),
 		"/users/keep": ok(`{"login":"keep"}`),
+		"/user":       ok(`{"login":"me"}`),
 	})
 	rep := audit.Run(audit.Input{
 		Content:   []byte("* @keep\n/a/ @gone\n/b/ @gone\n"),
@@ -347,5 +349,29 @@ func TestT9_A5NoFalseSuggestionForNonLowercaseTree(t *testing.T) {
 	}
 	if len(findingsFor(rep, "A-4")) != 0 {
 		t.Error("case-only miss must not double-report as A-4")
+	}
+}
+
+// Second-review finding: when only A-3 is requested, a team probe failure
+// must be attributed to A-3, not hardcoded to A-1.
+func TestR12_TeamProbeAttribution(t *testing.T) {
+	client := apiServer(t, map[string]func(http.ResponseWriter, *http.Request){
+		"/orgs/org/teams":   status(403),
+		"/orgs/org/members": status(403),
+	})
+	rep := audit.Run(audit.Input{
+		Content:   []byte("/x/ @org/team-1\n"),
+		Tree:      []string{"x/a.go"},
+		Client:    client,
+		RepoOwner: "org", RepoName: "repo",
+		Checks: map[string]bool{"A-3": true},
+	})
+	if len(rep.Inconclusive) == 0 {
+		t.Fatal("probe failure must be inconclusive")
+	}
+	for _, f := range rep.Findings {
+		if f.Status == "unknown" && f.Check != "A-3" {
+			t.Errorf("unknown finding attributed to %s, want A-3 (the only requested check)", f.Check)
+		}
 	}
 }

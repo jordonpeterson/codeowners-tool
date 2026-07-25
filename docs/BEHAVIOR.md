@@ -110,6 +110,11 @@ SPEC R-0: no audit path ever produces anything but findings and Engine A
 op strings — verified here by construction: Report has no writer hooks,
 and every FixOp parses as a valid Engine A op.
 
+### `TestR12_TeamProbeAttribution`
+
+Second-review finding: when only A-3 is requested, a team probe failure
+must be attributed to A-3, not hardcoded to A-1.
+
 ### `TestR13_EmailOwnersUnverifiable`
 
 SPEC R-13: email owners are exempt from A-1/A-2/A-3 — reported
@@ -244,6 +249,12 @@ Inline comments after the owner list are legal (GitHub's own example file:
 
 Owner token forms per GitHub docs: @username, @org/team-name, email.
 
+### `TestRender_TrailingEscapedSpacePattern`
+
+Second-review finding: rendering a rule whose pattern ends in an ESCAPED
+space must not eat that space — only unescaped separator whitespace may be
+trimmed or checked when re-rendering.
+
 ### `TestS9_ZeroOwnerRuleIsValid`
 
 SPEC S-9: a pattern with no owners is a VALID rule with an empty owner set.
@@ -295,6 +306,13 @@ true negative: it proves the token can enumerate the org at all (R-12).
 
 SPEC R-12: rate limiting is inconclusive — a rate-limited 403 looks like a
 forbidden 403 and neither is a negative.
+
+### `TestR12_WrongBaseURLNeverDefinitive`
+
+Second-review finding: a mistyped API base URL (e.g. GHES without /api/v3)
+404s on EVERY endpoint. Without a positive-control probe, every user owner
+would be marked dead with removal ops — the mass false-negative R-12
+exists to prevent. A user 404 is definitive only after GET /user succeeds.
 
 ### `TestR15_CacheScopedByHostAndToken`
 
@@ -383,6 +401,13 @@ set.
 
 set_owners with an empty list is legal: it is the explicit S-9 "un-own this
 subtree" intent.
+
+### `TestParse_TrailingEscapedSpacePreserved`
+
+Second-review finding: a trailing ESCAPED space (`a\ ` — a path ending in
+a space) was mangled by argument trimming into a dangling `a\`, which
+compiles to a pattern for a DIFFERENT path. It must survive intact, and a
+genuinely dangling backslash must be rejected outright.
 
 ### `TestParse_UnescapedWhitespaceScopeRejected`
 
@@ -506,6 +531,15 @@ a narrow rule AND amend its broader fallthrough rule in the same pass. The
 per-pass desired snapshot went stale and refused a perfectly expressible
 op. Must now succeed with both edits.
 
+### `TestR6_UnownedPolicyPureTransform`
+
+Second-review finding (regression in the first fix round): remove_owner's
+post-fixpoint settling accepted ANY divergence from the pure transform as
+long as the removed owner was absent — under non-inherit policies no rule
+is deleted, so divergence means a bug, and accepting it would launder an
+earlier bad edit past the gate. This end-to-end test pins the safe path;
+the white-box divergence case lives in settle_internal_test.go.
+
 ### `TestR7_DuplicatePatternsEditEffective`
 
 SPEC R-7: with duplicate patterns, edit the EFFECTIVE (last) one and
@@ -532,6 +566,16 @@ line diff — plus byte sizes and per-change reasons.
 
 rename_owner replaces the identifier everywhere; it cannot change any
 rule's match set (§4.1), so it is exempt from scope machinery.
+
+### `TestSetOwners_SemanticNoOp`
+
+Second-review finding: a set_owners whose scope ALREADY resolves to
+exactly the requested set must be a no-op (exit 1) — not an exit-0 plan
+inserting a redundant rule.
+
+### `TestSettle_RefusesDivergenceUnderNonInherit`
+
+(no doc comment)
 
 ### `TestT1_AddOwnerRetainsExistingOwners`
 
@@ -654,4 +698,4 @@ DIFFERENT states; transitioning between them is a real ownership change.
 
 ---
 
-105 documented test cases across 11 packages.
+112 documented test cases across 11 packages.

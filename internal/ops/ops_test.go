@@ -96,3 +96,20 @@ func TestParse_UnescapedWhitespaceScopeRejected(t *testing.T) {
 		t.Errorf("escaped-space scope must be accepted: %v", err)
 	}
 }
+
+// Second-review finding: a trailing ESCAPED space (`a\ ` — a path ending in
+// a space) was mangled by argument trimming into a dangling `a\`, which
+// compiles to a pattern for a DIFFERENT path. It must survive intact, and a
+// genuinely dangling backslash must be rejected outright.
+func TestParse_TrailingEscapedSpacePreserved(t *testing.T) {
+	op, err := ops.Parse(`add_owner(/a\ , @x)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if op.Scope != `/a\ ` {
+		t.Errorf("scope = %q, want %q (escaped trailing space must survive)", op.Scope, `/a\ `)
+	}
+	if _, err := ops.Parse(`add_owner(a\, @x)`); err == nil {
+		t.Error("dangling backslash scope must be rejected")
+	}
+}

@@ -198,3 +198,28 @@ func TestINV5_InsertAtEOFPreservesFinalLineBytes(t *testing.T) {
 		t.Errorf("got %q — final line's double space must survive", got)
 	}
 }
+
+// Second-review finding: rendering a rule whose pattern ends in an ESCAPED
+// space must not eat that space — only unescaped separator whitespace may be
+// trimmed or checked when re-rendering.
+func TestRender_TrailingEscapedSpacePattern(t *testing.T) {
+	// Pattern `a\ ` (matches a path ending in a space), one owner.
+	f := file.Parse([]byte("a\\  @x\n"))
+	r := f.Rules()[0]
+	if r.PatternText != "a\\ " {
+		t.Fatalf("pattern = %q", r.PatternText)
+	}
+	// Amend to zero owners: the escaped space must survive the trim.
+	f.SetOwners(0, nil)
+	if got := string(f.Bytes()); got != "a\\ \n" {
+		t.Errorf("zero-owner render = %q, want %q", got, "a\\ \n")
+	}
+	// Amend back to owners: separator must be added AFTER the escaped space.
+	f2 := file.Parse([]byte("a\\ \n"))
+	f2.SetOwners(0, []string{"@y"})
+	got := string(f2.Bytes())
+	rf := file.Parse([]byte(got))
+	if len(rf.Rules()) != 1 || rf.Rules()[0].PatternText != "a\\ " {
+		t.Errorf("re-parse of %q lost the pattern: %+v", got, rf.Rules())
+	}
+}

@@ -329,8 +329,13 @@ func auditTeam(in *Input, rep *Report, s *ownerSites, org, slug string, rules []
 	}
 
 	// A team 404 is only meaningful after proving we can enumerate the org.
+	// Attribute the probe failure to whichever team check is actually on.
+	probeCheck := "A-1"
+	if !in.enabled("A-1") {
+		probeCheck = "A-3"
+	}
 	if err := in.Client.ProbeOrg(org); err != nil {
-		unknown("A-1", errReason(err))
+		unknown(probeCheck, errReason(err))
 		return
 	}
 
@@ -374,9 +379,10 @@ func proposeRemoval(s *ownerSites, allRules []*file.Rule, winners map[int][]stri
 	var rows []plan.Row
 	for _, r := range s.rules {
 		fix := fmt.Sprintf("remove_owner(%s, %s)", r.PatternText, s.owner)
-		// Patterns containing a top-level comma are unrepresentable in the op
-		// DSL; emitting an unparseable fix op would fail downstream (found in
-		// review) — omit it and leave the reassignment preview as the guide.
+		// Patterns unrepresentable in the op DSL (top-level commas, unbalanced
+		// brackets) cannot become fix ops; emitting an unparseable one would
+		// fail downstream (review findings) — omit it and leave the
+		// reassignment preview as the guide.
 		if _, err := ops.Parse(fix); err == nil {
 			fixes = append(fixes, fix)
 		}

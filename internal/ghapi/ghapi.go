@@ -176,8 +176,11 @@ func (c *Client) get(path, accept string) (int, []byte, error) {
 	case resp.StatusCode >= 300 && resp.StatusCode < 400:
 		// Redirects are semantic on some endpoints (302 on org membership =
 		// "requester cannot see this") and never a definitive negative.
-		return resp.StatusCode, nil, &Inconclusive{Reason: fmt.Sprintf(
-			"HTTP %d redirect on %s — the token cannot answer this definitively (e.g. concealed org membership)", resp.StatusCode, path)}
+		reason := fmt.Sprintf("HTTP %d redirect on %s — the token cannot answer this definitively (e.g. concealed org membership)", resp.StatusCode, path)
+		if resp.StatusCode == 301 {
+			reason = fmt.Sprintf("HTTP 301 on %s — the resource may have been renamed (Location: %s); update the reference and re-run", path, resp.Header.Get("Location"))
+		}
+		return resp.StatusCode, nil, &Inconclusive{Reason: reason}
 	case resp.StatusCode == 403 && resp.Header.Get("X-RateLimit-Remaining") == "0",
 		resp.StatusCode == 429:
 		return resp.StatusCode, nil, &Inconclusive{Reason: fmt.Sprintf("rate limited on %s", path)}
@@ -242,15 +245,44 @@ func (c *Client) ProbeRepo(owner, repo string) error {
 	return nil
 }
 
+// ProbeAPI proves the base URL and token actually reach a GitHub API at all,
+// via GET /user (200 for any valid token). Without this, a mistyped GHES
+// --api-url (e.g. missing /api/v3) 404s on EVERY endpoint and would mark
+// every user owner dead — the mass false-negative R-12 exists to prevent
+// (second-review finding).
+func (c *Client) ProbeAPI() error {
+	if _, ok := c.cache.Get(c.key("probe-api")); ok {
+		return nil
+	}
+	status, _, err := c.get("/user", "")
+	if err != nil {
+		return err
+	}
+	if status == 404 {
+		return &Inconclusive{Reason: fmt.Sprintf(
+			"GET %s/user returned 404 — the API base URL looks wrong (GHES needs /api/v3)", c.BaseURL)}
+	}
+	c.cache.Set(c.key("probe-api"), []byte("1"))
+	return nil
+}
+
 // UserExists: A-1 for @username owners. User visibility is not org-scoped, so
-// a 404 with a working token is definitive.
+// a 404 with a working token is definitive — but only after ProbeAPI has
+// proven that 404s from this base URL mean "not found" rather than "not a
+// GitHub API".
 func (c *Client) UserExists(login string) (bool, error) {
 	return c.cachedBool("user:"+login, func() (bool, error) {
 		status, _, err := c.get("/users/"+login, "")
 		if err != nil {
 			return false, err
 		}
-		return status != 404, nil
+		if status == 404 {
+			if err := c.ProbeAPI(); err != nil {
+				return false, err
+			}
+			return false, nil
+		}
+		return true, nil
 	})
 }
 

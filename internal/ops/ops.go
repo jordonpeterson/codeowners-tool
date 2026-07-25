@@ -129,10 +129,37 @@ func checkScope(scope string) error {
 			return fmt.Errorf("scope %q contains unescaped whitespace; write spaces as '\\ ' (as CODEOWNERS itself requires)", scope)
 		}
 	}
+	if esc {
+		return fmt.Errorf("scope %q ends with a dangling backslash — it would silently match a different path than intended", scope)
+	}
 	if _, err := pattern.Compile(scope); err != nil {
 		return fmt.Errorf("invalid scope %q: %v", scope, err)
 	}
 	return nil
+}
+
+// trimArg trims surrounding whitespace WITHOUT eating escaped trailing
+// whitespace: a scope like `a\ ` (pattern for a path ending in a space) must
+// survive argument splitting intact — a plain TrimSpace mangled it to a
+// dangling `a\` that compiles to a pattern for a DIFFERENT path
+// (second-review finding).
+func trimArg(s string) string {
+	s = strings.TrimLeft(s, " \t")
+	for len(s) > 0 {
+		last := s[len(s)-1]
+		if last != ' ' && last != '\t' {
+			break
+		}
+		bs := 0
+		for i := len(s) - 2; i >= 0 && s[i] == '\\'; i-- {
+			bs++
+		}
+		if bs%2 == 1 {
+			break // escaped whitespace belongs to the token
+		}
+		s = s[:len(s)-1]
+	}
+	return s
 }
 
 // splitArgs splits on top-level commas, keeping [...] groups intact enough
@@ -149,12 +176,12 @@ func splitArgs(s string) []string {
 			depth--
 		case ',':
 			if depth == 0 {
-				args = append(args, strings.TrimSpace(s[start:i]))
+				args = append(args, trimArg(s[start:i]))
 				start = i + 1
 			}
 		}
 	}
-	args = append(args, strings.TrimSpace(s[start:]))
+	args = append(args, trimArg(s[start:]))
 	// set_owners' bracketed list arrives with commas inside brackets intact
 	// because depth>0 suppressed the split; but "[@a, @b]" was suppressed, so
 	// re-append pieces if the bracket group was split by TrimSpace… it wasn't.

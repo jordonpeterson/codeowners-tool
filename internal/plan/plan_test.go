@@ -478,3 +478,35 @@ func TestR8_InheritOverlapRejected(t *testing.T) {
 		t.Fatalf("overlapping batch under inherit must be invalid input (R-8), got %v", err)
 	}
 }
+
+// Second-review finding: a set_owners whose scope ALREADY resolves to
+// exactly the requested set must be a no-op (exit 1) — not an exit-0 plan
+// inserting a redundant rule.
+func TestSetOwners_SemanticNoOp(t *testing.T) {
+	tree := []string{"dir/f.go", "top.txt"}
+	_, err := build(t, "* @a\n", tree, plan.Options{}, "set_owners(/dir/, [@a])")
+	var noop *plan.NoOpError
+	if !errors.As(err, &noop) {
+		t.Fatalf("semantically satisfied set_owners must be a no-op, got %v", err)
+	}
+}
+
+// Second-review finding (regression in the first fix round): remove_owner's
+// post-fixpoint settling accepted ANY divergence from the pure transform as
+// long as the removed owner was absent — under non-inherit policies no rule
+// is deleted, so divergence means a bug, and accepting it would launder an
+// earlier bad edit past the gate. This end-to-end test pins the safe path;
+// the white-box divergence case lives in settle_internal_test.go.
+func TestR6_UnownedPolicyPureTransform(t *testing.T) {
+	tree := []string{"a /f.go"}
+	p, err := build(t, "/a\\  @x\n", tree, plan.Options{OnEmpty: "unowned"},
+		`remove_owner(/a\ , @x)`)
+	if err != nil {
+		t.Fatalf("unowned removal on escaped-space pattern must succeed: %v", err)
+	}
+	after := plan.ResolveContent(p.AfterContent, tree)
+	r := after["a /f.go"]
+	if !r.Matched || len(r.Owners) != 0 {
+		t.Errorf("want matched with zero owners, got %+v", r)
+	}
+}
