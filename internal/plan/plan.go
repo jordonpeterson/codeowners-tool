@@ -334,11 +334,15 @@ func synthAdd(f *file.File, tree []string, op ops.Op, scope map[string]bool, des
 		}
 		if subset(winners[l], scope) {
 			old := f.LineText(l)
+			// Capture BEFORE SetOwners mutates the rule — r aliases the live
+			// rule, so a post-mutation OwnersCopy reports the new set as the
+			// old one (E2E-testing finding).
+			oldOwners := r.OwnersCopy()
 			newOwners := append(append([]string{}, r.Owners...), op.Owner)
 			f.SetOwners(l, newOwners)
 			pl.Changes = append(pl.Changes, Change{
 				Action: "amend", Line: l + 1, Pattern: r.PatternText,
-				OldOwners: r.OwnersCopy(), NewOwners: newOwners,
+				OldOwners: oldOwners, NewOwners: newOwners,
 				OldLine: old, NewLine: f.LineText(l),
 				Reason: fmt.Sprintf("every path governed by %q is inside scope %q; amended in place (R-2/R-4)", r.PatternText, op.Scope),
 			})

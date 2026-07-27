@@ -557,6 +557,12 @@ owners from rules the owner-set transform cannot see), so an overlapping
 batch containing remove_owner under --on-empty=inherit was accepted while
 being order-dependent. R-8 now rejects it outright.
 
+### `TestR16_AmendChangeRecordsTrueOldOwners`
+
+E2E-testing finding: add_owner amend records recorded the POST-op owner
+set as old_owners (OwnersCopy taken after SetOwners mutated the aliased
+rule). The change record must show the true before/after.
+
 ### `TestR16_PlanIsMachineReadable`
 
 SPEC R-16: the plan carries both views — ownership rows AND the literal
@@ -698,4 +704,4 @@ DIFFERENT states; transitioning between them is a real ownership change.
 
 ---
 
-112 documented test cases across 11 packages.
+113 documented test cases across 11 packages.

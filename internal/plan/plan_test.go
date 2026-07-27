@@ -510,3 +510,26 @@ func TestR6_UnownedPolicyPureTransform(t *testing.T) {
 		t.Errorf("want matched with zero owners, got %+v", r)
 	}
 }
+
+// E2E-testing finding: add_owner amend records recorded the POST-op owner
+// set as old_owners (OwnersCopy taken after SetOwners mutated the aliased
+// rule). The change record must show the true before/after.
+func TestR16_AmendChangeRecordsTrueOldOwners(t *testing.T) {
+	tree := []string{"x/a.go"}
+	p, err := build(t, "/x/ @a @b\n", tree, plan.Options{}, "add_owner(/x/, @new)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(p.Changes) != 1 {
+		t.Fatalf("changes = %+v", p.Changes)
+	}
+	c := p.Changes[0]
+	if !reflect.DeepEqual(c.OldOwners, []string{"@a", "@b"}) {
+		t.Errorf("old_owners = %v, want [@a @b] (must not include the added owner)", c.OldOwners)
+	}
+	sortedNew := append([]string{}, c.NewOwners...)
+	sort.Strings(sortedNew)
+	if !reflect.DeepEqual(sortedNew, []string{"@a", "@b", "@new"}) {
+		t.Errorf("new_owners = %v", c.NewOwners)
+	}
+}
