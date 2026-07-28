@@ -12,8 +12,8 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/jordonpropm/codeowners-tool/internal/file"
-	"github.com/jordonpropm/codeowners-tool/internal/resolve"
+	"github.com/jordonpeterson/codeowners-tool/internal/file"
+	"github.com/jordonpeterson/codeowners-tool/internal/resolve"
 )
 
 func mustParse(t *testing.T, s string) *file.File {

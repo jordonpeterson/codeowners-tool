@@ -11,8 +11,8 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/jordonpropm/codeowners-tool/internal/file"
-	"github.com/jordonpropm/codeowners-tool/internal/plan"
+	"github.com/jordonpeterson/codeowners-tool/internal/file"
+	"github.com/jordonpeterson/codeowners-tool/internal/plan"
 )
 
 // ValidationError: the written file failed post-write validation and was

@@ -11,10 +11,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jordonpropm/codeowners-tool/internal/file"
-	"github.com/jordonpropm/codeowners-tool/internal/ops"
-	"github.com/jordonpropm/codeowners-tool/internal/pattern"
-	"github.com/jordonpropm/codeowners-tool/internal/plan"
+	"github.com/jordonpeterson/codeowners-tool/internal/file"
+	"github.com/jordonpeterson/codeowners-tool/internal/ops"
+	"github.com/jordonpeterson/codeowners-tool/internal/pattern"
+	"github.com/jordonpeterson/codeowners-tool/internal/plan"
 )
 
 var (

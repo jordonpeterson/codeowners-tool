@@ -6,7 +6,7 @@ package verify_test
 import (
 	"testing"
 
-	"github.com/jordonpropm/codeowners-tool/internal/verify"
+	"github.com/jordonpeterson/codeowners-tool/internal/verify"
 )
 
 func snap(ownership map[string][]string) *verify.Snapshot {

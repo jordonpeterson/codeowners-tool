@@ -14,8 +14,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jordonpropm/codeowners-tool/internal/audit"
-	"github.com/jordonpropm/codeowners-tool/internal/ghapi"
+	"github.com/jordonpeterson/codeowners-tool/internal/audit"
+	"github.com/jordonpeterson/codeowners-tool/internal/ghapi"
 )
 
 func findingsFor(rep *audit.Report, check string) []audit.Finding {

@@ -17,8 +17,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jordonpropm/codeowners-tool/internal/ops"
-	"github.com/jordonpropm/codeowners-tool/internal/plan"
+	"github.com/jordonpeterson/codeowners-tool/internal/ops"
+	"github.com/jordonpeterson/codeowners-tool/internal/plan"
 )
 
 func mustOps(t *testing.T, specs ...string) []ops.Op {

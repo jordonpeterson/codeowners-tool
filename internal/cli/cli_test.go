@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jordonpropm/codeowners-tool/internal/cli"
+	"github.com/jordonpeterson/codeowners-tool/internal/cli"
 )
 
 func initRepo(t *testing.T, files map[string]string) string {

@@ -7,8 +7,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/jordonpropm/codeowners-tool/internal/file"
-	"github.com/jordonpropm/codeowners-tool/internal/pattern"
+	"github.com/jordonpeterson/codeowners-tool/internal/file"
+	"github.com/jordonpeterson/codeowners-tool/internal/pattern"
 )
 
 // Kind identifies an operation.

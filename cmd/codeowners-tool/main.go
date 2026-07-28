@@ -5,7 +5,7 @@ package main
 import (
 	"os"
 
-	"github.com/jordonpropm/codeowners-tool/internal/cli"
+	"github.com/jordonpeterson/codeowners-tool/internal/cli"
 )
 
 func main() {

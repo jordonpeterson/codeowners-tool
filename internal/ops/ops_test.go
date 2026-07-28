@@ -5,7 +5,7 @@ package ops_test
 import (
 	"testing"
 
-	"github.com/jordonpropm/codeowners-tool/internal/ops"
+	"github.com/jordonpeterson/codeowners-tool/internal/ops"
 )
 
 func TestParse_AddOwner(t *testing.T) {

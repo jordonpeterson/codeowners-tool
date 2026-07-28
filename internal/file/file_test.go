@@ -15,7 +15,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jordonpropm/codeowners-tool/internal/file"
+	"github.com/jordonpeterson/codeowners-tool/internal/file"
 )
 
 // SPEC INV-5: parse→serialize is byte-identical for any input, including

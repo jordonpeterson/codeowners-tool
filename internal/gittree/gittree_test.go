@@ -12,7 +12,7 @@ import (
 	"sort"
 	"testing"
 
-	"github.com/jordonpropm/codeowners-tool/internal/gittree"
+	"github.com/jordonpeterson/codeowners-tool/internal/gittree"
 )
 
 func initRepo(t *testing.T, files map[string]string) string {

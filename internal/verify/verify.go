@@ -10,8 +10,8 @@ import (
 	"os"
 	"sort"
 
-	"github.com/jordonpropm/codeowners-tool/internal/pattern"
-	"github.com/jordonpropm/codeowners-tool/internal/resolve"
+	"github.com/jordonpeterson/codeowners-tool/internal/pattern"
+	"github.com/jordonpeterson/codeowners-tool/internal/resolve"
 )
 
 // Snapshot is the on-disk format produced by `codeowners-tool snapshot`.

@@ -24,13 +24,13 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jordonpropm/codeowners-tool/internal/apply"
-	"github.com/jordonpropm/codeowners-tool/internal/audit"
-	"github.com/jordonpropm/codeowners-tool/internal/ghapi"
-	"github.com/jordonpropm/codeowners-tool/internal/gittree"
-	"github.com/jordonpropm/codeowners-tool/internal/ops"
-	"github.com/jordonpropm/codeowners-tool/internal/plan"
-	"github.com/jordonpropm/codeowners-tool/internal/verify"
+	"github.com/jordonpeterson/codeowners-tool/internal/apply"
+	"github.com/jordonpeterson/codeowners-tool/internal/audit"
+	"github.com/jordonpeterson/codeowners-tool/internal/ghapi"
+	"github.com/jordonpeterson/codeowners-tool/internal/gittree"
+	"github.com/jordonpeterson/codeowners-tool/internal/ops"
+	"github.com/jordonpeterson/codeowners-tool/internal/plan"
+	"github.com/jordonpeterson/codeowners-tool/internal/verify"
 )
 
 // Exit codes (R-17).

@@ -2,7 +2,7 @@
 package resolve
 
 import (
-	"github.com/jordonpropm/codeowners-tool/internal/file"
+	"github.com/jordonpeterson/codeowners-tool/internal/file"
 )
 
 // Resolution is the resolved ownership of one tracked path.

@@ -15,7 +15,7 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/jordonpropm/codeowners-tool/internal/pattern"
+	"github.com/jordonpeterson/codeowners-tool/internal/pattern"
 )
 
 // LineKind classifies a parsed line.

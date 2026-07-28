@@ -16,7 +16,7 @@ import (
 	"strconv"
 	"strings"
 
-	ours "github.com/jordonpropm/codeowners-tool/internal/pattern"
+	ours "github.com/jordonpeterson/codeowners-tool/internal/pattern"
 )
 
 var segments = []string{

@@ -16,7 +16,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/jordonpropm/codeowners-tool/internal/pattern"
+	"github.com/jordonpeterson/codeowners-tool/internal/pattern"
 )
 
 type corpusEntry struct {

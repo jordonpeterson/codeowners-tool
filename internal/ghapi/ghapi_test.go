@@ -15,7 +15,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jordonpropm/codeowners-tool/internal/ghapi"
+	"github.com/jordonpeterson/codeowners-tool/internal/ghapi"
 )
 
 func server(t *testing.T, routes map[string]func(w http.ResponseWriter, r *http.Request)) *httptest.Server {

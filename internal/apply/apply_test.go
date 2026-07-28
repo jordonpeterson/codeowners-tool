@@ -12,9 +12,9 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/jordonpropm/codeowners-tool/internal/apply"
-	"github.com/jordonpropm/codeowners-tool/internal/ops"
-	"github.com/jordonpropm/codeowners-tool/internal/plan"
+	"github.com/jordonpeterson/codeowners-tool/internal/apply"
+	"github.com/jordonpeterson/codeowners-tool/internal/ops"
+	"github.com/jordonpeterson/codeowners-tool/internal/plan"
 )
 
 func makePlan(t *testing.T, content string, tree []string, spec string) *plan.Plan {

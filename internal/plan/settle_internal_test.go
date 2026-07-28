@@ -11,8 +11,8 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/jordonpropm/codeowners-tool/internal/file"
-	"github.com/jordonpropm/codeowners-tool/internal/ops"
+	"github.com/jordonpeterson/codeowners-tool/internal/file"
+	"github.com/jordonpeterson/codeowners-tool/internal/ops"
 )
 
 func TestSettle_RefusesDivergenceUnderNonInherit(t *testing.T) {
