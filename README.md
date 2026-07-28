@@ -19,6 +19,42 @@ intent (ops) ──▶ PLAN ──▶ ASSERT ──▶ APPLY ──▶ VALIDATE
                   └── resolves ownership before/after over the real git tree
 ```
 
+## Getting started
+
+### Install
+
+Download the archive for your platform from the
+[latest release](https://github.com/jordonpeterson/codeowners-tool/releases/latest),
+extract it, and put the `codeowners-tool` binary on your `PATH`. Every release
+ships Linux, macOS, and Windows builds (amd64 and arm64) alongside a
+`checksums.txt`.
+
+Or install from source with Go 1.24+:
+
+```sh
+go install github.com/jordonpeterson/codeowners-tool/cmd/codeowners-tool@latest
+```
+
+### Make your first change
+
+Run inside a git repository that contains a CODEOWNERS file (searched in
+`.github/`, then the repo root, then `docs/`):
+
+```sh
+# Add @org/team-1 as a co-owner of everything under /services/api/, keeping any
+# existing owners. This only writes a reviewable plan — nothing is changed yet.
+codeowners-tool plan --op 'add_owner(/services/api/, @org/team-1)' --out plan.json
+
+# plan.json shows the resolved ownership rows and the exact line diff.
+# Apply only what the planner proved safe:
+codeowners-tool apply --plan plan.json
+```
+
+`plan` re-resolves ownership across your real git tree and refuses anything it
+can't prove; `apply` writes only the proven edit and is idempotent, so
+re-running the same op is a no-op. To audit a repo for rot or to verify in CI
+that a change stayed inside its declared scope, read on.
+
 ## Quick start
 
 ```sh
