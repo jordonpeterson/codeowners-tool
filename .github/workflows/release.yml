@@ -1,0 +1,114 @@
+name: Release
+
+# Publishes a GitHub Release (semver vMAJOR.MINOR.PATCH) with cross-compiled
+# binaries and auto-generated release notes.
+#
+# Versioning:
+#   - MAJOR.MINOR is read from the committed VERSION file and bumped MANUALLY
+#     (edit VERSION in a PR when you want a minor/major release).
+#   - PATCH auto-increments from the existing git tags on that MAJOR.MINOR line,
+#     starting at 1. So the first release is v0.0.1, then v0.0.2, ...; bumping
+#     VERSION to 0.1 restarts the line at v0.1.1.
+#
+# Phase 1 (current): runs on every merge (push) to main to cut the first
+# release. After the first release this is narrowed to binary-affecting paths.
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write # create tags and releases
+
+# Never run two releases at once; don't cancel an in-flight publish.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: build & release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # full history + tags for versioning and release notes
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Compute next version
+        id: ver
+        run: |
+          set -euo pipefail
+          major_minor="$(tr -d ' \t\n\r' < VERSION)"
+          if ! printf '%s' "$major_minor" | grep -Eq '^[0-9]+\.[0-9]+$'; then
+            echo "::error::VERSION must contain MAJOR.MINOR (e.g. 0.0); got '$major_minor'"
+            exit 1
+          fi
+          git fetch --tags --force
+          latest_patch="$(git tag -l "v${major_minor}.*" \
+            | sed -E "s/^v${major_minor}\.//" \
+            | grep -E '^[0-9]+$' \
+            | sort -n | tail -1 || true)"
+          if [ -z "${latest_patch:-}" ]; then
+            patch=1
+          else
+            patch=$((latest_patch + 1))
+          fi
+          tag="v${major_minor}.${patch}"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "Next release: $tag"
+
+      - name: Skip if already released
+        id: guard
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if gh release view "${{ steps.ver.outputs.tag }}" >/dev/null 2>&1; then
+            echo "::notice::${{ steps.ver.outputs.tag }} already exists; skipping."
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build binaries
+        if: steps.guard.outputs.exists == 'false'
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.ver.outputs.tag }}"
+          mkdir -p dist
+          for p in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64; do
+            os="${p%/*}"; arch="${p#*/}"
+            bin="codeowners-tool"
+            [ "$os" = "windows" ] && bin="codeowners-tool.exe"
+            name="codeowners-tool_${TAG}_${os}_${arch}"
+            mkdir -p "dist/$name"
+            CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" \
+              go build -trimpath -ldflags "-s -w" \
+              -o "dist/$name/$bin" ./cmd/codeowners-tool
+            cp LICENSE NOTICE README.md "dist/$name/"
+            if [ "$os" = "windows" ]; then
+              (cd dist && zip -qr "${name}.zip" "$name")
+            else
+              tar -czf "dist/${name}.tar.gz" -C dist "$name"
+            fi
+            rm -rf "dist/$name"
+          done
+          (cd dist && sha256sum ./*.tar.gz ./*.zip > checksums.txt)
+          ls -la dist
+
+      - name: Create release
+        if: steps.guard.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release create "${{ steps.ver.outputs.tag }}" \
+            dist/*.tar.gz dist/*.zip dist/checksums.txt \
+            --target "$GITHUB_SHA" \
+            --title "${{ steps.ver.outputs.tag }}" \
+            --generate-notes
