@@ -42,8 +42,8 @@ install location.
 **Direct download**: grab the archive for your platform from the
 [latest release](https://github.com/jordonpeterson/codeowners-tool/releases/latest),
 verify it against `checksums.txt`, extract, and put `codeowners-tool` on your
-`PATH`. Every release ships Linux and macOS builds (amd64 and arm64) plus a
-Windows amd64 build.
+`PATH`. Every release ships Linux, macOS, and Windows builds for both amd64 and
+arm64.
 
 > **macOS note:** the binaries are not notarized, so a build downloaded through
 > a browser is quarantined by Gatekeeper. Clear it with
