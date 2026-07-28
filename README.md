@@ -23,13 +23,34 @@ intent (ops) ──▶ PLAN ──▶ ASSERT ──▶ APPLY ──▶ VALIDATE
 
 ### Install
 
-Download the archive for your platform from the
-[latest release](https://github.com/jordonpeterson/codeowners-tool/releases/latest),
-extract it, and put the `codeowners-tool` binary on your `PATH`. Every release
-ships Linux, macOS, and Windows builds (amd64 and arm64) alongside a
-`checksums.txt`.
+**Homebrew** (macOS/Linux):
 
-Or install from source with Go 1.24+:
+```sh
+brew install jordonpeterson/tap/codeowners-tool
+```
+
+**Install script** (macOS/Linux) — downloads the right prebuilt binary,
+verifies its checksum, and installs it:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/jordonpeterson/codeowners-tool/main/install.sh | sh
+```
+
+Set `VERSION=vX.Y.Z` to pin a release or `BINDIR=~/.local/bin` to change the
+install location.
+
+**Direct download**: grab the archive for your platform from the
+[latest release](https://github.com/jordonpeterson/codeowners-tool/releases/latest),
+verify it against `checksums.txt`, extract, and put `codeowners-tool` on your
+`PATH`. Every release ships Linux and macOS builds (amd64 and arm64) plus a
+Windows amd64 build.
+
+> **macOS note:** the binaries are not notarized, so a build downloaded through
+> a browser is quarantined by Gatekeeper. Clear it with
+> `xattr -d com.apple.quarantine ./codeowners-tool`. Homebrew and the install
+> script above are unaffected — neither quarantines its downloads.
+
+**From source** with Go 1.24+:
 
 ```sh
 go install github.com/jordonpeterson/codeowners-tool/cmd/codeowners-tool@latest
