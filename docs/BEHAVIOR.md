@@ -466,16 +466,13 @@ dead rule that looks fine on a case-insensitive filesystem.
 
 ## internal/plan
 
-> Package plan_test encodes the spec's acceptance tests for Engine A.
-> 
-> The planner takes intent-level ops, computes the resolved ownership
-> before/after over the real tree, synthesizes line edits, and GATES the
-> result on two invariants:
-> 
-> 	INV-1: every path in scope resolves to exactly what the op requires.
-> 	INV-2: every path outside scope resolves to exactly what it did before.
-> 
-> A plan that cannot be proven is refused (exit 2), never guessed at.
+> White-box test for the remove_owner settling logic (second-review
+> regression): divergence between the pure transform desired∖{owner} and the
+> file's actual resolution is accepted ONLY under --on-empty=inherit, where
+> rule deletion legitimately resurrects owners from surviving rules. Under
+> any other policy no rule is deleted, so divergence means a synthesis bug
+> (or a bad earlier batched edit) and must REFUSE — accepting it would
+> launder the error past the gate.
 
 ### `TestAddOwner_CoversUnownedPaths`
 
@@ -496,10 +493,58 @@ rejected; a hand-constructed Op must be caught by the gate itself.
 When intent cannot be expressed without breaking an invariant, the planner
 REFUSES (exit 2). It never emits a best-effort plan.
 
+### `TestGate_StillRefusesMultiSegmentGlobScope`
+
+Shape 4 is deliberately narrow: it derives `<ruleDir>/**/<glob>` only for a
+single-segment basename glob, so a MULTI-SEGMENT unanchored scope still has
+no derivation and must be refused. The boundary that shape 4 itself owns —
+a derivation that is inexact over the tree — is pinned by
+TestShape4_TreeConfirmationRefusesInexactDerivation.
+
 ### `TestINV5_Property_RoundTrip`
 
 INV-5 property: parse→serialize round-trips any generated file (plus junk
 mutations) byte-identically.
+
+### `TestR2_FileGlobScopeAcrossAnchoredRules`
+
+R-2, shape 4: a FILE-GLOB scope crossing anchored directory rules.
+
+The monorepo shape — catch-all `*`, per-app anchored rules, intent "add
+@platform to every *.gradle file". Every intersecting rule has a sound
+narrowing pattern (`*.gradle` for `*`, `/appN/**/*.gradle` for the anchored
+ones), so the intent is expressible without disturbing one out-of-scope
+path. Before the shape-4 derivation the planner refused it outright.
+
+### `TestR2_FileGlobScopeAcrossNestedAnchoredRule`
+
+Shape 4 must narrow to the rule's FULL prefix, not just its first segment:
+a nested anchored rule /app2/legacy needs /app2/legacy/**/*.gradle, so the
+rest of /app2 keeps resolving through the broader rule.
+
+### `TestR2_FileGlobScopeAcrossUnanchoredDirRule`
+
+Shape 4 with the rule written as an UNANCHORED directory (`app2/`, no
+leading slash). Such a rule matches app2/ at any depth, so the narrowing
+must too: `**/app2/**/*.gradle`, not `/app2/**/*.gradle`.
+
+### `TestR2_FileGlobScopeRemoveOwnerAcrossAnchoredRule`
+
+The same derivation serves remove_owner, which shares intersectPattern:
+stripping an owner from just the .gradle files of a directory it otherwise
+still owns. The root build.gradle matters — without a .gradle file outside
+/app2 the scope would be a subset of the rule and shape 1 would carry the
+case, never exercising shape 4.
+
+### `TestR2_GlobScopeNarrowingMustNotEmitRepoGlobalRule`
+
+Shape 1 returns the scope pattern VERBATIM when every in-scope path matches
+the rule. For an unanchored glob scope that emits a repo-global line
+(`*.gradle @c @plat`) sitting under a directory rule: exact over today's
+tracked tree, so the gate passes, but strictly broader than the intersection
+it represents. Every .gradle file added anywhere later silently inherits
+/app2's owner. When an anchored derivation exists it is the tighter of two
+equally-exact patterns and must be preferred.
 
 ### `TestR2_ScopeNestedInsideBroaderAnchoredRule`
 
@@ -557,6 +602,34 @@ owners from rules the owner-set transform cannot see), so an overlapping
 batch containing remove_owner under --on-empty=inherit was accepted while
 being order-dependent. R-8 now rejects it outright.
 
+### `TestR8_InheritRemovalWidensRenameScope`
+
+A rename's R-8 scope must also widen for a removal under --on-empty=inherit.
+Inheritance DELETES a rule, resurrecting whatever shadowed line sat behind
+it, which can hand arbitrary identifiers — including the rename's old one —
+to that rule's paths. `/app/sub @a` is dead while `/app @b` shadows it, so
+@a owns nothing, the rename's scope set is empty, and the R-8 inherit guard
+(which only fires on a non-empty intersection) never runs: the batch plans
+at exit 0 and leaves @b owning paths that remove_owner(/app, @b) just
+removed it from.
+
+### `TestR8_RenameBatchedWithUnrelatedOpStillPlans`
+
+A rename batched with an op that does NOT hand it its old identifier stays
+legal — the widening must not turn every batch containing a rename into a
+refusal.
+
+### `TestR8_RenameScopeMustCoverOwnersGrantedLaterInTheBatch`
+
+R-8 must refuse a batch whose result depends on op order. A rename's scope
+was derived from the BEFORE state alone, so an identifier that owns nothing
+yet produced an EMPTY scope set and the commutativity check ran vacuously —
+even though a sibling op in the same batch hands that identifier to paths
+the rename would then rewrite. The two orderings write different files, and
+both are accepted at exit 0: exactly what R-8's own error string promises to
+refuse. (Ownership of /Apps/ ends up @c under one order and @t2 under the
+other; the user asked for @t2.)
+
 ### `TestR16_AmendChangeRecordsTrueOldOwners`
 
 E2E-testing finding: add_owner amend records recorded the POST-op owner
@@ -582,6 +655,93 @@ inserting a redundant rule.
 ### `TestSettle_RefusesDivergenceUnderNonInherit`
 
 (no doc comment)
+
+### `TestShape1_ContainedBasenameScopeUnderFileGlobRule`
+
+Shape 1 needs match(scope) ⊆ match(rule) for ALL trees; universality of the
+rule is merely one sufficient case. A basename scope under a file-type rule
+(`README.md` under `*.md`) satisfies containment structurally — every path
+matching `README.md` ends in `.md` — so the scope verbatim IS the exact
+intersection on every future tree, and refusing it is an avoidable
+capability loss.
+
+### `TestShape1_DoubleStarIsNotUniversalForThisMatcher`
+
+`ruleIsUniversal` must not claim universality for a rule this repo's matcher
+does not treat as universal. A lone `**` is the one spelling that gets no
+implicit `**/` prefix, so it compiles to `\A.+\z`; Go's `.` excludes "\n"
+while `[^/]` does not, so `**` misses a path with a newline in its last
+segment that `*` and `**/*` both match. The vendored hmarr oracle agrees, so
+the matcher is faithful and must not change — but shape 1 relied on the
+claim to emit an unanchored scope VERBATIM, a line that outlives the tree it
+was proven against. A gradle file added later with a newline in its name
+would be captured by that line although `**` never governed it.
+
+### `TestShape1_UnanchoredScopeNeverEmittedVerbatimUnderNonUniversalRule`
+
+Shape 1 returns the scope pattern verbatim when every in-scope path matches
+the rule — but `subset` is established over the CURRENT tree while the
+pattern is written to a file that outlives it. An UNANCHORED scope matches
+at any depth, so under a rule that does not, verbatim is repo-global. This
+is spelling-independent: it must hold for a globstar-prefixed scope and for
+a wildcard-free basename alike, neither of which the first attempt's
+`ContainsAny(scope, "*?")` guard caught.
+
+### `TestShape4_DirectChildrenRuleHasNoSubtreePrefix`
+
+A rule ending in a `*`-only segment governs a directory's DIRECT CHILDREN,
+so it has no subtree prefix: deriving `**/x/*/` from `**/x/*` yields a
+narrowing matching arbitrarily deep descendants the rule never governed.
+The anchored spellings happen to fail shape 4's tree confirmation, but the
+any-depth ones pass it whenever the tracked tree does not distinguish the
+two — here a nested `x/x/` makes every tracked path agree, the gate proves
+the plan, and exit 0 writes the over-broad line. INV-1/INV-2 hold today and
+break for files added later.
+
+### `TestShape4_DirectoryNameMatchingScopeGlob`
+
+A DIRECTORY whose own name matches the scope glob. `*.gradle` matches the
+path segment `gen.gradle`, so every file beneath it is in scope — including
+files that are not themselves .gradle. Surprising, but it is what GitHub
+resolves, so the plan must follow the resolver rather than the intuition
+that "*.gradle means .gradle files".
+
+### `TestShape4_LeadingGlobstarRuleStaysAnyDepth`
+
+The mirror of the above: a `**/`-prefixed MULTI-segment rule really is
+any-depth, and stripping the `**/` before classifying re-anchors it at the
+repo root. That under-derives — the narrowing misses the nested copies the
+rule actually governs — so the confirmation loop rejects it and an
+expressible intent is refused.
+
+### `TestShape4_SubtreeRuleSpelledWithTrailingStar`
+
+The direct-children guard must not swallow the SUBTREE spelling. `/app2/*`
+governs direct children only, but `/app2/**/*` compiles to
+`\Aapp2(?:/.+)?/[^/]+\z` — the whole subtree, semantically identical to
+`/app2/**`. Rejecting every pattern ending in `/*` therefore refuses an
+intent that both `/app2` and `/app2/**` express fine.
+
+### `TestShape4_TrailingGlobstarRuleIsRootAnchored`
+
+Shape 4 must read a rule's ANCHORING from its original spelling. `app2/**`
+carries an interior slash, so — exactly like `/app2/**`, and unlike `app2/`
+— it is root-anchored and never governs `vendor/app2/`. Deriving the prefix
+by trimming the `/**` suffix first destroys the very slash that decides
+this, making the rule look single-segment and any-depth. The narrowing rule
+then governs MORE than the rule it narrows: today's tree may hide that (the
+confirmation loop only sees tracked paths), but the moment anyone adds a
+matching file under a nested same-named directory the extra owner appears.
+
+### `TestShape4_TreeConfirmationRefusesInexactDerivation`
+
+The tree-confirmation loop in globScopeIntersect is the whole safety
+argument for shape 4, and nothing pinned it: delete it and the suite stayed
+green. This is the case that needs it. Rule `/app*` matches the root FILE
+`apple.gradle` as well as the directory `apps/`, so `apple.gradle` is inside
+(scope ∩ rule) — but the derived `/app*/**/*.gradle` cannot match a root
+file. The derivation is inexact, so the planner must REFUSE rather than
+write a rule that silently drops an in-scope path.
 
 ### `TestT1_AddOwnerRetainsExistingOwners`
 
@@ -704,4 +864,4 @@ DIFFERENT states; transitioning between them is a real ownership change.
 
 ---
 
-113 documented test cases across 11 packages.
+131 documented test cases across 11 packages.

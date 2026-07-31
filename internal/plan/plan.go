@@ -146,11 +146,49 @@ func Build(content []byte, tree []string, opList []ops.Op, opts Options) (*Plan,
 		scopeSets[i] = set
 	}
 
+	// A rename's scope comes from the BEFORE state, but a sibling op can hand
+	// its old identifier to paths that did not carry it — and the rename would
+	// then rewrite those paths too. Left stale, an identifier that owns nothing
+	// yet yields an EMPTY set, R-8 below finds no overlap, and an
+	// order-dependent batch sails through at exit 0. Widen each rename to every
+	// path any other op could assign its old owner to, to a fixpoint since
+	// renames chain (found by multi-agent review).
+	for changed := true; changed; {
+		changed = false
+		for i, op := range opList {
+			if op.Kind != ops.RenameOwner {
+				continue
+			}
+			for j, other := range opList {
+				// Under --on-empty=inherit a removal DELETES a rule, which
+				// resurrects whatever shadowed line sat behind it and can hand
+				// arbitrary identifiers — including this rename's old one — to
+				// its paths. That is unmodellable as an owner-set transform, so
+				// treat any such removal as owner-assigning: widening makes the
+				// existing inherit guard below fire (round-2 review, critical).
+				assigns := assignsOwner(other, op.Owner) ||
+					(opts.OnEmpty == "inherit" && other.Kind == ops.RemoveOwner)
+				if i == j || !assigns {
+					continue
+				}
+				for p := range scopeSets[j] {
+					if !scopeSets[i][p] {
+						scopeSets[i][p] = true
+						changed = true
+					}
+				}
+			}
+		}
+	}
+
 	// R-8: reject order-dependent overlapping batches.
 	for i := 0; i < len(opList); i++ {
 		for j := i + 1; j < len(opList); j++ {
-			for p := range scopeSets[i] {
-				if !scopeSets[j][p] {
+			// Range the tree, not the scope-set map: map order is randomised,
+			// so naming the offending path from it made one fixed batch emit a
+			// different message run to run (round-4 review).
+			for _, p := range tree {
+				if !scopeSets[i][p] || !scopeSets[j][p] {
 					continue
 				}
 				// simulate() cannot model --on-empty=inherit (inheritance
@@ -278,6 +316,68 @@ func Build(content []byte, tree []string, opList []ops.Op, opts Options) (*Plan,
 	}
 	pl.Diff = diff.String()
 	return pl, nil
+}
+
+// ruleIsUniversal reports whether a rule matches every path in any tree, which
+// is what makes returning an unanchored scope verbatim sound for future trees
+// as well as the current one.
+//
+// Deliberately NOT "**": a lone `**` is the one spelling that does not get an
+// implicit `**/` prefix, so it compiles to `\A.+\z`, and Go's `.` excludes
+// "\n" while `[^/]` does not. `**` therefore fails to match a path with a
+// newline in its last segment where `*` and `**/*` both match it. The
+// vendored hmarr oracle agrees, so this is matcher fidelity, not a local bug —
+// but claiming universality here would emit an unanchored scope verbatim under
+// a rule that does not in fact govern every path (round-3 review).
+func ruleIsUniversal(pat string) bool {
+	return pat == "*" || pat == "**/*"
+}
+
+// scopeContainedInRule reports whether every path matching `scope` also matches
+// `rule` in ANY tree — the property shape 1 actually needs before it may return
+// the scope verbatim. Rule universality is only the degenerate case of it;
+// testing universality alone refused contained-but-not-universal pairs like
+// `README.md` under `*.md` (round-4 review).
+//
+// Decided structurally, never over the tree, and deliberately incomplete: it
+// establishes containment for the shapes that occur in practice and answers
+// false whenever it cannot prove it, so an unproven pair still refuses.
+func scopeContainedInRule(scope, rulePat string) bool {
+	if ruleIsUniversal(rulePat) {
+		return true
+	}
+	// Both must match at any depth, i.e. be single-segment (an explicit "**/"
+	// prefix is the same thing spelled out). A "/" anywhere else anchors or
+	// deepens the pattern and this cheap test no longer applies.
+	r := strings.TrimPrefix(rulePat, "**/")
+	s := strings.TrimPrefix(scope, "**/")
+	if strings.Contains(r, "/") || strings.Contains(s, "/") {
+		return false
+	}
+	// Rule of the form "*<literal>": containment reduces to a suffix test,
+	// since neither "*" nor "?" ever matches "/".
+	if !strings.HasPrefix(r, "*") {
+		return false
+	}
+	suffix := r[1:]
+	if suffix == "" || strings.ContainsAny(suffix, "*?") {
+		return false
+	}
+	return strings.HasSuffix(s, suffix)
+}
+
+// assignsOwner reports whether op can give `owner` to a path in its scope —
+// i.e. whether a rename of `owner` batched alongside it could be widened by it.
+func assignsOwner(op ops.Op, owner string) bool {
+	switch op.Kind {
+	case ops.AddOwner:
+		return op.Owner == owner
+	case ops.SetOwners:
+		return contains(op.Owners, owner)
+	case ops.RenameOwner:
+		return op.NewOwner == owner
+	}
+	return false
 }
 
 // simulate applies an op's owner-set transform to one path's owners — used
@@ -663,10 +763,20 @@ func synthRename(f *file.File, op ops.Op, desired map[string][]string, pl *Plan)
 //     /services/): the scope itself IS the intersection. Sound as a lone
 //     insert: since every in-scope path matches the rule at line L, every
 //     in-scope path's winner is ≥ L, so no other group needs an insert that
-//     could recapture these paths.
+//     could recapture these paths. An UNANCHORED scope is returned verbatim
+//     only when scopeContainedInRule proves containment structurally — the
+//     tree-scoped `subset` above says nothing about the trees this line will
+//     outlive, and verbatim under a rule that does not match every path is
+//     repo-global.
 //  2. anchored directory scope × unanchored single-segment pattern
 //     (e.g. /x/ × *.tf → /x/**/*.tf).
 //  3. anchored pattern already inside the scope prefix: the pattern itself.
+//  4. the mirror of 2 — unanchored single-segment SCOPE glob × directory rule
+//     (e.g. *.gradle × /app2 → /app2/**/*.gradle). The monorepo shape: a
+//     file-type scope cutting across per-directory rules. Unlike 1–3 the
+//     derivation can under-match (a rule whose own last segment matches the
+//     scope glob, e.g. /app* × *.gradle over a root file apple.gradle), so it
+//     is confirmed against the tree before being returned.
 func intersectPattern(scope string, rule *file.Rule, scopeSet map[string]bool, tree []string) (string, bool) {
 	subset := true
 	for p := range scopeSet {
@@ -676,11 +786,23 @@ func intersectPattern(scope string, rule *file.Rule, scopeSet map[string]bool, t
 		}
 	}
 	if subset {
+		// `subset` is established over the CURRENT tree, but the pattern
+		// returned here is written to a file that outlives it. An UNANCHORED
+		// scope matches at any depth, so under a rule that does not, the
+		// verbatim scope is repo-global: it hands that rule's owners every
+		// matching file added anywhere later. Verbatim is sound only where
+		// containment is proven STRUCTURALLY; otherwise derive the anchored
+		// form, and refuse if none exists rather than emit the over-broad one
+		// (round-2 review — the tree-scoped reasoning here was wrong for every
+		// unanchored spelling, not just globbed ones).
+		if !strings.HasPrefix(scope, "/") && !scopeContainedInRule(scope, rule.PatternText) {
+			return globScopeIntersect(scope, rule, scopeSet, tree)
+		}
 		return scope, true
 	}
 	prefix, ok := anchoredDirPrefix(scope)
 	if !ok {
-		return "", false
+		return globScopeIntersect(scope, rule, scopeSet, tree)
 	}
 	pat := rule.PatternText
 	if strings.HasPrefix(pat, "/") {
@@ -695,6 +817,89 @@ func intersectPattern(scope string, rule *file.Rule, scopeSet map[string]bool, t
 		return "", false
 	}
 	return prefix + "**/" + seg, true
+}
+
+// globScopeIntersect derives shape 4: an unanchored single-segment scope glob
+// (*.gradle) intersected with a rule that governs a directory subtree, giving
+// <ruleDir>/**/<scope>. Returns ok=false unless the derived pattern is legal
+// and matches exactly (scope ∩ rule) over the tree — the caller refuses on
+// false, so an inexact derivation degrades to a refusal, never a wrong write.
+func globScopeIntersect(scope string, rule *file.Rule, scopeSet map[string]bool, tree []string) (string, bool) {
+	// The scope must be a bare basename glob: anchored or multi-segment scopes
+	// cannot be concatenated onto a directory prefix without the two path
+	// fragments overlapping.
+	if strings.Contains(scope, "/") {
+		return "", false
+	}
+	dir, ok := ruleDirPrefix(rule.PatternText)
+	if !ok {
+		return "", false
+	}
+	cand := dir + "**/" + scope
+	pat, err := pattern.Compile(cand)
+	if err != nil {
+		return "", false
+	}
+	for _, p := range tree {
+		want := scopeSet[p] && rule.Pattern.Match(p)
+		if pat.Match(p) != want {
+			return "", false
+		}
+	}
+	return cand, true
+}
+
+// ruleDirPrefix turns a rule pattern that governs a directory subtree into the
+// prefix its contents match under: "/x", "/x/", "/x/**" → "/x/"; a
+// single-segment unanchored "x" or "x/" matches at any depth → "**/x/"; an
+// unanchored pattern with an interior slash is root-anchored, like gitignore.
+//
+// Anchoring is read from the ORIGINAL spelling, before any affix is trimmed.
+// Trimming first destroys the very slash that decides it: "app2/**" is a
+// two-segment, root-anchored pattern that never governs vendor/app2/, but
+// dropping its "/**" leaves the single segment "app2", which would be derived
+// as the any-depth "**/app2/" — a narrowing rule broader than the rule it
+// narrows. "**/a/b" is the mirror: explicitly any-depth, yet dropping the
+// "**/" leaves "a/b", which would be re-anchored to the repo root.
+func ruleDirPrefix(pat string) (string, bool) {
+	// A rule ending in a `*`-only segment governs a directory's DIRECT
+	// CHILDREN, not its subtree, so it has no subtree prefix at all: deriving
+	// "**/x/*/" from "**/x/*" would match arbitrarily deep descendants the rule
+	// never governs. The anchored spellings ("/x/*") happen to fail the tree
+	// confirmation, but the any-depth ones can pass it whenever the tree does
+	// not distinguish the two — so reject the shape outright (round-2 review).
+	//
+	// "<dir>/**/*" is NOT that shape: it compiles to `\Adir(?:/.+)?/[^/]+\z`,
+	// the whole subtree, exactly like "<dir>/**". Rejecting it too was an
+	// over-refusal (round-4 review).
+	if pat == "*" || (strings.HasSuffix(pat, "/*") && !strings.HasSuffix(pat, "/**/*")) {
+		return "", false
+	}
+	anyDepth := strings.HasPrefix(pat, "**/") ||
+		(!strings.HasPrefix(pat, "/") && !strings.Contains(strings.TrimSuffix(pat, "/"), "/"))
+
+	// Trim to a fixpoint so "x/**/" collapses to "x" rather than leaving a
+	// "**" that compounds into "/x/**/**/<scope>".
+	body := pat
+	for {
+		t := strings.TrimSuffix(strings.TrimSuffix(strings.TrimSuffix(body, "/"), "/**/*"), "/**")
+		if t == body {
+			break
+		}
+		body = t
+	}
+	body = strings.TrimPrefix(body, "**/")
+	switch body {
+	case "", "/", "*", "**", ".", "..":
+		return "", false
+	}
+	if strings.HasPrefix(body, "/") {
+		return body + "/", true
+	}
+	if anyDepth {
+		return "**/" + body + "/", true
+	}
+	return "/" + body + "/", true
 }
 
 // anchoredDirPrefix normalizes "/x/", "/x/**", "/x" to the prefix "/x/".
