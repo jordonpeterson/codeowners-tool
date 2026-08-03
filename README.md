@@ -120,6 +120,80 @@ Scope is a directory, file path, or glob — same syntax as CODEOWNERS patterns.
 | `remove_owner(scope, owner)` | Owner stops owning every path in scope. If a rule's owner set would empty, `--on-empty` is **required** (see below). |
 | `rename_owner(old, new)` | Global identifier substitution — the only op safe as pure text replacement (it can't change any rule's match set). |
 
+An owner is `@org/team`, `@username`, or an email address. The `@` is
+required — a bare `team_a` is rejected with
+`error: invalid owner token "team_a"`. Both `@org/team_a` and `@team_a` parse,
+but they mean different things to GitHub (a team vs a user account) and the
+tool cannot tell you which you meant.
+
+### Adding an owner: co-owner, or sole owner?
+
+The most common task, and the one where hand-editing goes wrong. Given:
+
+```
+/services/ @org/platform @org/sre
+```
+
+**Add `@org/team_a`, keeping the existing owners:**
+
+```sh
+codeowners-tool plan --op 'add_owner(/services/, @org/team_a)' --out plan.json
+```
+
+```
+-/services/ @org/platform @org/sre
++/services/ @org/platform @org/sre @org/team_a
+
+services/api/main.go : [@org/platform, @org/sre] → [@org/platform, @org/sre, @org/team_a]
+```
+
+**Make `@org/team_a` the sole owner, displacing the others:**
+
+```sh
+codeowners-tool plan --op 'set_owners(/services/, [@org/team_a])' --out plan.json
+```
+
+```
+-/services/ @org/platform @org/sre
++/services/ @org/team_a
+
+services/api/main.go : [@org/platform, @org/sre] → [@org/team_a]
+```
+
+Review `plan.json`, then `codeowners-tool apply --plan plan.json`.
+
+**Why not just append a line?** Writing `/services/ @org/team_a` at the end of
+the file yourself produces the *second* result when you probably wanted the
+first. Last match wins and owner sets do not union (S-1), so an appended rule
+replaces the owners of everything it matches. `add_owner` re-resolves every
+tracked path and proves the prior owners survived; that check is the point of
+the tool.
+
+**Scope is per-path, not "the whole file."** For a repo-wide owner, `*` works,
+but look at what it has to do:
+
+```sh
+codeowners-tool plan --op 'add_owner(*, @org/team_a)' --out plan.json
+```
+
+```
+-/web/ @org/frontend
++/web/ @org/frontend @org/team_a
+-/services/ @org/platform @org/sre
++/services/ @org/platform @org/sre @org/team_a
++* @org/team_a
+
+.github/CODEOWNERS   : (unowned) → [@org/team_a]
+services/api/main.go : [@org/platform, @org/sre] → [@org/platform, @org/sre, @org/team_a]
+web/app.js           : [@org/frontend] → [@org/frontend, @org/team_a]
+```
+
+The catch-all alone would not be enough: every later rule shadows it, so
+`@org/team_a` would own nothing under `services/` or `web/`. The planner has
+to amend each one. A repo-wide op therefore touches every rule in the file and
+can pull previously unowned paths (here the CODEOWNERS file itself) into
+ownership — read the `ownership_rows` before applying it.
+
 ### The two invariants
 
 - **INV-1 (in scope):** after apply, every in-scope path resolves to exactly
