@@ -76,6 +76,32 @@ func (p *Pattern) Match(testPath string) bool {
 	return p.regex.MatchString(testPath)
 }
 
+// normalizeSegs splits a pattern into the segment list buildPatternRegex
+// compiles, applying gitignore's anchoring rules. Contains depends on this
+// being the SAME normalization the matcher uses — a divergence here would make
+// containment reason about a different language than Match implements.
+func normalizeSegs(pattern string) []string {
+	segs := strings.Split(pattern, "/")
+
+	if segs[0] == "" {
+		// Leading slash: match is relative to root.
+		segs = segs[1:]
+	} else if len(segs) == 1 || (len(segs) == 2 && segs[1] == "") {
+		// Single-segment pattern with no leading slash matches at any depth
+		// (equivalent to a leading **/). A trailing slash does NOT anchor it:
+		// "docs/" is one segment and matches "src/docs/notes.md".
+		if segs[0] != "**" {
+			segs = append([]string{"**"}, segs...)
+		}
+	}
+
+	if len(segs) > 1 && segs[len(segs)-1] == "" {
+		// Trailing slash is equivalent to "/**".
+		segs[len(segs)-1] = "**"
+	}
+	return segs
+}
+
 // buildPatternRegex compiles a gitignore-style CODEOWNERS pattern to a regex.
 // Ported from hmarr/codeowners.
 func buildPatternRegex(pattern string) (*regexp.Regexp, error) {
@@ -87,23 +113,7 @@ func buildPatternRegex(pattern string) (*regexp.Regexp, error) {
 		return regexp.Compile(`\A\z`)
 	}
 
-	segs := strings.Split(pattern, "/")
-
-	if segs[0] == "" {
-		// Leading slash: match is relative to root.
-		segs = segs[1:]
-	} else if len(segs) == 1 || (len(segs) == 2 && segs[1] == "") {
-		// Single-segment pattern with no leading slash matches at any depth
-		// (equivalent to a leading **/).
-		if segs[0] != "**" {
-			segs = append([]string{"**"}, segs...)
-		}
-	}
-
-	if len(segs) > 1 && segs[len(segs)-1] == "" {
-		// Trailing slash is equivalent to "/**".
-		segs[len(segs)-1] = "**"
-	}
+	segs := normalizeSegs(pattern)
 
 	const sep = "/"
 	lastSegIndex := len(segs) - 1

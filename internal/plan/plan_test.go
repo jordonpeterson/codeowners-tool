@@ -511,6 +511,281 @@ func TestR6_UnownedPolicyPureTransform(t *testing.T) {
 	}
 }
 
+// A file-glob scope must never widen a directory rule. The amend-in-place
+// decision used to be a SNAPSHOT property ("every tracked file this rule wins
+// is in scope"), but a CODEOWNERS rule governs files that do not exist yet.
+// With build.gradle the only tracked file under path/app/, the planner amended
+// `path/app/* @b` to `path/app/* @b @gradle` — handing @gradle every future
+// non-gradle file in that directory. It must insert a narrowing
+// `path/app/*.gradle` rule instead. (Reported by a user.)
+func TestR2_FileGlobScopeDoesNotWidenDirectoryRule(t *testing.T) {
+	tree := []string{"build.gradle", "path/app/build.gradle"}
+	p, err := build(t, "* @a\npath/app/* @b\n", tree, plan.Options{}, "add_owner(*.gradle, @gradle)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range p.Changes {
+		if c.Action == "amend" && c.Pattern == "path/app/*" {
+			t.Errorf("amended the directory rule %q instead of narrowing it: %+v", c.Pattern, c)
+		}
+	}
+	after := plan.ResolveContent(p.AfterContent, tree)
+	got := after["path/app/build.gradle"].Owners
+	sort.Strings(got)
+	if !reflect.DeepEqual(got, []string{"@b", "@gradle"}) {
+		t.Errorf("path/app/build.gradle = %v, want {@b, @gradle}", got)
+	}
+	got = after["build.gradle"].Owners
+	sort.Strings(got)
+	if !reflect.DeepEqual(got, []string{"@a", "@gradle"}) {
+		t.Errorf("build.gradle = %v, want {@a, @gradle}", got)
+	}
+
+	// The point of the fix: a non-gradle file added to path/app/ LATER must
+	// still resolve to @b alone. The tracked tree cannot show this, so resolve
+	// the planned content against a tree that includes the future file.
+	future := append(append([]string{}, tree...), "path/app/main.kt")
+	got = plan.ResolveContent(p.AfterContent, future)["path/app/main.kt"].Owners
+	if !reflect.DeepEqual(got, []string{"@b"}) {
+		t.Errorf("future path/app/main.kt = %v, want {@b} — the gradle owner must not inherit the directory", got)
+	}
+}
+
+// Same snapshot trap for the other common directory shape: an anchored rule
+// with no trailing slash, whose match set is a whole subtree.
+func TestR2_FileGlobScopeDoesNotWidenAnchoredDirRule(t *testing.T) {
+	tree := []string{"build.gradle", "svc/build.gradle"}
+	p, err := build(t, "* @a\n/svc @b\n", tree, plan.Options{}, "add_owner(*.gradle, @gradle)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range p.Changes {
+		if c.Action == "amend" && c.Pattern == "/svc" {
+			t.Errorf("amended the directory rule %q instead of narrowing it: %+v", c.Pattern, c)
+		}
+	}
+	after := plan.ResolveContent(p.AfterContent, tree)
+	got := after["svc/build.gradle"].Owners
+	sort.Strings(got)
+	if !reflect.DeepEqual(got, []string{"@b", "@gradle"}) {
+		t.Errorf("svc/build.gradle = %v, want {@b, @gradle}", got)
+	}
+	future := append(append([]string{}, tree...), "svc/deep/main.kt")
+	got = plan.ResolveContent(p.AfterContent, future)["svc/deep/main.kt"].Owners
+	if !reflect.DeepEqual(got, []string{"@b"}) {
+		t.Errorf("future svc/deep/main.kt = %v, want {@b}", got)
+	}
+}
+
+// remove_owner shares the amend decision, so it shared the bug: removing
+// @b for *.gradle must not strip @b from the whole directory.
+func TestR2_FileGlobScopeDoesNotNarrowDirectoryRuleOnRemove(t *testing.T) {
+	tree := []string{"path/app/build.gradle"}
+	p, err := build(t, "* @a\npath/app/* @b @gradle\n", tree, plan.Options{},
+		"remove_owner(*.gradle, @gradle)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range p.Changes {
+		if c.Action == "amend" && c.Pattern == "path/app/*" {
+			t.Errorf("amended the directory rule %q instead of narrowing it: %+v", c.Pattern, c)
+		}
+	}
+	future := append(append([]string{}, tree...), "path/app/main.kt")
+	after := plan.ResolveContent(p.AfterContent, future)
+	if got := after["path/app/build.gradle"].Owners; !reflect.DeepEqual(got, []string{"@b"}) {
+		t.Errorf("path/app/build.gradle = %v, want {@b}", got)
+	}
+	got := after["path/app/main.kt"].Owners
+	sort.Strings(got)
+	if !reflect.DeepEqual(got, []string{"@b", "@gradle"}) {
+		t.Errorf("future path/app/main.kt = %v, want {@b, @gradle} — a non-gradle file must keep @gradle", got)
+	}
+}
+
+// Review finding: a trailing slash does NOT anchor a single-segment pattern.
+// `docs/` is one segment, so gitignore gives it an implicit leading `**/` and
+// it matches `web/docs/spec.md`. A textual prefix comparison read it as
+// root-anchored and amended it in place for the scope `/docs/`, handing @x
+// every `docs` directory in the repo — the reported bug in a shape the first
+// fix did not cover.
+func TestR2_UnanchoredDirectoryRuleIsNotAmendedForAnchoredScope(t *testing.T) {
+	tree := []string{"docs/readme.md", "src/x.go"}
+	p, err := build(t, "* @a\ndocs/ @b\n", tree, plan.Options{}, "add_owner(/docs/, @x)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range p.Changes {
+		if c.Action == "amend" && c.Pattern == "docs/" {
+			t.Errorf("amended unanchored rule %q for anchored scope /docs/: %+v", c.Pattern, c)
+		}
+	}
+	after := plan.ResolveContent(p.AfterContent, tree)
+	got := after["docs/readme.md"].Owners
+	sort.Strings(got)
+	if !reflect.DeepEqual(got, []string{"@b", "@x"}) {
+		t.Errorf("docs/readme.md = %v, want {@b, @x}", got)
+	}
+	// The whole point: a docs directory somewhere else is outside /docs/.
+	future := append(append([]string{}, tree...), "web/docs/spec.md")
+	got = plan.ResolveContent(p.AfterContent, future)["web/docs/spec.md"].Owners
+	if !reflect.DeepEqual(got, []string{"@b"}) {
+		t.Errorf("future web/docs/spec.md = %v, want {@b} — it is outside scope /docs/", got)
+	}
+}
+
+// Containment must be semantic, not textual. Each of these rules is genuinely
+// inside its op's scope, so amending in place is sound and the planner must not
+// refuse or bloat the file. A textual last-segment comparison rejected them all.
+func TestR2_ContainmentIsSemanticNotTextual(t *testing.T) {
+	cases := []struct {
+		name, content, op string
+		tree              []string
+		wantAfter         string
+	}{
+		{"literal is an instance of the scope glob",
+			"* @a\nbuild.gradle @b\n", "add_owner(*.gradle, @g)",
+			[]string{"build.gradle", "x/build.gradle"}, "* @a\nbuild.gradle @b @g\n"},
+		{"anchored literal under a basename glob",
+			"* @a\n/build.gradle @b\n", "add_owner(*.gradle, @g)",
+			[]string{"build.gradle", "svc/x.gradle"}, "* @a\n*.gradle @a @g\n/build.gradle @b @g\n"},
+		{"mid-string slash already anchors the scope",
+			"* @a\npath/app/* @b\n", "add_owner(path/app/, @x)",
+			[]string{"path/app/build.gradle"}, "* @a\npath/app/* @b @x\n"},
+		{"directory rule inside a bare directory-name scope",
+			"* @a\ndocs/ @b\n", "add_owner(docs, @d)",
+			[]string{"docs/readme.md"}, "* @a\ndocs/ @b @d\n"},
+		{"anchored subtree rule inside an unanchored equivalent",
+			"* @a\n/src/api/ @b\n", "add_owner(src/api, @w)",
+			[]string{"src/api/a.go", "src/other.go"}, "* @a\n/src/api/ @b @w\n"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			p, err := build(t, c.content, c.tree, plan.Options{}, c.op)
+			if err != nil {
+				t.Fatalf("%s must not refuse: %v", c.op, err)
+			}
+			if p.AfterContent != c.wantAfter {
+				t.Errorf("after = %q, want %q", p.AfterContent, c.wantAfter)
+			}
+		})
+	}
+}
+
+// Review finding: a `dir/*` rule governs exactly ONE level, but no CODEOWNERS
+// pattern says "one level AND matching *.gradle" — `path/app/*.gradle` also
+// matches files under a DIRECTORY named `.gradle`. The narrowing rule is exact
+// for every tracked file, so it is emitted, but the residual must be disclosed
+// rather than silently presented as proven.
+func TestR2_InexactNarrowingIsDisclosed(t *testing.T) {
+	tree := []string{"build.gradle", "path/app/build.gradle"}
+	p, err := build(t, "* @a\npath/app/* @b\n", tree, plan.Options{}, "add_owner(*.gradle, @g)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "* @a\n*.gradle @a @g\npath/app/* @b\npath/app/*.gradle @b @g\n"; p.AfterContent != want {
+		t.Errorf("after = %q, want %q", p.AfterContent, want)
+	}
+	var found bool
+	for _, w := range p.Warnings {
+		if strings.Contains(w, `"path/app/*.gradle"`) && strings.Contains(w, "not provably confined") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected a warning disclosing the inexact narrowing, got %v", p.Warnings)
+	}
+	// A rule whose reach IS expressible must be proven, not warned about.
+	p2, err := build(t, "* @a\n/svc @b\n", []string{"build.gradle", "svc/build.gradle"},
+		plan.Options{}, "add_owner(*.gradle, @g)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "* @a\n*.gradle @a @g\n/svc @b\n/svc/**/*.gradle @b @g\n"; p2.AfterContent != want {
+		t.Errorf("after = %q, want %q", p2.AfterContent, want)
+	}
+	if len(p2.Warnings) != 0 {
+		t.Errorf("subtree rule narrowing is provably exact; want no warnings, got %v", p2.Warnings)
+	}
+}
+
+// Review finding: a single-segment scope that is a plain directory NAME (`x`,
+// `docs`) denotes a whole subtree, not a filename glob. Deriving a narrowing
+// pattern as though it were a glob produced junk (`x/**/x`) that matched none
+// of the group's paths, so removePass re-inserted it every pass and then
+// reported "did not converge — file structure defeats the writer" for a
+// two-line file. The rule is inside the scope, so it must simply be amended.
+func TestR6_DirectoryNameScopeConverges(t *testing.T) {
+	cases := []struct {
+		name, content, op string
+		tree              []string
+		wantAfter         string
+	}{
+		{"anchored globstar rule", "* @a\n/x/** @a @c\n", "remove_owner(x, @c)",
+			[]string{"x/sub/c.gradle", "x/main.go"}, "* @a\n/x/** @a\n"},
+		{"unanchored directory rule", "* @a\ndocs/ @b @d\n", "remove_owner(docs, @d)",
+			[]string{"docs/readme.md"}, "* @a\ndocs/ @b\n"},
+	}
+	for _, c := range cases {
+		for _, policy := range []string{"", "error", "inherit", "unowned"} {
+			t.Run(c.name+"/"+policy, func(t *testing.T) {
+				p, err := build(t, c.content, c.tree, plan.Options{OnEmpty: policy}, c.op)
+				if err != nil {
+					t.Fatalf("must not refuse (--on-empty=%q): %v", policy, err)
+				}
+				if p.AfterContent != c.wantAfter {
+					t.Errorf("after = %q, want %q", p.AfterContent, c.wantAfter)
+				}
+			})
+		}
+	}
+}
+
+// set_owners shared the snapshot bug: it amended the last intersecting rule
+// whenever that rule's TRACKED match set equalled the scope set. With
+// svc/sub/a.go the only tracked file under /svc/, it rewrote `/svc/ @b` to
+// `/svc/ @g` — silently transferring the entire /svc/ tree away from @b.
+func TestR4_SetOwnersDoesNotAmendABroaderRule(t *testing.T) {
+	tree := []string{"svc/sub/a.go", "README.md"}
+	p, err := build(t, "* @a\n/svc/ @b\n", tree, plan.Options{}, "set_owners(/svc/sub/, [@g])")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range p.Changes {
+		if c.Action == "amend" && c.Pattern == "/svc/" {
+			t.Errorf("amended the broader rule %q: %+v", c.Pattern, c)
+		}
+	}
+	if got := plan.ResolveContent(p.AfterContent, tree)["svc/sub/a.go"].Owners; !reflect.DeepEqual(got, []string{"@g"}) {
+		t.Errorf("svc/sub/a.go = %v, want {@g}", got)
+	}
+	future := append(append([]string{}, tree...), "svc/other.go")
+	got := plan.ResolveContent(p.AfterContent, future)["svc/other.go"].Owners
+	if !reflect.DeepEqual(got, []string{"@b"}) {
+		t.Errorf("future svc/other.go = %v, want {@b} — @b must keep the rest of /svc/", got)
+	}
+}
+
+// The same, in the shape the user reported: a file-glob scope must not rewrite
+// a directory rule's owner set wholesale.
+func TestR2_FileGlobScopeDoesNotWidenDirectoryRuleOnSet(t *testing.T) {
+	tree := []string{"path/app/build.gradle", "README.md"}
+	p, err := build(t, "* @a\npath/app/* @b\n", tree, plan.Options{}, "set_owners(*.gradle, [@g])")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range p.Changes {
+		if c.Action == "amend" && c.Pattern == "path/app/*" {
+			t.Errorf("amended the directory rule %q: %+v", c.Pattern, c)
+		}
+	}
+	future := append(append([]string{}, tree...), "path/app/main.kt")
+	got := plan.ResolveContent(p.AfterContent, future)["path/app/main.kt"].Owners
+	if !reflect.DeepEqual(got, []string{"@b"}) {
+		t.Errorf("future path/app/main.kt = %v, want {@b}", got)
+	}
+}
+
 // E2E-testing finding: add_owner amend records recorded the POST-op owner
 // set as old_owners (OwnersCopy taken after SetOwners mutated the aliased
 // rule). The change record must show the true before/after.
