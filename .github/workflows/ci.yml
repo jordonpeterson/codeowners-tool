@@ -31,6 +31,12 @@ jobs:
       - name: Test
         run: go test -race ./...
 
+      # docs/BEHAVIOR.md is generated from the test suite's doc comments, so
+      # it can only stay true if every change regenerates it. Adding, renaming
+      # or re-documenting a test without running `make docs` fails here.
+      - name: Docs up to date
+        run: make docs-check
+
       - name: Build
         run: make build
 
