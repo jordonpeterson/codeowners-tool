@@ -77,6 +77,33 @@ func main() {
 	fmt.Printf("wrote %s (%d tests)\n", out, total)
 }
 
+// sortedPkgNames orders test packages deterministically, external (`x_test`)
+// before internal (`x`), then lexically.
+func sortedPkgNames(pkgs map[string]*ast.Package) []string {
+	names := make([]string, 0, len(pkgs))
+	for n := range pkgs {
+		names = append(names, n)
+	}
+	sort.Slice(names, func(i, j int) bool {
+		ei := strings.HasSuffix(names[i], "_test")
+		ej := strings.HasSuffix(names[j], "_test")
+		if ei != ej {
+			return ei
+		}
+		return names[i] < names[j]
+	})
+	return names
+}
+
+func sortedKeys[V any](m map[string]V) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
 func scan(dir string) *pkgDoc {
 	fset := token.NewFileSet()
 	pkgsMap, err := parser.ParseDir(fset, dir, func(fi os.FileInfo) bool {
@@ -88,8 +115,16 @@ func scan(dir string) *pkgDoc {
 	out := &pkgDoc{Dir: filepath.ToSlash(dir)}
 	var names []string
 	byName := map[string]testDoc{}
-	for _, pkg := range pkgsMap {
-		for _, f := range pkg.Files {
+	// parser.ParseDir returns unordered maps, and a directory can hold BOTH
+	// the internal (`plan`) and external (`plan_test`) test packages — so
+	// "first doc comment wins" picked a random one per run and `make docs`
+	// was not reproducible. Walk packages and files in a fixed order, with
+	// the external test package first: its doc comment is the one written to
+	// describe the package's behavior, not an internal white-box helper's.
+	for _, pkgName := range sortedPkgNames(pkgsMap) {
+		pkg := pkgsMap[pkgName]
+		for _, fname := range sortedKeys(pkg.Files) {
+			f := pkg.Files[fname]
 			if f.Doc != nil && out.Doc == "" {
 				out.Doc = strings.TrimSpace(f.Doc.Text())
 			}
