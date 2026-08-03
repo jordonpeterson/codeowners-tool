@@ -464,15 +464,39 @@ compile error surfaced to the caller, never a silent negation.
 SPEC S-6: paths are case-sensitive. `/Src/` on a tree containing `src/` is a
 dead rule that looks fine on a case-insensitive filesystem.
 
+### `TestContainsIsReflexive`
+
+Reflexivity: a pattern always contains itself, whatever its shape.
+
+### `TestContainsIsSound`
+
+Contains must be SOUND: it may answer false when containment holds, but it
+must never answer true when a concrete path matches `inner` and not `outer`.
+An unsound answer here lets the planner amend a rule in place and silently
+hand an owner every future file that rule will ever match — the defect this
+whole mechanism exists to prevent.
+
+### `TestContainsKnownPairs`
+
+The containments the planner relies on to amend a rule in place, and the
+near-miss shapes it must NOT accept.
+
+### `TestContainsRejectsInvalid`
+
+Contains must not blow up or report true on patterns Compile rejects.
+
 ## internal/plan
 
-> White-box test for the remove_owner settling logic (second-review
-> regression): divergence between the pure transform desired∖{owner} and the
-> file's actual resolution is accepted ONLY under --on-empty=inherit, where
-> rule deletion legitimately resurrects owners from surviving rules. Under
-> any other policy no rule is deleted, so divergence means a synthesis bug
-> (or a bad earlier batched edit) and must REFUSE — accepting it would
-> launder the error past the gate.
+> Package plan_test encodes the spec's acceptance tests for Engine A.
+> 
+> The planner takes intent-level ops, computes the resolved ownership
+> before/after over the real tree, synthesizes line edits, and GATES the
+> result on two invariants:
+> 
+> 	INV-1: every path in scope resolves to exactly what the op requires.
+> 	INV-2: every path outside scope resolves to exactly what it did before.
+> 
+> A plan that cannot be proven is refused (exit 2), never guessed at.
 
 ### `TestAddOwner_CoversUnownedPaths`
 
@@ -506,6 +530,12 @@ TestShape4_TreeConfirmationRefusesInexactDerivation.
 INV-5 property: parse→serialize round-trips any generated file (plus junk
 mutations) byte-identically.
 
+### `TestR2_ContainmentIsSemanticNotTextual`
+
+Containment must be semantic, not textual. Each of these rules is genuinely
+inside its op's scope, so amending in place is sound and the planner must not
+refuse or bloat the file. A textual last-segment comparison rejected them all.
+
 ### `TestR2_FileGlobScopeAcrossAnchoredRules`
 
 R-2, shape 4: a FILE-GLOB scope crossing anchored directory rules.
@@ -528,6 +558,31 @@ Shape 4 with the rule written as an UNANCHORED directory (`app2/`, no
 leading slash). Such a rule matches app2/ at any depth, so the narrowing
 must too: `**/app2/**/*.gradle`, not `/app2/**/*.gradle`.
 
+### `TestR2_FileGlobScopeDoesNotNarrowDirectoryRuleOnRemove`
+
+remove_owner shares the amend decision, so it shared the bug: removing
+@b for *.gradle must not strip @b from the whole directory.
+
+### `TestR2_FileGlobScopeDoesNotWidenAnchoredDirRule`
+
+Same snapshot trap for the other common directory shape: an anchored rule
+with no trailing slash, whose match set is a whole subtree.
+
+### `TestR2_FileGlobScopeDoesNotWidenDirectoryRule`
+
+A file-glob scope must never widen a directory rule. The amend-in-place
+decision used to be a SNAPSHOT property ("every tracked file this rule wins
+is in scope"), but a CODEOWNERS rule governs files that do not exist yet.
+With build.gradle the only tracked file under path/app/, the planner amended
+`path/app/* @b` to `path/app/* @b @gradle` — handing @gradle every future
+non-gradle file in that directory. It must insert a narrowing
+`path/app/*.gradle` rule instead. (Reported by a user.)
+
+### `TestR2_FileGlobScopeDoesNotWidenDirectoryRuleOnSet`
+
+The same, in the shape the user reported: a file-glob scope must not rewrite
+a directory rule's owner set wholesale.
+
 ### `TestR2_FileGlobScopeRemoveOwnerAcrossAnchoredRule`
 
 The same derivation serves remove_owner, which shares intersectPattern:
@@ -546,6 +601,14 @@ it represents. Every .gradle file added anywhere later silently inherits
 /app2's owner. When an anchored derivation exists it is the tighter of two
 equally-exact patterns and must be preferred.
 
+### `TestR2_InexactNarrowingIsDisclosed`
+
+Review finding: a `dir/*` rule governs exactly ONE level, but no CODEOWNERS
+pattern says "one level AND matching *.gradle" — `path/app/*.gradle` also
+matches files under a DIRECTORY named `.gradle`. The narrowing rule is exact
+for every tracked file, so it is emitted, but the residual must be disclosed
+rather than silently presented as proven.
+
 ### `TestR2_ScopeNestedInsideBroaderAnchoredRule`
 
 A scope nested INSIDE a broader anchored rule: the broad rule governs
@@ -560,10 +623,35 @@ add_owner over a scope that intersects an UNANCHORED broad rule whose match
 set extends outside the scope: the planner must synthesize an intersection
 pattern, and the out-of-scope paths governed by that rule stay untouched.
 
+### `TestR2_UnanchoredDirectoryRuleIsNotAmendedForAnchoredScope`
+
+Review finding: a trailing slash does NOT anchor a single-segment pattern.
+`docs/` is one segment, so gitignore gives it an implicit leading `**/` and
+it matches `web/docs/spec.md`. A textual prefix comparison read it as
+root-anchored and amended it in place for the scope `/docs/`, handing @x
+every `docs` directory in the repo — the reported bug in a shape the first
+fix did not cover.
+
 ### `TestR4_AmendPreferredOverInsert`
 
 SPEC R-4: prefer amending an existing exact-match line over inserting.
 Without this, repeated automated runs grow the file without bound.
+
+### `TestR4_SetOwnersDoesNotAmendABroaderRule`
+
+set_owners shared the snapshot bug: it amended the last intersecting rule
+whenever that rule's TRACKED match set equalled the scope set. With
+svc/sub/a.go the only tracked file under /svc/, it rewrote `/svc/ @b` to
+`/svc/ @g` — silently transferring the entire /svc/ tree away from @b.
+
+### `TestR6_DirectoryNameScopeConverges`
+
+Review finding: a single-segment scope that is a plain directory NAME (`x`,
+`docs`) denotes a whole subtree, not a filename glob. Deriving a narrowing
+pattern as though it were a glob produced junk (`x/**/x`) that matched none
+of the group's paths, so removePass re-inserted it every pass and then
+reported "did not converge — file structure defeats the writer" for a
+two-line file. The rule is inside the scope, so it must simply be amended.
 
 ### `TestR6_EmptyPolicies`
 
@@ -864,4 +952,4 @@ DIFFERENT states; transitioning between them is a real ownership change.
 
 ---
 
-131 documented test cases across 11 packages.
+144 documented test cases across 11 packages.

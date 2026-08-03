@@ -408,7 +408,6 @@ func simulate(op ops.Op, owners []string) []string {
 
 func synthAdd(f *file.File, tree []string, op ops.Op, scope map[string]bool, desired map[string][]string, pl *Plan) error {
 	cur := resolve.All(f, tree)
-	winners := winnersByLine(cur)
 	warnShadowedDuplicates(f, tree, scope, pl)
 
 	groups := map[int]bool{}
@@ -432,7 +431,7 @@ func synthAdd(f *file.File, tree []string, op ops.Op, scope map[string]bool, des
 		if contains(r.Owners, op.Owner) {
 			continue
 		}
-		if subset(winners[l], scope) {
+		if pattern.Contains(op.Scope, r.PatternText) {
 			old := f.LineText(l)
 			// Capture BEFORE SetOwners mutates the rule — r aliases the live
 			// rule, so a post-mutation OwnersCopy reports the new set as the
@@ -444,14 +443,17 @@ func synthAdd(f *file.File, tree []string, op ops.Op, scope map[string]bool, des
 				Action: "amend", Line: l + 1, Pattern: r.PatternText,
 				OldOwners: oldOwners, NewOwners: newOwners,
 				OldLine: old, NewLine: f.LineText(l),
-				Reason: fmt.Sprintf("every path governed by %q is inside scope %q; amended in place (R-2/R-4)", r.PatternText, op.Scope),
+				Reason: fmt.Sprintf("pattern %q can only ever match paths inside scope %q; amended in place (R-2/R-4)", r.PatternText, op.Scope),
 			})
 		} else {
-			inter, ok := intersectPattern(op.Scope, r, scope, tree)
+			inter, exact, ok := intersectPattern(op.Scope, r, scope, tree)
 			if !ok {
 				return &RefusalError{Msg: fmt.Sprintf(
 					"refusing: rule %q also governs paths outside scope %q, and no sound narrowing pattern is derivable — amending would violate INV-2, appending would violate INV-1",
 					r.PatternText, op.Scope)}
+			}
+			if !exact {
+				pl.addWarning(inexactNarrowingWarning(inter, op.Scope, r.PatternText))
 			}
 			newOwners := append(append([]string{}, r.Owners...), op.Owner)
 			f.InsertRule(l+1, inter, newOwners)
@@ -525,7 +527,12 @@ func synthSet(f *file.File, tree []string, op ops.Op, scope map[string]bool, des
 		}
 	}
 
-	if lastRule != nil && matchSetEquals(lastRule, tree, scope) {
+	// Amend only when the rule governs EXACTLY the scope as a pattern. Equal
+	// match sets over the tracked tree are not enough: set_owners replaces the
+	// owner set outright, so amending a rule that merely looks scope-sized
+	// today hands every future file it matches to the new owners and strips
+	// whoever owned them (review finding — the reported bug, in set_owners).
+	if lastRule != nil && samePatternLanguage(op.Scope, lastRule.PatternText) {
 		if resolve.OwnersEqual(lastRule.OwnersCopy(), op.Owners) {
 			// Already exact; nothing to do for this op.
 		} else {
@@ -622,7 +629,6 @@ func synthRemove(f *file.File, tree []string, op ops.Op, scope map[string]bool, 
 // was made.
 func removePass(f *file.File, tree []string, op ops.Op, scope map[string]bool, onEmpty string, pl *Plan) (bool, error) {
 	cur := resolve.All(f, tree)
-	winners := winnersByLine(cur)
 
 	groups := map[int][]string{}
 	for p := range scope {
@@ -642,7 +648,7 @@ func removePass(f *file.File, tree []string, op ops.Op, scope map[string]bool, o
 	for _, l := range lines {
 		r := f.Lines[l].Rule
 		newOwners := minus(r.Owners, op.Owner)
-		if subset(winners[l], scope) {
+		if pattern.Contains(op.Scope, r.PatternText) {
 			if len(newOwners) > 0 {
 				old := f.LineText(l)
 				oldOwners := r.OwnersCopy()
@@ -651,7 +657,7 @@ func removePass(f *file.File, tree []string, op ops.Op, scope map[string]bool, o
 					Action: "amend", Line: l + 1, Pattern: r.PatternText,
 					OldOwners: oldOwners, NewOwners: newOwners,
 					OldLine: old, NewLine: f.LineText(l),
-					Reason: fmt.Sprintf("every path governed by %q is inside scope; removed %s in place", r.PatternText, op.Owner),
+					Reason: fmt.Sprintf("pattern %q can only ever match paths inside scope; removed %s in place", r.PatternText, op.Owner),
 				})
 				continue
 			}
@@ -687,10 +693,13 @@ func removePass(f *file.File, tree []string, op ops.Op, scope map[string]bool, o
 			}
 		} else {
 			// Rule also governs out-of-scope paths: split via narrowing insert.
-			inter, ok := intersectPattern(op.Scope, r, scope, tree)
+			inter, exact, ok := intersectPattern(op.Scope, r, scope, tree)
 			if !ok {
 				return false, &RefusalError{Msg: fmt.Sprintf(
 					"refusing: rule %q also governs paths outside scope %q and no sound narrowing pattern is derivable", r.PatternText, op.Scope)}
+			}
+			if !exact {
+				pl.addWarning(inexactNarrowingWarning(inter, op.Scope, r.PatternText))
 			}
 			if len(newOwners) == 0 {
 				switch onEmpty {
@@ -753,6 +762,109 @@ func synthRename(f *file.File, op ops.Op, desired map[string][]string, pl *Plan)
 	return nil
 }
 
+// intersectPattern derives a pattern matching exactly (scope ∩ rule) and
+// PROVES it before returning. deriveIntersection supplies the candidate
+// shapes; this layer is what makes them trustworthy.
+//
+// The load-bearing check is pattern containment: the candidate must not reach
+// outside the scope (which would grant the new owner beyond what was asked)
+// nor outside the rule (which would grant the RULE's owners paths it never
+// governed). Both are claims about files that do not exist yet, so no tree can
+// establish them.
+//
+// exact=false means the candidate is right for every tracked file but not
+// provably confined for future ones — the caller discloses it. CODEOWNERS
+// genuinely cannot express some intersections: a `dir/*` rule governs one
+// level, and no pattern says "one level AND matching *.gradle", since
+// `dir/*.gradle` also matches under a DIRECTORY named `.gradle`. Refusing
+// outright would make add_owner(*.gradle, …) impossible on any repo with a
+// `dir/*` rule.
+func intersectPattern(scope string, rule *file.Rule, scopeSet map[string]bool, tree []string) (inter string, exact bool, ok bool) {
+	var cands []string
+	if c, got := deriveIntersection(scope, rule, scopeSet, tree); got {
+		cands = append(cands, c)
+	}
+	// deriveIntersection rejects one-level (`dir/*`) rules outright, since no
+	// subtree prefix describes them. The closest expressible narrowing is the
+	// glob at that same level; it is inexact only for descendants of a
+	// directory whose own name matches the glob.
+	if seg, got := basenameGlob(scope); got {
+		if d, got := oneLevelRuleDir(rule.PatternText); got {
+			cands = append(cands, d+seg)
+		}
+	}
+	for _, c := range cands {
+		if treeExact(c, rule, scopeSet, tree) &&
+			pattern.Contains(scope, c) && pattern.Contains(rule.PatternText, c) {
+			return c, true, true
+		}
+	}
+	for _, c := range cands {
+		if treeExact(c, rule, scopeSet, tree) {
+			return c, false, true
+		}
+	}
+	return "", false, false
+}
+
+// oneLevelRuleDir returns the directory prefix of a rule that governs a
+// directory's DIRECT CHILDREN (`path/app/*`), preserving the rule's own
+// anchoring so the derived pattern matches at the same depth.
+func oneLevelRuleDir(pat string) (string, bool) {
+	if pat == "*" || !strings.HasSuffix(pat, "/*") || strings.HasSuffix(pat, "/**/*") {
+		return "", false
+	}
+	return strings.TrimSuffix(pat, "*"), true
+}
+
+// treeExact reports whether a candidate matches exactly (scope ∩ rule) over the
+// tracked tree. It pins down an under-narrow guess with a clear refusal instead
+// of letting it loop in removePass's fixpoint or surface as a gate violation,
+// but says nothing about files that do not exist yet.
+func treeExact(cand string, rule *file.Rule, scopeSet map[string]bool, tree []string) bool {
+	cp, err := pattern.Compile(cand)
+	if err != nil {
+		return false
+	}
+	for _, p := range tree {
+		if cp.Match(p) != (scopeSet[p] && rule.Pattern.Match(p)) {
+			return false
+		}
+	}
+	return true
+}
+
+// basenameGlob recognizes a single-segment pattern — one that matches a
+// basename at any depth.
+func basenameGlob(pat string) (string, bool) {
+	if pat == "" || pat == "**" || strings.Contains(pat, "/") {
+		return "", false
+	}
+	return pat, true
+}
+
+// samePatternLanguage reports whether two patterns match exactly the same set
+// of paths.
+func samePatternLanguage(a, b string) bool {
+	return pattern.Contains(a, b) && pattern.Contains(b, a)
+}
+
+// inexactNarrowingWarning explains a narrowing rule that is exact for every
+// tracked file but not provably exact for files that do not exist yet.
+func inexactNarrowingWarning(inter, scope, rulePat string) string {
+	return fmt.Sprintf(
+		"narrowing rule %q is exact for every tracked file, but is not provably confined to %q ∩ %q for files added later; "+
+			"a future path matching %q that %q does not govern would also pick up that rule's owners",
+		inter, scope, rulePat, inter, rulePat)
+}
+
+// addWarning appends a warning, skipping exact duplicates.
+func (p *Plan) addWarning(w string) {
+	if !containsStr(p.Warnings, w) {
+		p.Warnings = append(p.Warnings, w)
+	}
+}
+
 // intersectPattern derives a pattern matching exactly (scope ∩ rule) for the
 // shapes that arise in practice. Returns ok=false when no sound derivation
 // exists — the caller refuses rather than guesses; the gate re-proves
@@ -777,7 +889,7 @@ func synthRename(f *file.File, op ops.Op, desired map[string][]string, pl *Plan)
 //     derivation can under-match (a rule whose own last segment matches the
 //     scope glob, e.g. /app* × *.gradle over a root file apple.gradle), so it
 //     is confirmed against the tree before being returned.
-func intersectPattern(scope string, rule *file.Rule, scopeSet map[string]bool, tree []string) (string, bool) {
+func deriveIntersection(scope string, rule *file.Rule, scopeSet map[string]bool, tree []string) (string, bool) {
 	subset := true
 	for p := range scopeSet {
 		if !rule.Pattern.Match(p) {
@@ -949,16 +1061,6 @@ func warnShadowedDuplicates(f *file.File, tree []string, scope map[string]bool, 
 	}
 }
 
-func winnersByLine(res map[string]resolve.Resolution) map[int][]string {
-	out := map[int][]string{}
-	for p, r := range res {
-		if r.Matched {
-			out[r.LineIndex] = append(out[r.LineIndex], p)
-		}
-	}
-	return out
-}
-
 func firstRuleIndex(f *file.File) int {
 	for i, ln := range f.Lines {
 		if ln.Kind == file.LineRule {
@@ -966,28 +1068,6 @@ func firstRuleIndex(f *file.File) int {
 		}
 	}
 	return len(f.Lines)
-}
-
-func matchSetEquals(r *file.Rule, tree []string, scope map[string]bool) bool {
-	n := 0
-	for _, p := range tree {
-		if r.Pattern.Match(p) {
-			if !scope[p] {
-				return false
-			}
-			n++
-		}
-	}
-	return n == len(scope)
-}
-
-func subset(paths []string, set map[string]bool) bool {
-	for _, p := range paths {
-		if !set[p] {
-			return false
-		}
-	}
-	return true
 }
 
 func contains(list []string, s string) bool {
