@@ -77,12 +77,40 @@ func TestR18_UnownedVsZeroOwnersDistinct(t *testing.T) {
 	}
 }
 
-// A path added or removed from the tree is reported, not silently ignored.
-func TestR18_TreeChangesSurface(t *testing.T) {
-	before := snap(map[string][]string{"a.go": {"@a"}})
+// A path added or removed from the tree is reported, not silently ignored —
+// but it is NOT an invariant violation. INV-2 preserves what a path resolved
+// to BEFORE; an added path has no before, a removed path has no after. The
+// two snapshots come from different refs, so counting a tree delta as a
+// violation made the documented CI recipe fail on any PR that added a file
+// outside the declared scope, with CODEOWNERS byte-identical.
+func TestR18_TreeChangesSurfaceButDoNotViolate(t *testing.T) {
+	before := snap(map[string][]string{"a.go": {"@a"}, "gone.go": {"@a"}})
 	after := snap(map[string][]string{"a.go": {"@a"}, "new.go": {"@a"}})
 	res, _ := verify.Compare(before, after, nil)
+	if !res.OK() {
+		t.Errorf("tree-only delta must not violate the invariant: %+v", res.Violations)
+	}
+	if len(res.Changed) != 0 {
+		t.Errorf("tree delta is not an ownership change: %+v", res.Changed)
+	}
+	if len(res.Added) != 1 || res.Added[0].Path != "new.go" {
+		t.Errorf("added = %+v, want new.go", res.Added)
+	}
+	if len(res.Removed) != 1 || res.Removed[0].Path != "gone.go" {
+		t.Errorf("removed = %+v, want gone.go", res.Removed)
+	}
+}
+
+// The gate still bites: an added file does not launder a real reassignment of
+// the subtree it lands in, because that subtree's pre-existing files change.
+func TestR18_AddedFileDoesNotMaskReassignment(t *testing.T) {
+	before := snap(map[string][]string{"web/app.js": {"@fe"}})
+	after := snap(map[string][]string{"web/app.js": {"@other"}, "web/new.js": {"@other"}})
+	res, _ := verify.Compare(before, after, []string{"/services/"})
 	if res.OK() {
-		t.Error("new path must surface as a change")
+		t.Error("out-of-scope reassignment must still fail when the PR also adds files")
+	}
+	if len(res.Violations) != 1 || res.Violations[0].Path != "web/app.js" {
+		t.Errorf("violations = %+v", res.Violations)
 	}
 }

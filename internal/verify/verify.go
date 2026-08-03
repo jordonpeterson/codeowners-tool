@@ -32,11 +32,23 @@ type Change struct {
 	After  []string `json:"owners_after"`
 }
 
-// Result of a comparison. Changed lists every difference; Violations lists
-// the subset outside the declared scopes (all of them, when no scope given).
+// TreePath is a path present in only one of the two snapshots — a file the
+// branch added or deleted. Reported for visibility, never a violation: see
+// Compare.
+type TreePath struct {
+	Path   string   `json:"path"`
+	Owners []string `json:"owners"`
+}
+
+// Result of a comparison. Changed lists every ownership difference among
+// paths common to both snapshots; Violations lists the subset outside the
+// declared scopes (all of them, when no scope given). Added and Removed
+// record tree differences and never affect OK.
 type Result struct {
-	Changed    []Change `json:"changed"`
-	Violations []Change `json:"violations"`
+	Changed    []Change   `json:"changed"`
+	Violations []Change   `json:"violations"`
+	Added      []TreePath `json:"added,omitempty"`
+	Removed    []TreePath `json:"removed,omitempty"`
 }
 
 // OK reports whether the invariant holds: no out-of-scope change.
@@ -63,6 +75,19 @@ func Load(path string) (*Snapshot, error) {
 // violation (INV-2 from raw data). With no scopes, ANY change is a violation.
 // A scope that fails to compile is a hard error — silently dropping it would
 // misreport which changes are in scope (found in review).
+//
+// Only paths present in BOTH snapshots can violate the invariant. INV-2 says
+// every out-of-scope path resolves to what it did before; a path the branch
+// added has no "before" to preserve, and one it deleted has no "after". The
+// two snapshots normally come from different refs, so treating a tree delta
+// as a violation failed every real PR that touched a file outside the
+// declared scope, with CODEOWNERS byte-identical. Such paths are reported in
+// Added/Removed instead — surfaced, never fatal.
+//
+// This does not weaken the gate: a CODEOWNERS edit that reassigns a subtree
+// still shows up on that subtree's pre-existing files. Only a scope whose
+// every file is new to the branch goes unchecked, and there the invariant has
+// nothing to say.
 func Compare(before, after *Snapshot, scopes []string) (*Result, error) {
 	var pats []*pattern.Pattern
 	for _, s := range scopes {
@@ -98,13 +123,19 @@ func Compare(before, after *Snapshot, scopes []string) (*Result, error) {
 	for _, p := range sorted {
 		b, bok := before.Ownership[p]
 		a, aok := after.Ownership[p]
-		if bok && aok && resolve.OwnersEqual(b, a) {
-			continue
-		}
-		c := Change{Path: p, Before: b, After: a}
-		res.Changed = append(res.Changed, c)
-		if len(pats) == 0 || !inScope(p) {
-			res.Violations = append(res.Violations, c)
+		switch {
+		case !bok:
+			res.Added = append(res.Added, TreePath{Path: p, Owners: a})
+		case !aok:
+			res.Removed = append(res.Removed, TreePath{Path: p, Owners: b})
+		case resolve.OwnersEqual(b, a):
+			// unchanged
+		default:
+			c := Change{Path: p, Before: b, After: a}
+			res.Changed = append(res.Changed, c)
+			if len(pats) == 0 || !inScope(p) {
+				res.Violations = append(res.Violations, c)
+			}
 		}
 	}
 	return res, nil

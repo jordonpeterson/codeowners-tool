@@ -928,6 +928,11 @@ SPEC S-9: GitHub's official example — a zero-owner rule un-owns a subtree.
 > be checked in CI from two ownership snapshots WITHOUT trusting the tool
 > that produced the change.
 
+### `TestR18_AddedFileDoesNotMaskReassignment`
+
+The gate still bites: an added file does not launder a real reassignment of
+the subtree it lands in, because that subtree's pre-existing files change.
+
 ### `TestR18_NoScope_AssertNoChange`
 
 SPEC R-18 + INV-2: with no scope given, verify asserts NOTHING changed.
@@ -941,9 +946,14 @@ Order of owners on a line is presentation: {"@a","@b"} == {"@b","@a"}.
 With scopes, changes inside scope pass; any out-of-scope change fails —
 this is INV-2 checked from raw data.
 
-### `TestR18_TreeChangesSurface`
+### `TestR18_TreeChangesSurfaceButDoNotViolate`
 
-A path added or removed from the tree is reported, not silently ignored.
+A path added or removed from the tree is reported, not silently ignored —
+but it is NOT an invariant violation. INV-2 preserves what a path resolved
+to BEFORE; an added path has no before, a removed path has no after. The
+two snapshots come from different refs, so counting a tree delta as a
+violation made the documented CI recipe fail on any PR that added a file
+outside the declared scope, with CODEOWNERS byte-identical.
 
 ### `TestR18_UnownedVsZeroOwnersDistinct`
 
@@ -952,4 +962,4 @@ DIFFERENT states; transitioning between them is a real ownership change.
 
 ---
 
-144 documented test cases across 11 packages.
+145 documented test cases across 11 packages.

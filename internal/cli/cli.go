@@ -84,12 +84,14 @@ func usage(w io.Writer) {
 
   plan     --op 'add_owner(/services/api, @org/team-1)' [--op ...] [--on-empty error|inherit|unowned]
            [--repo DIR] [--branch REF] [--file PATH] [--out plan.json]
+           [--max-size N] [--warn-size N]
   apply    --plan plan.json [--repo DIR]
   audit    [--checks a1,a3,a6] [--format json|text] [--github-repo owner/name]
            [--token T | $GITHUB_TOKEN] [--api-url URL] [--cache-dir D] [--cache-ttl DUR]
-           [--repo DIR] [--branch REF]
-  snapshot [--repo DIR] [--branch REF] [--out snap.json]
+           [--repo DIR] [--branch REF] [--file PATH]
+  snapshot [--repo DIR] [--branch REF] [--file PATH] [--out snap.json]
   verify   --before before.json --after after.json [--scope PATTERN ...]
+           (no --scope means: assert NOTHING changed)
 
 Exit codes: 0 ok · 1 no-op · 2 refused (invariant/size) · 3 invalid input
             4 audit findings · 5 inconclusive (fail-closed) · 6 rolled back
@@ -290,6 +292,14 @@ func cmdVerify(args []string, stdout, stderr io.Writer) int {
 	for _, c := range res.Changed {
 		fmt.Fprintf(stdout, "changed: %s  %s → %s\n", c.Path, fmtOwners(c.Before), fmtOwners(c.After))
 	}
+	// Tree deltas are informational: the refs differ, so files come and go.
+	// They are never violations (see verify.Compare).
+	for _, t := range res.Added {
+		fmt.Fprintf(stdout, "added:   %s  %s\n", t.Path, fmtOwners(t.Owners))
+	}
+	for _, t := range res.Removed {
+		fmt.Fprintf(stdout, "removed: %s  %s\n", t.Path, fmtOwners(t.Owners))
+	}
 	if !res.OK() {
 		fmt.Fprintf(stderr, "INVARIANT VIOLATED: %d path(s) changed outside the declared scope\n", len(res.Violations))
 		for _, v := range res.Violations {
@@ -297,7 +307,8 @@ func cmdVerify(args []string, stdout, stderr io.Writer) int {
 		}
 		return ExitRefused
 	}
-	fmt.Fprintf(stdout, "ok: %d change(s), all within scope\n", len(res.Changed))
+	fmt.Fprintf(stdout, "ok: %d change(s), all within scope (%d path(s) added, %d removed)\n",
+		len(res.Changed), len(res.Added), len(res.Removed))
 	return ExitOK
 }
 
