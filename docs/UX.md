@@ -196,6 +196,11 @@ every other flag on the verb (`--repo`, `--branch`, `--file`, `--create`, `--dry
 semantic errors accumulate and all print** — fixing a generated 40-op policy one error
 per run is miserable. **[r2]**
 
+`check` exits **`0` valid / `3` broken, and never `1`. [r2b]** It is the first line of
+every fleet script, under `set -e`; a clean policy returning the no-op code would abort
+the run before the loop starts. The fresh-reader retest could not resolve this from the
+README and named it as a reason to go read the source, so it is now stated in both.
+
 ### `--create` is off by default
 
 Creating a file is the one action with no prior artifact to diff against — there is no
@@ -212,10 +217,25 @@ on which repo you are standing in is exit 2.
 | 0 | Converged — applied, or already correct | continue |
 | 2 | This repo needs a human — refused (INV-1/INV-2 unprovable), zero-match under `require`, no CODEOWNERS without `--create`, R-8 overlap in this tree, post-write validation rolled back, size cap | record and continue |
 | 3 | The policy is broken — syntax, unknown field, bad enum, unsupported version, `--op`/`--policy` misuse. Will fail identically on all 100. | **halt** |
-| 5 | Inconclusive — reserved for a future API preflight (R-12) | halt |
 
-`sync` returns **exactly these and nothing else**. Revision 1 said "3+ = halt", which
-was unsafe in three concrete ways, all found by review:
+`sync` returns **exactly these and nothing else**. It makes no network calls, so 4 and
+5 are unreachable — revision 2 initially reserved 5 "for a future API preflight", which
+the fresh-reader retest caught: the documented example script's `*)` catch-all would
+have turned a GitHub rate limit into a halted rollout. Reserve nothing. **[r2b]**
+
+The mapping from the precise R-17 codes, which the README now states explicitly because
+a reader tried to read across the two tables and hit a contradiction: **[r2b]**
+
+| Precise code | Under `sync` | Why |
+|---|---|---|
+| 1 no-op | 0 | "Already correct" is the common fleet outcome |
+| 2 refused | 2 | This repo's file has an awkward shape |
+| 3 zero-match scope | **2** | Whether a path exists is the most repo-specific fact there is |
+| 3 malformed op / bad policy | 3 | Will fail identically on all 100 |
+| 6 rolled back | 2 | About that one repo, not the policy |
+
+Revision 1 said "3+ = halt", which was unsafe in three concrete ways, all found by
+review:
 
 - **The default halted the fleet on repo 1.** Zero-match under the default value mapped
   to exit 3, so a policy naming `/services/api/` died on the first repo without it —

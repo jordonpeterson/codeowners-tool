@@ -54,18 +54,34 @@ go install github.com/jordonpeterson/codeowners-tool/cmd/codeowners-tool@latest
 
 ## Change one repo
 
-Run inside a git repository:
+Say your `.github/CODEOWNERS` looks like this:
 
-```sh
-codeowners-tool sync --op 'add_owner(/services/api/, @org/team-1)'
+```
+*                 @org/everyone
+/services/api/    @org/api-team
 ```
 
-That's the whole thing. `@org/team-1` now co-owns everything under `/services/api/`,
-and every owner those files already had is still there.
+You want `@org/team-1` to co-own the API directory. Run this inside the repo:
 
-Run it again and nothing happens — it's already true. Add `--dry-run` to see what would
-change without touching the file. If the repo has no CODEOWNERS yet, add `--create` and
-one will be written at `.github/CODEOWNERS`.
+```console
+$ codeowners-tool sync --op 'add_owner(/services/api/, @org/team-1)'
+1 line changed, 12 paths change owners, 64 → 78 bytes
+```
+
+and the file is now:
+
+```
+*                 @org/everyone
+/services/api/    @org/api-team @org/team-1
+```
+
+That's the whole thing. Note what *didn't* happen: `@org/api-team` is still there.
+Adding that line by hand as `/services/api/ @org/team-1` would have silently replaced
+them — which is the mistake this tool exists to make impossible.
+
+Run it again and nothing happens; it's already true. Add `--dry-run` to see the change
+without making it. If the repo has no CODEOWNERS at all, add `--create` and one is
+written at `.github/CODEOWNERS`.
 
 ## Roll a policy out across your org
 
@@ -81,14 +97,25 @@ Put the ops in a file once:
 }
 ```
 
-Then run the same command against each repo:
+Each of those lines is an **op** — one intent, same syntax as `--op` above.
 
-```sh
-codeowners-tool sync --repo work/some-repo --policy policy.json
+The tool works on one repo at a time and doesn't clone anything, so you write the loop:
+
+```bash
+while read -r repo; do
+  gh repo clone "$repo" "work/$repo" -- --depth 1 -q
+  codeowners-tool sync --repo "work/$repo" --policy policy.json --create
+done < repos.txt          # one "org/name" per line
 ```
 
+That's the whole idea, and it is genuinely all you need for a first pass. Don't use it
+for a real 100-repo rollout, though: it stops dead the first time a clone fails or a
+repo needs a human. [Fleet scripting](#fleet-scripting) below is the version that
+survives both, records what happened, and can be resumed.
+
 Your 100 repos aren't identical, though, so an op can say what to do when nothing in
-that repo matches it. An op is a plain string until it needs to say something extra:
+that repo matches it. Write it as a plain string until it needs to say something extra,
+then swap in an object — both forms can sit in the same list:
 
 ```json
 {
@@ -103,7 +130,7 @@ that repo matches it. An op is a plain string until it needs to say something ex
 
 | `on_zero_match` | What happens when nothing in the repo matches |
 |---|---|
-| `require` *(default)* | This repo needs a human. It stops at this repo (exit 2) and your script moves on to the next one. Use it for paths every repo really does have. |
+| `require` *(default)* | Treat it as a problem. This repo gets no changes and exits 2; your script records it and carries on to the next one. Use it for paths every repo really does have. |
 | `skip` | Move on. "*If* this repo has Terraform, `@org/infra` owns it." |
 | `declare` | Write the rule anyway, at the end of the file, ready for files added later. |
 
@@ -133,13 +160,16 @@ $ echo $?
 2
 ```
 
-That's a normal, expected outcome for some repos — a CODEOWNERS file can be shaped so
-your request can't be expressed without also changing files you didn't ask about (here,
-a later `*` rule covers everything, so any line added for `/services/api/` would get
-overridden, and reordering to fix that would move files you never mentioned). The tool
-*fails closed*: it would rather stop than guess.
+`INV-1` is "the files you named end up owned the way you asked"; `INV-2` is "every
+other file in the repo ends up exactly as it was." In English, then: a later `*` rule
+already covers everything, so any line added for `/services/api/` would just get
+overridden (breaking INV-1) — and reordering the file to fix that would move files you
+never mentioned (breaking INV-2). There is no line the tool can write that does what
+you asked and nothing else, so it writes none. That's a normal, expected outcome for
+some repos; the tool *fails closed* and would rather stop than guess.
 
-Across a fleet that means your script records the handful that stopped and carries on:
+Across a fleet that means your script records the handful that stopped and carries on.
+`sync` returns exactly three codes, never anything else:
 
 | Exit | Meaning | In a fleet script |
 |---|---|---|
@@ -148,11 +178,18 @@ Across a fleet that means your script records the handful that stopped and carri
 | 3 | **The policy** is broken — it'll fail the same way everywhere | stop the run |
 
 That split is the whole contract: exit 3 is only ever for problems that have nothing to
-do with which repo you're standing in. `check` catches exactly that class.
+do with which repo you're standing in. `check` catches exactly that class, which is why
+running it first is worth the two seconds.
 
 ---
 
 # Reference
+
+> Throughout this section, IDs like `R-6`, `S-4`, `INV-2` and `A-9` are numbered
+> requirements from the specification. Each is enforced by a named test — see
+> [docs/BEHAVIOR.md](docs/BEHAVIOR.md), which is generated from the test suite. You
+> never need them to use the tool; they're there so every claim below is traceable to
+> something that's actually checked.
 
 ## Fleet scripting
 
@@ -161,21 +198,47 @@ do with which repo you're standing in. `check` catches exactly that class.
 set -euo pipefail
 
 codeowners-tool check --policy policy.json     # fail on repo 0, not 100 times
+mkdir -p work bodies
+touch done.txt
 
 while read -r repo; do                         # repos.txt: one "org/name" per line
-  gh repo clone "$repo" "work/$repo" -- --depth 1 -q
+  grep -qxF "$repo" done.txt && continue       # resume: skip what already finished
+
+  # Clone failures are infrastructure, not policy — record and keep going, or one
+  # rate-limited clone at repo 40 ends the run.
+  rm -rf "work/$repo"                          # so a re-run doesn't clone onto itself
+  if ! gh repo clone "$repo" "work/$repo" -- --depth 1 -q 2>>clone-errors; then
+    echo "$repo" >> clone-failed
+    continue
+  fi
+
   code=0
-  codeowners-tool sync --repo "work/$repo" --policy policy.json \
-    --create --format json --summary-out "bodies/$repo.md" >> results.jsonl || code=$?
+  codeowners-tool sync --repo "work/$repo" --policy policy.json --create \
+    --format json --summary-out "bodies/${repo//\//__}.md" >> results.jsonl || code=$?
   case $code in
     0) ;;                                      # converged
     2) echo "$repo" >> needs-human ;;          # this repo, not the policy
     *) exit "$code" ;;                         # policy broken — stop
   esac
+  echo "$repo" >> done.txt
 done < repos.txt
 
 jq -s 'group_by(.status)|map({status:.[0].status, n:length})' results.jsonl
+wc -l done.txt needs-human clone-failed 2>/dev/null || true
 ```
+
+`check` exits `0` for a valid policy and `3` for a broken one — and never `1`. That
+matters under `set -e`: a valid policy lets the script proceed, a broken one stops it
+before the first clone, and there's no third case where a fine policy halts you for a
+non-error reason. Re-run it whenever you edit the policy; it's the only step that
+catches a mistake before it reaches a repo.
+
+Two piles are left at the end. `clone-failed` is infrastructure — re-run the loop
+against just that list. `needs-human` is the interesting one: for each repo, run
+`sync --dry-run` locally to see the refusal, then either restructure that repo's
+CODEOWNERS so the intent becomes expressible (usually: replace the over-broad rule the
+error names with narrower ones), or accept that this repo is a legitimate exception and
+drop it from `repos.txt`.
 
 The tool does not clone, commit, branch, or open PRs — that stays your script's job.
 `--format json` prints one line per repo so `jq` can aggregate the fleet;
@@ -198,6 +261,17 @@ sync   (--op 'OP' ... | --policy FILE) [--on-empty error|inherit|unowned]
 
 check  (--op 'OP' ... | --policy FILE) [--format text|json]
 ```
+
+`check` reads no repository and writes nothing. It exits `0` for a valid policy, `3`
+for a broken one, and never `1` — so under `set -e` a good policy always lets the
+script continue and a bad one always stops it. Syntax errors stop at the first one;
+everything else (bad enum values, ops that can't carry the `on_zero_match` you gave
+them, a `remove_owner` with no `on_empty`) is reported all at once, because fixing a
+generated 40-op policy one error per run is miserable.
+
+Note that `--on-empty`, `on_zero_match`, and `--policy` all use the word "policy" for
+different things: `--policy` is your ops file, while the other two are per-situation
+rules the tool follows. The file is always "the policy file".
 
 | Flag | Meaning |
 |---|---|
@@ -281,10 +355,6 @@ codeowners-tool snapshot --branch main --out before.json
 codeowners-tool snapshot --branch feature --out after.json
 codeowners-tool verify --before before.json --after after.json --scope /services/api/
 ```
-
-> Throughout this reference, IDs like `R-6`, `S-4`, `INV-2` and `A-9` refer to numbered
-> requirements in the specification. Each one is enforced by a named test — see
-> [docs/BEHAVIOR.md](docs/BEHAVIOR.md), which is generated from the test suite.
 
 ## Operations (mutation)
 
@@ -373,8 +443,22 @@ are `unverifiable`, never dead (R-13). Removing a sole owner is presented as a
 
 `sync` uses the coarse three-code contract described
 [above](#when-it-cant-do-what-you-asked) — its question is "did this repo converge?"
-and it returns exactly `0`, `2`, `3`, or `5`, never anything else. Every other command
-uses the precise taxonomy:
+and it returns exactly `0`, `2`, or `3`, never anything else. Every other command uses
+the precise taxonomy below.
+
+**The two tables do not use the same numbers for the same things**, so don't read
+across. `sync` maps the precise codes onto its own by asking a single question — *is
+this about the policy, or about this repo?*
+
+| Precise code | Under `sync` | Why |
+|---|---|---|
+| 1 no-op | **0** | "Already correct" is the common fleet outcome; special-casing it defeats the point |
+| 2 refused | **2** | This repo's file has an awkward shape |
+| 3 zero-match scope | **2** | Whether a path exists is the most repo-specific fact there is |
+| 3 malformed op, bad policy | **3** | Will fail identically on all 100 |
+| 6 rolled back | **2** | A rolled-back write is about that one repo, not your policy |
+
+`sync` makes no network calls, so it never returns 4 or 5.
 
 | Code | Meaning |
 |---|---|
