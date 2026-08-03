@@ -50,7 +50,7 @@ arm64.
 > `xattr -d com.apple.quarantine ./codeowners-tool`. Homebrew and the install
 > script above are unaffected — neither quarantines its downloads.
 
-**From source** with Go 1.24+:
+**From source** with Go 1.24.7+ (the version pinned in `go.mod`):
 
 ```sh
 go install github.com/jordonpeterson/codeowners-tool/cmd/codeowners-tool@latest
@@ -72,9 +72,11 @@ codeowners-tool apply --plan plan.json
 ```
 
 `plan` re-resolves ownership across your real git tree and refuses anything it
-can't prove; `apply` writes only the proven edit and is idempotent, so
-re-running the same op is a no-op. To audit a repo for rot or to verify in CI
-that a change stayed inside its declared scope, read on.
+can't prove; `apply` writes only the proven edit. Both are idempotent:
+re-planning the same op against an already-satisfied file changes nothing and
+**exits 1** (`nothing to change`) rather than 0, so a CI step that runs `plan`
+unconditionally should treat 1 as success. To audit a repo for rot or to
+verify in CI that a change stayed inside its declared scope, read on.
 
 ## Quick start
 
@@ -94,6 +96,18 @@ GITHUB_TOKEN=... ./codeowners-tool audit --github-repo org/repo --format json
 ./codeowners-tool snapshot --branch feature --out after.json
 ./codeowners-tool verify --before before.json --after after.json --scope /services/api/
 ```
+
+`verify` compares *resolved ownership per path*, independently of the planner —
+CI can check the invariant without trusting the tool that made the change.
+Two things to know about the recipe above:
+
+- **Omitting `--scope` asserts that nothing changed at all.** Scopes are the
+  allowlist; with none, every difference is a violation.
+- **Files the branch adds or deletes are reported, never violations.** The two
+  snapshots come from different refs, so their trees differ. An added path had
+  no prior ownership for INV-2 to preserve, so it prints as `added:` and does
+  not fail the check. A real reassignment still fails it — the subtree's
+  pre-existing files change.
 
 ## Operations (Engine A — mutation)
 
@@ -118,6 +132,37 @@ the entire tracked tree (at `--branch`, default HEAD) and comparing against an
 independently computed desired state. Anything unprovable → exit 2, nothing
 written. Plans are idempotent (re-running is a no-op) and preserve every
 untouched byte — comments, blank lines, spacing, ordering.
+
+### How the planner edits lines
+
+You express intent over paths; the planner decides which lines move. It never
+reorders or reformats, but it does **add lines you did not write**. When an
+existing rule governs your scope *and* paths outside it, amending that rule in
+place would violate INV-2 — so the planner inserts a **narrowing rule**
+immediately after it. That is why the getting-started example above produces a
+line nobody typed:
+
+```
+/services/ @org/platform
+/services/api/ @org/platform @org/team-1   ← synthesized: narrows /services/
+/web/ @org/frontend
+```
+
+Because the last matching rule wins (S-1), this leaves everything outside
+`/services/api/` resolving exactly as before. Two consequences worth knowing:
+
+- **Refusal when no narrowing is expressible.** For some scope/rule
+  combinations no CODEOWNERS pattern describes exactly the intersection.
+  Amending would break INV-2 and appending would break INV-1, so the plan is
+  refused (exit 2) rather than guessed at. Narrow the scope, or restructure the
+  offending rule by hand.
+- **The inexact-narrowing warning.** A synthesized glob can be exact for every
+  file tracked today yet not provably confined for files added later. The plan
+  still applies, and prints a warning naming the pattern — read it, because it
+  is telling you a future file could land on the wrong side.
+
+Every synthesized line carries a `reason` in the plan JSON explaining why it
+exists.
 
 ### `--on-empty` (R-6)
 
@@ -162,6 +207,70 @@ produce, so it can't. Email owners are `unverifiable`, never dead (R-13).
 Removing a sole owner is presented as a **reassignment** with before → after
 owners per path, never a bare line deletion (R-14). Lookups are cached in
 memory per run and optionally on disk (`--cache-dir`, `--cache-ttl`).
+
+## CLI reference
+
+Five commands. `plan` and `apply` are the only writer path; `audit`,
+`snapshot`, and `verify` are read-only.
+
+**Common to `plan`, `audit`, `snapshot`:**
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--repo DIR` | `.` | Path to the local git repository |
+| `--branch REF` | `HEAD` | Ref whose tracked tree governs resolution (S-7) |
+| `--file PATH` | discovery | Repo-relative CODEOWNERS override, bypassing `.github/` > root > `docs/` precedence. The escape hatch when A-10 reports more than one file |
+
+**`plan`** — resolve, synthesize, prove. Writes a plan, never the file.
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--op 'kind(args)'` | required | Operation; repeatable for a batch |
+| `--on-empty POLICY` | none | `error`\|`inherit`\|`unowned`; required only when a removal would empty an owner set |
+| `--out FILE` | stdout | Where to write the plan JSON |
+| `--max-size N` | `3000000` | Hard byte cap; over it, refuse (S-4) |
+| `--warn-size N` | `2500000` | Byte threshold that emits a warning (R-9) |
+
+**`apply`** — write the proven edit, then validate.
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--plan FILE` | required | Plan JSON from `plan` |
+| `--repo DIR` | plan's repo | Override the repository recorded in the plan |
+
+The plan pins the input file's SHA-256; if the file changed since planning,
+apply refuses rather than clobber the other edit. A write that introduces new
+syntax errors is rolled back (exit 6).
+
+**`audit`** — find rot. Never writes.
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--checks LIST` | all | Comma-separated subset, e.g. `a1,a3,a6`. `a1`, `A1`, `a-1`, `A-1` all parse; an unknown name is a hard error, so a typo can't make an audit pass vacuously |
+| `--format FMT` | `text` | `text` or `json` |
+| `--github-repo owner/name` | none | Required, with a token, for the API checks A-1…A-3 |
+| `--token T` | `$GITHUB_TOKEN` | GitHub PAT |
+| `--api-url URL` | `https://api.github.com` | API base, for GHES |
+| `--cache-dir D` | memory only | Persist API lookups to disk (R-15) |
+| `--cache-ttl DUR` | `24h` | Disk cache lifetime |
+
+Without a token and `--github-repo`, audit runs the offline checks (A-4…A-12)
+and says so. If you *explicitly* request A-1/A-2/A-3 via `--checks` and they
+can't run, that is exit 5 — inconclusive, not a silent skip.
+
+**`snapshot`** — write resolved ownership for every tracked path at a ref.
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--out FILE` | stdout | Where to write the snapshot JSON |
+
+**`verify`** — compare two snapshots.
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--before FILE` | required | Baseline snapshot |
+| `--after FILE` | required | Snapshot to check |
+| `--scope PATTERN` | none | Where change is allowed; repeatable. **With none, any change is a violation** |
 
 ## Exit codes
 
