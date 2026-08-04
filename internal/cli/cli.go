@@ -1,5 +1,5 @@
-// Package cli wires the four commands and owns the exit-code contract
-// (R-17). Distinct, documented, scriptable:
+// Package cli wires the commands and owns the exit-code contract (R-17).
+// Distinct, documented, scriptable:
 //
 //	0  success — applied, or audit found nothing
 //	1  no-op — nothing to change
@@ -8,6 +8,10 @@
 //	4  audit findings present
 //	5  inconclusive — API unavailable, token insufficient, rate limited (R-12)
 //	6  validation failed post-write; rolled back
+//
+// `sync` and `check` run under a coarser three-code contract of their own
+// (R-19: only 0, 2 and 3), because their question is "did this repo converge?"
+// rather than "what exactly happened?". See sync.go.
 package cli
 
 import (
@@ -44,6 +48,51 @@ const (
 	ExitValidation   = 6
 )
 
+// flagParseCode maps a flag-parsing failure to an exit code.
+//
+// `--help` is a request, not a broken invocation. Returning ExitInvalid for it
+// made every `<verb> -h` exit 3, which under the fleet contract in sync.go reads
+// as "the policy is broken, halt the run" — so all verbs answer it here rather
+// than each deciding for itself.
+func flagParseCode(err error) int {
+	if errors.Is(err, flag.ErrHelp) {
+		return ExitOK
+	}
+	return ExitInvalid
+}
+
+// SyncRecord is one `sync` run, rendered as one JSON object (R-24). One line
+// per repo is what lets `jq -s` aggregate a fleet without parsing stderr.
+type SyncRecord struct {
+	Repo         string          `json:"repo"`
+	Status       string          `json:"status"` // applied|unchanged|skipped|refused|error
+	Ops          []plan.OpResult `json:"ops,omitempty"`
+	OpsApplied   int             `json:"ops_applied"`
+	OpsSkipped   int             `json:"ops_skipped"`
+	PathsChanged int             `json:"paths_changed"`
+	Created      bool            `json:"created"`
+	// DryRun marks a record produced under --dry-run. Without it a preview row
+	// and a row from a real rollout are byte-identical, so an operator holding
+	// results.jsonl cannot tell whether the fleet was changed or only modelled —
+	// and neither can the script that reads it. omitempty keeps the common case
+	// (a real run) at the same six unconditional keys as before.
+	DryRun   bool          `json:"dry_run,omitempty"`
+	Warnings []string      `json:"warnings,omitempty"`
+	Changes  []plan.Change `json:"changes,omitempty"`
+	Error    string        `json:"error,omitempty"`
+}
+
+// Sync statuses (R-24). "skipped" is distinct from "unchanged" so a policy
+// that matches nothing anywhere cannot read as "already correct" across a
+// whole fleet.
+const (
+	StatusApplied   = "applied"
+	StatusUnchanged = "unchanged"
+	StatusSkipped   = "skipped"
+	StatusRefused   = "refused"
+	StatusError     = "error"
+)
+
 // planFile is Plan plus the apply-time context the CLI adds.
 type planFile struct {
 	plan.Plan
@@ -59,6 +108,10 @@ func Run(argv []string, stdout, stderr io.Writer) int {
 		return ExitInvalid
 	}
 	switch argv[0] {
+	case "sync":
+		return cmdSync(argv[1:], stdout, stderr)
+	case "check":
+		return cmdCheck(argv[1:], stdout, stderr)
 	case "plan":
 		return cmdPlan(argv[1:], stdout, stderr)
 	case "apply":
@@ -82,6 +135,10 @@ func Run(argv []string, stdout, stderr io.Writer) int {
 func usage(w io.Writer) {
 	fmt.Fprint(w, `codeowners-tool — safe, intent-level, verifiable CODEOWNERS changes
 
+  sync     (--op 'OP' ... | --policy FILE) [--on-empty error|inherit|unowned]
+           [--repo DIR] [--branch REF] [--file PATH] [--create] [--dry-run]
+           [--format text|json] [--out FILE] [--summary-out FILE]
+  check    (--op 'OP' ... | --policy FILE) [--format text|json]
   plan     --op 'add_owner(/services/api, @org/team-1)' [--op ...] [--on-empty error|inherit|unowned]
            [--repo DIR] [--branch REF] [--file PATH] [--out plan.json]
   apply    --plan plan.json [--repo DIR]
@@ -93,6 +150,8 @@ func usage(w io.Writer) {
 
 Exit codes: 0 ok · 1 no-op · 2 refused (invariant/size) · 3 invalid input
             4 audit findings · 5 inconclusive (fail-closed) · 6 rolled back
+sync/check use a coarser contract and return only:
+            0 converged · 2 this repo needs a human · 3 the policy is broken
 `)
 }
 
@@ -125,12 +184,52 @@ func locate(repoDir, ref, filePath string) (tree []string, path string, all []st
 	}
 	all = gittree.FindCodeownersPaths(tree)
 	if filePath != "" {
+		// Same containment guard as `sync` (see containedRelPath): --file is
+		// documented as repo-relative and is joined onto --repo everywhere, so a
+		// path that is absolute or climbs out with .. names a file this
+		// repository does not own. These verbs only ever READ through this path,
+		// so today the escape merely fails late and obscurely; the guard makes it
+		// fail at the argument, in the same exit-3 class it already lands in.
+		if err := containedRelPath(filePath); err != nil {
+			return nil, "", nil, &plan.InvalidError{Msg: err.Error()}
+		}
 		return tree, filePath, all, nil
 	}
 	if len(all) == 0 {
 		return nil, "", nil, &plan.InvalidError{Msg: "no CODEOWNERS file found in .github/, root, or docs/ at " + ref + " (use --file to specify one)"}
 	}
 	return tree, all[0], all, nil
+}
+
+// containedRelPath rejects a --file that names anything outside --repo.
+//
+// Every caller joins --file onto --repo, so the flag is only meaningful as a
+// repo-relative path. Two spellings break that, and both used to be accepted
+// silently:
+//
+//   - `--file ../ESCAPED/CODEOWNERS` addresses a sibling of the clone. Under
+//     `sync --create` that is not a read that fails but a WRITE: os.MkdirAll
+//     builds the tree and a CODEOWNERS lands outside the repository, reported as
+//     applied at exit 0. A fleet loop pointed at 100 clones writes 100 files
+//     into whatever happens to sit next to them.
+//   - `--file /tmp/x/ABS.txt` is not rejected but REINTERPRETED: filepath.Join
+//     makes it repo/tmp/x/ABS.txt, so the operator who typed an absolute path
+//     gets a lookalike tree inside the clone and a success record.
+//
+// Both are decidable from the argument alone — no repository is opened to know
+// them — so they belong to the exit-3 class in sync.go's terms.
+func containedRelPath(p string) error {
+	if p == "" {
+		return nil
+	}
+	if filepath.IsAbs(p) || strings.HasPrefix(p, "/") || filepath.VolumeName(p) != "" {
+		return fmt.Errorf("--file %q must be repo-relative: an absolute path is not silently reinterpreted, because joining it onto --repo would build a lookalike tree inside the repository and report success", p)
+	}
+	clean := filepath.Clean(filepath.FromSlash(p))
+	if clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
+		return fmt.Errorf("--file %q escapes the repository: it resolves to %q, outside --repo — with --create the tool would create the directories and write a CODEOWNERS there", p, filepath.ToSlash(clean))
+	}
+	return nil
 }
 
 type multiFlag []string
@@ -151,7 +250,7 @@ func cmdPlan(args []string, stdout, stderr io.Writer) int {
 	maxSize := fs.Int("max-size", 3_000_000, "hard size cap in bytes (S-4)")
 	warnSize := fs.Int("warn-size", 2_500_000, "warn threshold in bytes (R-9)")
 	if err := fs.Parse(args); err != nil {
-		return ExitInvalid
+		return flagParseCode(err)
 	}
 	if len(opSpecs) == 0 {
 		fmt.Fprintln(stderr, "error: at least one --op is required")
@@ -198,7 +297,7 @@ func cmdApply(args []string, stdout, stderr io.Writer) int {
 	planPath := fs.String("plan", "", "plan JSON produced by `plan`")
 	repo := fs.String("repo", "", "path to local git repository (default: plan's repo)")
 	if err := fs.Parse(args); err != nil {
-		return ExitInvalid
+		return flagParseCode(err)
 	}
 	if *planPath == "" {
 		fmt.Fprintln(stderr, "error: --plan is required")
@@ -232,7 +331,7 @@ func cmdSnapshot(args []string, stdout, stderr io.Writer) int {
 	filePath := fs.String("file", "", "CODEOWNERS path override")
 	out := fs.String("out", "", "write snapshot JSON here (default stdout)")
 	if err := fs.Parse(args); err != nil {
-		return ExitInvalid
+		return flagParseCode(err)
 	}
 	tree, coPath, _, err := locate(*repo, *branch, *filePath)
 	if err != nil {
@@ -269,7 +368,7 @@ func cmdVerify(args []string, stdout, stderr io.Writer) int {
 	var scopes multiFlag
 	fs.Var(&scopes, "scope", "pattern where change is allowed (repeatable; none = assert no change)")
 	if err := fs.Parse(args); err != nil {
-		return ExitInvalid
+		return flagParseCode(err)
 	}
 	if *beforePath == "" || *afterPath == "" {
 		fmt.Fprintln(stderr, "error: --before and --after are required")
@@ -315,7 +414,7 @@ func cmdAudit(args []string, stdout, stderr io.Writer) int {
 	cacheDir := fs.String("cache-dir", "", "disk cache directory (R-15); empty = memory only")
 	cacheTTL := fs.Duration("cache-ttl", 24*time.Hour, "disk cache TTL")
 	if err := fs.Parse(args); err != nil {
-		return ExitInvalid
+		return flagParseCode(err)
 	}
 
 	tree, coPath, all, err := locate(*repo, *branch, *filePath)

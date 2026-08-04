@@ -6,11 +6,17 @@ Every statement below is enforced by a named test. Spec references
 (S-* semantics, R-* rules, INV-* invariants, T-* acceptance tests, A-* audit
 checks) map to the specification this tool was built against.
 
+Each package section opens with the file-level prose of its test files —
+package doc comments and free-floating commentary — quoted per file in
+filename order, then one entry per test in spec-tag order.
+
 ## internal/apply
+
+**`apply_test.go`**
 
 > Package apply_test defines the writer: the ONLY code path in the system
 > that modifies bytes on disk (R-0).
-> 
+>
 > SPEC R-10: after apply, the file is validated; a write that produces new
 > syntax errors is rolled back (exit 6).
 > The plan pins the input's SHA-256; a drifted file is never written over.
@@ -47,14 +53,20 @@ didn't create them and refuses only what it caused.
 
 ## internal/audit
 
+**`audit_test.go`**
+
 > Package audit_test defines Engine B: read-only rot detection.
-> 
+>
 > SPEC R-0: audit NEVER writes. Where a fix is expressible, it emits Engine A
 > operations for a human to review and run through `plan`/`apply`.
 > SPEC R-11: A-4 (dead rule) is report-only, permanently.
 > SPEC R-12: every API-dependent check fails closed.
 > SPEC R-13: email owners are unverifiable, never dead.
 > SPEC R-14: removing a sole owner is a reassignment, shown as one.
+
+> ---------- offline checks ----------
+
+> ---------- API-dependent checks ----------
 
 ### `TestA3_NoWriteAccess`
 
@@ -146,8 +158,122 @@ a bare line deletion.
 
 ## internal/cli
 
+**`cli_test.go`**
+
 > Package cli_test exercises the end-to-end contract: real git repo, real
 > files, real exit codes (R-17).
+
+**`fleet_idempotence_test.go`**
+
+> R-19 — convergence and idempotence at fleet scale.
+>
+> The failure this file exists to prevent: a scheduled job pushes one policy
+> at 100 repositories every night, and every night each run appends the same
+> line again. Nothing errors, every exit code is 0, and resolved ownership is
+> correct on every pass — so a test that compares OWNERSHIP passes forever
+> while the file grows without bound. It ends at S-4's 3 MB cliff, where
+> GitHub silently stops loading CODEOWNERS at all: total ownership failure
+> across the whole fleet, produced by a job that reported success every night
+> on the way there.
+>
+> This is not hypothetical. The planner's no-op detector is
+> `bytes.Equal(afterBytes, content)` (internal/plan/plan.go), gated on a
+> `desired` map keyed by TRACKED path. A `declare` op writes a rule for files
+> that do not exist yet, so it moves no tracked path's resolution and the
+> detector structurally cannot see its line. Ownership-level idempotence is
+> therefore the wrong assertion. Every claim below compares BYTES.
+
+> Helpers. All prefixed `idem` — this package is written by several agents at
+> once and an unprefixed helper is a compile error for everyone.
+> initRepo and runCLI come from cli_test.go and are reused, never redefined.
+
+> The headline claims.
+
+> Per-op-kind idempotence. Each kind synthesizes edits differently, so each
+> gets its own two-run byte comparison.
+
+> on_zero_match: one test per value. `declare` is the critical one.
+
+**`fleet_test.go`**
+
+> The synthetic fleet.
+>
+> Every test in this file runs ONE policy across a set of deliberately
+> heterogeneous repositories, exactly as the README's fleet script does. The
+> repos are the shapes a real 100-repo rollout meets on day one: repos that
+> converge, repos that are already correct, repos missing the directory an op
+> names, repos with no CODEOWNERS at all, repos whose file shape makes the
+> intent inexpressible. The fleet is the unit under test — no single repo's
+> outcome may change any other repo's outcome.
+
+**`schema_test.go`**
+
+> Schema pins for the sync record (R-24).
+>
+> A SyncRecord is not a log line, it is the fleet's data plane. `sync
+> --format json` appends one object per repo to results.jsonl and the README's
+> fleet script aggregates the run with
+> `jq -s 'group_by(.status)|map({status:.[0].status, n:length})'`, plus the
+> documented habit of projecting `.ops_skipped`. Those key names are the whole
+> interface between this tool and a user's shell; nothing in Go's type system
+> touches them.
+>
+> Until these tests existed the shape was pinned by NOTHING. Every other test
+> in this package json.Unmarshals INTO cli.SyncRecord, so the struct tags sit
+> on both sides of the assertion: renaming `ops_applied` to `opsApplied` keeps
+> the entire suite green while silently emptying the field for every jq
+> consumer on the planet. A schema that only ever round-trips through itself
+> is not pinned at all.
+>
+> These are characterization tests. They record the CURRENT shape as
+> intentional so the next change to it is a deliberate, reviewed one, and they
+> mirror internal/plan/schema_test.go, which does the same job for the plan
+> document. Like those, they assert the key SET, never the key ORDER —
+> encoding/json emits fields in declaration order, but that ordering is not
+> part of the contract and pinning it would fail on a harmless reshuffle.
+
+### `TestCheck_BrokenPolicyExitsThree`
+
+SPEC R-22: `check` exits 3 on every member of the exit-3 class, and 3 only.
+Its definition is exactly that class: the failures that will repeat
+identically on all 100 repos.
+
+### `TestCheck_NeverReturnsOtherExitCodes`
+
+SPEC R-22: check never returns anything but 0 and 3 — in particular not 1,
+2, 4, 5 or 6. The fleet script's `*)` catch-all exits on anything else.
+
+### `TestCheck_OpStringIsSyntaxChecked`
+
+SPEC R-22: `check --op` syntax-checks an op string too, so the escalation
+path has no gap — the user who has not yet written a policy file can still
+validate before touching 100 repos.
+
+### `TestCheck_ReadsNoRepository`
+
+SPEC R-22: `check` reads no repository. As a verb it carries no repo flags
+at all, so the shape enforces the contract — it must succeed from a
+directory that is not a git repo, which is where the fleet script runs it
+before the first clone exists.
+
+### `TestCheck_SyntaxFailsFastSemanticsAccumulate`
+
+SPEC R-22: syntax errors fail fast at the FIRST problem; semantic errors
+accumulate and all print. Fixing a generated 40-op policy one error per run
+is miserable — but a file that is not JSON has no second error to report,
+only guesses.
+
+### `TestCheck_ValidPolicyExitsZeroNeverOne`
+
+SPEC R-22: `check` exits 0 on a valid policy — never 1. It is the first
+line of every fleet script under `set -e`; a clean policy returning the
+no-op code would abort the run before the loop starts.
+
+### `TestCheck_WritesNothing`
+
+SPEC R-22: `check` writes nothing. It sits one token away from --dry-run,
+where the failure mode is exit 0 across all 100 repos having read and
+written nothing — silent success, the worst outcome this design produces.
 
 ### `TestEndToEnd_PlanApplyVerify`
 
@@ -183,11 +309,636 @@ SPEC R-17: exit 1 no-op, exit 3 invalid input.
 Review finding: a typo'd --scope must be a loud exit-3 error, not silently
 dropped (which turned every change into an inexplicable violation).
 
+### `TestFleet_BrokenPolicyHaltsOnTheFirstRepo`
+
+SPEC R-20/R-22: a broken policy is exit 3 on the FIRST repo, before a single
+byte is read from it or written to it. That is what makes the README's "fail
+on repo 0, not 100 times" true: the same policy would fail identically
+everywhere, so the run halts instead of producing 100 identical errors — and
+`check` catches the same class with no repo at all.
+
+### `TestFleet_DeclareLandsAtEOFUnderCatchAll`
+
+SPEC INV-6 (R-21 declare): a repo whose CODEOWNERS opens with a `*`
+catch-all is the case that makes `declare` non-trivial. Reusing the
+unowned-path insert point would put the declared rule BEFORE the catch-all,
+where last-match-wins hands every future workflow file back to `@org/eng` —
+100 PRs that do nothing. The rule must be appended at EOF, and it must
+actually govern its scope when a matching file finally appears.
+
+### `TestFleet_DryRunChangesNothingButStillEmits`
+
+SPEC R-19/R-24: --dry-run is the fleet preview — the only granularity at
+which reviewing a 100-repo change is possible. It must change no CODEOWNERS
+anywhere while still emitting the complete results.jsonl and every
+--summary-out file, because those artifacts ARE the review.
+
+### `TestFleet_MissingCodeownersNeedsCreate`
+
+SPEC R-23: a repo with no CODEOWNERS is exit 2 without --create — a per-repo
+fact, recorded and skipped past, never a halt. With --create the file is
+written at .github/CODEOWNERS, which is the path the README promises.
+
+### `TestFleet_NothingMatchesAnywhereIsSkippedNotUnchanged`
+
+SPEC R-24: `skipped` is a status of its own. A policy with a typo'd path
+prefix matches nothing in any repo; if those runs reported `unchanged`, the
+jq recipe in the README would show a wall of "already correct" and the
+operator would read a no-op rollout as a success.
+
+### `TestFleet_OnePolicyAcrossHeterogeneousRepos`
+
+SPEC R-19/R-20/R-24: one policy, one pass, seven deliberately different
+repositories. This is the whole product claim in a single test — that a
+standardized policy can be pushed at a heterogeneous fleet, that each repo
+gets the outcome its own shape earns, and that the aggregate is readable
+afterwards. If any single repo's failure can change another repo's outcome,
+the fleet script in the README is a lie.
+
+### `TestFleet_ReadmeScriptContract`
+
+SPEC R-19/R-22/R-24: the facts the README's copy-paste fleet script depends
+on, pinned one by one. Every assertion here corresponds to a line of that
+script; if this test fails, someone who pasted the script gets a halted
+rollout, a silent no-op, or an empty PR body.
+
+### `TestFleet_RecordRepoIsTheArgumentVerbatim`
+
+SPEC R-24: the record's `.repo` is the `--repo` argument BYTE-FOR-BYTE —
+never absolutized, never symlink-resolved.
+
+Six tests in this file join records back to repos through fleetByRepo, which
+keys on exactly that field; so does the README's fleet script, which pairs
+`needs-human` entries with the paths it passed in. Deriving `.repo` from the
+repository instead of from the argument breaks every one of them, and it
+breaks them on developer laptops only: on macOS `t.TempDir()` hands out
+`/var/folders/...` while `git rev-parse --show-toplevel` reports the same
+directory as `/private/var/folders/...`, because `/var` is a symlink to
+`/private/var`. The two strings name one directory and compare unequal, so
+every lookup misses, every record looks orphaned, and CI on Linux — where no
+such symlink exists — stays green the whole time.
+
+### `TestFleet_RefusalIsRecoverableAndIsolated`
+
+SPEC R-19: a refusal is per-repo and RECOVERABLE. The repo that cannot
+express the intent exits 2 with byte-identical bytes, and the repos after it
+in the loop converge exactly as if it had never been there.
+
+### `TestFleet_ZeroMatchUnderRequireIsTwoNotThree`
+
+SPEC R-21/R-19: an op whose scope matches zero tracked files under the
+DEFAULT on_zero_match=require is exit 2, not 3. Whether a path exists is the
+most repo-specific fact there is; revision 1 mapped it to 3 and a policy
+naming /services/api/ killed the fleet on the first repo that lacked it.
+
+### `TestHardening_DryRunRecordSaysSoAndSummaryAgrees`
+
+Review finding: a --dry-run record was byte-identical to a record from a real
+rollout, and the markdown summary contradicted itself.
+
+Nothing in results.jsonl said "this was a preview", so an operator (or a
+script) holding a file of records could not tell a modelled fleet from a
+changed one — and the two are collected by the same `>> results.jsonl` line.
+The PR body was worse than ambiguous: it claimed "a new CODEOWNERS file was
+written" and then, three lines down, "nothing was written".
+
+### `TestHardening_FileArgumentIsContainedByTheRepo`
+
+Review finding (F2, security): `--file` was not contained by `--repo`, so
+`sync --create` wrote a CODEOWNERS OUTSIDE the repository.
+
+`--file ../ESCAPED/CODEOWNERS --create` exited 0 having created the
+directories and the file next to the clone; an absolute `--file /tmp/x/ABS`
+was not rejected but reinterpreted as repo-relative, building a garbage tree
+inside the clone and reporting success. Both hurt the operator running the
+fleet loop over 100 checkouts: one typo writes 100 files into whatever sits
+beside them (or 100 junk trees inside them), each one reported applied. The
+verdict depends on nothing but the argument, so it is exit 3 — the class that
+halts at repo 0 rather than working through the fleet.
+
+### `TestHardening_NonHeadBranchMayNotWrite`
+
+Review finding (F4): `--branch REF` proved the change against REF's tree and
+then wrote the working tree of whatever was checked out.
+
+On a clone standing on main, `sync --branch old` resolved every scope against
+old's tree, proved INV-2 there, and wrote main's file — exit 0, "applied",
+carrying a rule that is dead where it landed and justified by a tree nobody
+wrote to. sync.go already refused --create for exactly this reason; the
+argument never depended on the file being new. Writing is refused (exit 2)
+rather than silently downgraded to a dry run: an implied dry run would exit 0
+having written nothing, which under this contract reads as "converged", and a
+fleet of 100 silently unchanged repos with 100 green rows is worse than the
+bug. --dry-run still previews, and `plan` still targets another ref.
+
+### `TestHardening_RefusedWriteRecordCountsNothing`
+
+Review finding (F5): a refused WRITE left an applied-looking record.
+
+When the write itself failed, sync.go set status/error and cleared `created`
+but left ops, ops_applied, paths_changed and the changes array exactly as the
+planner produced them. The row then said a repo whose CODEOWNERS is
+byte-for-byte unchanged had applied N ops and changed M paths, so the
+README's `jq '[.[].ops_applied] | add'` overcounted the rollout by precisely
+the repos where nothing was written — the operator reads a total that
+includes the failures and believes more of the fleet moved than did.
+
+### `TestHardening_RepoMustBeTheRepositoryRoot`
+
+Review finding (F3): `--repo` pointing BELOW a repository root wrote a
+CODEOWNERS that git will never read, and called it applied.
+
+gittree.ListTracked runs `git -C <repo>`, and git walks UP to the enclosing
+repository rather than refusing: pointed at rK/sub it answers with rK's tree
+minus the `sub/` prefix. Nothing then looks wrong from inside — the scopes
+match, the plan is proven, the write succeeds — and the run reports
+created:true, status "applied", exit 0. What it produced is
+rK/sub/.github/CODEOWNERS, and GitHub loads only the CODEOWNERS at the
+repository ROOT (or its .github/ or docs/), so the file governs nothing;
+worse, the rules inside it are anchored at that root, where `/services/api/`
+names a directory that does not exist. The repository's real CODEOWNERS, if
+it has one, is never even read, because discovery looked below it.
+
+A fleet whose clone layout carries one extra directory level
+(…/clones/<repo>/checkout is a common one) writes 100 dead files and reports
+100 successes: the exact "reported applied, dead on arrival" outcome this
+verb exists to prevent. Repo-specific, so exit 2 — recorded, and the loop
+moves on to the next clone.
+
+### `TestHardening_SinkFailureNeverReportsAConvergedRepoAsFailed`
+
+Review finding (F1): a CODEOWNERS write that LANDED was reported as a failed
+repo, with no record emitted at all.
+
+--out was written before stdout and the first sink error became the exit
+code, so `--out` pointing into a directory that does not exist turned a
+converged repo into exit 2 with an empty stdout. The fleet script's
+`>> results.jsonl` collected nothing for that repo — so the row an operator
+would use to see the change is missing precisely where a change happened —
+and the `2)` arm filed an already-correct repo under `needs-human`. At 100
+repos with a mistyped `--out` directory that is 100 real edits reported as
+100 failures, with no record of any of them.
+
+The record on stdout is the durable trace and goes first, unconditionally; a
+sink that cannot be written is a warning on stderr and nothing more.
+
+### `TestR19_AddOwnerTwiceByteIdentical`
+
+SPEC R-19 (INV-4): add_owner run twice is byte-identical. A second append of
+the same owner would be invisible in resolution — `@a @b @b` resolves to the
+same set as `@a @b` — and would grow the line on every nightly run.
+
+### `TestR19_ConvergesFromPartiallyAppliedState`
+
+SPEC R-19: convergence from a partially-applied state. A file that already
+satisfies SOME of the policy — the normal state of a fleet mid-rollout, or
+of a repo a human edited by hand — must converge in ONE pass, leave the
+already-satisfied lines byte-untouched (INV-5), and be a no-op on the next.
+A tool that only converges after N passes has no fixed point a scheduled job
+can ever reach.
+
+### `TestR19_DryRunRepeatedIsInert`
+
+SPEC R-19: repeated --dry-run runs change nothing and say the same thing
+every time. --dry-run is the fleet preview — the only review step that
+exists at 100 repos — so a preview that differs run to run, or that writes
+while previewing, makes the review meaningless.
+
+### `TestR19_FleetFivePassesNeverGrow`
+
+SPEC R-19: the same fleet, five passes. Two passes is not enough evidence —
+a bug that appends only on odd passes, or one that flips a file between two
+spellings (line endings, owner order, a re-sorted rule), is byte-identical
+every other run and survives a two-run test forever. Five passes catch both:
+every pass from the second on must be byte-identical to the second, and no
+file may ever be larger than it was after pass 1.
+
+### `TestR19_FleetSizeStableAfterFivePasses`
+
+SPEC R-19 (S-4): the fleet's TOTAL CODEOWNERS size after five passes must
+equal its total after one. Size is the number the failure is measured in:
+past 3 MB GitHub silently stops loading a CODEOWNERS file entirely, so an
+unbounded appender does not degrade ownership, it deletes it — with no
+error, on every repo the job ever touched.
+
+### `TestR19_FleetTwoPassesByteIdentical`
+
+SPEC R-19: one policy, eight unalike repos, run twice. After the second pass
+every repo must report a status that claims nothing was written, exit 0, and
+hold a BYTE-IDENTICAL CODEOWNERS. Comparing resolved ownership instead would
+pass while each file grew by a line a night: a `declare` line matches no
+tracked path, so it moves no path's resolution and the planner's
+`bytes.Equal(afterBytes, content)` no-op detector never sees it.
+
+### `TestR19_MixedPolicyDeclareLinesDoNotReorder`
+
+SPEC R-19: a realistic policy — three declared rules interleaved with two
+ordinary ops — is byte-identical on a second run AND keeps its declared
+lines in the same relative order. Re-ordering is a silent correctness change:
+the last matching rule wins in CODEOWNERS, so two runs that shuffle appended
+rules produce different ownership from the same policy, and every nightly run
+churns a diff for reviewers.
+
+### `TestR19_RemoveOwnerTwiceEachOnEmptyPolicy`
+
+SPEC R-19 (R-6): remove_owner run twice is byte-identical under every
+--on-empty policy. `inherit` deletes a rule and `unowned` writes a
+zero-owner one — two different files that resolve identically, which is
+exactly the pair a resolution-level idempotence check cannot tell apart. The
+second run, where the owner is already gone, must write nothing at all.
+
+### `TestR19_RenameOwnerSelfRenameNeverWrites`
+
+SPEC R-19/R-20: `rename_owner(@a, @a)` is exit 3, on every run, and writes
+nothing.
+
+This exit is not a toss-up between 0 and 3. ops.Parse rejects a rename whose
+old and new names are equal, and it reaches that verdict from the op string
+alone — before --repo is opened, before the tree is listed, before a byte of
+CODEOWNERS is read. A verdict that consults no repository is by construction
+the same verdict on all 100 of them, and that is precisely sync's definition
+of the exit-3 class: halt at repo 0 rather than grind out 100 identical
+errors. Exit 0 would be wrong for the same reason — "nothing to do, carry on"
+sends a scheduled job through every clone in the org to rediscover a fact the
+first repo already proved, and hides a typo'd rename inside a green run.
+
+The self-rename is also the churn case it is named for: a no-difference
+rewrite that a nightly job would otherwise apply, commit and PR forever. So
+the bytes are checked on both runs as well. Per D8 an exit-3 run emits NO
+record, which is why this reads the raw streams instead of decoding one.
+
+### `TestR19_RenameOwnerTwiceByteIdentical`
+
+SPEC R-19: rename_owner run twice is byte-identical.
+
+What a regression here costs: the nightly job opens a pull request against
+every repository in the org, every night, forever — each one a rewrite of a
+CODEOWNERS file whose content did not actually change. The reviewers are the
+code owners the file names, so they are the people paged for it. They learn
+within a week that anything from this job is a no-op, stop reading it, and
+the night it proposes a real ownership change it is rubber-stamped along with
+the noise. Nothing ever errors and no exit code is ever non-zero.
+
+rename_owner reaches that failure first, because it derives its scope from
+CURRENT ownership: after pass 1 the old name owns nothing, so pass 2 runs
+with an empty scope — and an empty scope that synthesizes an edit anyway
+rewrites the file with byte-different, semantically identical content.
+
+### `TestR19_SequentialSyncsReadPreviousOutput`
+
+SPEC R-19: the actual scheduled-job shape — sync, merge the result, and let
+the NEXT run read what the last one wrote. This is the loop that turns a
+one-line-per-run bug into a 3 MB file, and it is the only test here where
+the second run's input is genuinely the first run's committed output rather
+than a working-tree edit.
+
+### `TestR19_SetOwnersTwiceByteIdentical`
+
+SPEC R-19: set_owners run twice is byte-identical, including the S-9
+zero-owner form `set_owners(scope, [])`. The empty list is the dangerous
+one: it writes a rule with no owners, so "did this already apply?" cannot be
+answered by asking who owns the path — both states answer "nobody".
+
+### `TestR19_ZeroMatchDeclareWritesOnceThenNever`
+
+SPEC R-19/R-21/INV-6: `on_zero_match: declare` writes its rule exactly ONCE
+and never again. This is the case the existing no-op detector cannot see: a
+declared rule matches no tracked file, so it changes no tracked path's
+resolution, and `bytes.Equal(afterBytes, content)` in plan.Build compares a
+file the declare line was already appended to. Four passes, one line: the
+difference between a policy that converges and a nightly job that adds a
+line to 100 CODEOWNERS files until GitHub stops loading them (S-4).
+
+### `TestR19_ZeroMatchRequireStableAcrossRuns`
+
+SPEC R-19/R-21: `on_zero_match: require` is stable across runs. A scope that
+matches nothing fails THIS repo (exit 2 — whether a path exists is the most
+repo-specific fact there is) and must leave the file untouched, identically,
+every night. A refusal that half-wrote something would be worse than the
+growth bug.
+
+### `TestR19_ZeroMatchSkipIsNoOpBothRuns`
+
+SPEC R-19/R-21: `on_zero_match: skip` is a no-op on every run — exit 0,
+status "skipped" (never "unchanged": a policy that matches nothing anywhere
+must not read as "100 repos already correct"), and the file untouched. Twice,
+because a skip that quietly wrote a rule anyway would be growth with a
+reassuring status attached.
+
+### `TestR24_ForwardCompatMissingFieldIsZero`
+
+SPEC R-24 (forward compatibility, missing field): a record written before a
+field existed unmarshals with that field at its zero value and everything
+else intact. The counts are the ones that matter — a pre-`paths_changed`
+line must read as 0 rather than failing the parse, because the alternative
+is a resumed fleet run aborting on its own earlier output.
+
+Note what this test does NOT claim: that 0 and "absent" are
+distinguishable. They are not, which is exactly why the always-present
+guarantee in TestR24_StatusAndCountsAreAlwaysPresent is load-bearing — it is
+the only thing keeping "this run changed nothing" apart from "this field did
+not exist yet".
+
+### `TestR24_ForwardCompatUnknownFieldIsIgnored`
+
+SPEC R-24 (forward compatibility, unknown field): a record containing a
+field this binary does not know still unmarshals, with the known fields
+untouched. results.jsonl outlives the binary that wrote it — a fleet run is
+resumed days later, often after an upgrade — so an unknown key must be
+ignored rather than rejected. This is Go's default; the reader must never
+opt into DisallowUnknownFields, and this test is what notices if it ever
+does.
+
+### `TestR24_JSONLLinesParseIndividually`
+
+SPEC R-24 (JSONL shape): several records marshalled one per line each parse
+individually, and no single record contains a raw newline. This is what
+makes the README's `>> results.jsonl` plus `jq -s` work at all: the shell
+appends whole lines and jq slurps them line by line, so one embedded newline
+inside one record splits it into two unparseable fragments and takes the
+whole fleet report down with it — after the run, when the repos are already
+cloned and mutated.
+
+The hazard is real, not theoretical: `error` and `warnings` carry free text
+composed from refusal messages, and `changes` carries CODEOWNERS line
+content. encoding/json escapes newlines to \n, which is precisely the
+property being pinned; a future switch to an encoder that does not (or one
+left in indent mode) breaks line-oriented parsing without breaking a single
+unmarshal-based test.
+
+### `TestR24_OmitEmptyKeysDisappear`
+
+SPEC R-24 (omitempty): which keys DISAPPEAR from a minimal record, pinned
+explicitly, and which are unconditional. The split is not cosmetic. The
+optional four (ops, warnings, changes, error) are absent when there is
+nothing to say, so a consumer reads their absence as "empty", and a clean
+run's line stays short enough to eyeball. The unconditional six are the
+aggregation keys: absence there is a malformed record, not an empty result.
+
+### `TestR24_PerOpResultsRenderUnderOps`
+
+SPEC R-24 (nested per-op results): the per-op array renders under the key
+`ops`, and each element carries plan.OpResult's own names.
+
+Note the DELIBERATE difference between the two documents: plan.Plan renders
+this exact same []plan.OpResult under `op_results`, because Plan.Ops already
+owns `ops` there as the list of raw op strings (R-16) and must keep it. The
+sync record has no such collision, so it uses the shorter, documented name —
+`ops` is what the README's JSON output section shows and what fleet scripts
+select. This is not an inconsistency to be tidied up: renaming either one to
+match the other breaks a published contract. The test pins both names at
+once so a well-meant "fix" fails here instead of in a user's pipeline.
+
+### `TestR24_RoundTripPreservesEveryField`
+
+SPEC R-24 (round trip): a fully-populated record marshalled and unmarshalled
+is semantically identical. `--out FILE` writes a record that a later step
+reads back, and the fleet script's results.jsonl is read by whatever the
+operator points at it, possibly a newer build of this same tool. A field
+that does not survive its own round trip is a field the document claims to
+carry and does not.
+
+### `TestR24_StatusAndCountsAreAlwaysPresent`
+
+SPEC R-24 (always-present keys): `status` and the three counts are emitted
+even at their zero values, on every record, unconditionally. This is the
+single most load-bearing property of the whole document. The README's fleet
+aggregation is `jq -s 'group_by(.status)'`; on a record missing `.status`
+that expression does not error, it groups the repo under null — a silent
+fleet-wide misreport, which is exactly the failure this schema exists to
+prevent. Same for the counts: `ops_skipped,omitempty` would hide 0 and make
+the documented "project .ops_skipped too" habit read null on precisely the
+repos that were fine.
+
+The zero-valued record below is not hypothetical: a refused repo emits
+status "refused" with all three counts at 0, and that line still has to
+aggregate.
+
+### `TestR24_StatusValuesAreExactlyFive`
+
+SPEC R-24 (status vocabulary): there are exactly five legal `status` values
+— applied, unchanged, skipped, refused, error — and they are pinned both to
+the exported constants and to the complete set of Status* constants declared
+in the package source. The source scan is the point: referencing the five
+constants catches a value being CHANGED, but only enumerating the
+declarations catches a sixth being ADDED. A new status shipped without a
+README update means fleet operators have a bucket in their `group_by`
+output that no documentation explains, and every `case` statement written
+against the documented five silently falls through.
+
+### `TestR24_SyncRecordFieldTypes`
+
+SPEC R-24 (field types): every field's JSON name mapped to its JSON type.
+The key-set test catches renames and additions; this catches a type change
+under an unchanged name. `ops_applied` going from number to string is the
+concrete case — `jq 'map(.ops_applied)|add'` on strings is a runtime error
+in the middle of a 100-repo rollout, and nothing in Go would have complained
+at the moment the field's type changed. `created` being a bool matters for
+the same reason: `select(.created)` is true for the string "false".
+
+### `TestR24_SyncRecordTopLevelKeys`
+
+SPEC R-24 (sync record, top level): the set of keys a marshalled SyncRecord
+emits is pinned to a literal list. This is deliberately an ENUMERATION and
+not a spot-check: the failures it guards against are a field being RENAMED
+(every jq selector on it starts returning null) and a field being ADDED
+without anyone noticing that `sync --format json` now emits something new,
+and a spot-checking test can see neither. Every other cli test unmarshals
+into SyncRecord, using the same tags on both sides of its assertions, so
+this is the only place the wire names are compared to anything external.
+
+### `TestSync_AlreadyCorrectIsZeroNotNoOp`
+
+SPEC R-19 (R-17 remap): "already correct" is exit 0 under sync even though
+`plan` calls the same situation a no-op and exits 1. If sync inherited the
+1, every fleet runner would abort on the most common outcome there is.
+
+### `TestSync_AlreadyCorrectStillCarriesPerOpResults`
+
+SPEC R-24 (D1): an already-correct repo STILL reports one per-op result per
+policy op, each `unchanged`.
+
+This pins the no-op path specifically, and it is a real hole today:
+plan.Build returns `nil, &NoOpError{}` when the file already says what the
+policy wants, so a caller that renders the record from the returned *Plan
+has nothing to render and emits `"ops": []`. `unchanged` is the MODAL
+outcome of a mature fleet — most repos are already correct most nights — so
+the empty case is the one an operator sees on 90 of 100 rows. Without it the
+record cannot answer "is op `tf` actually in place here, or did the policy
+never mention this repo?", and the whole per-op array degrades to detail that
+appears only when something changed, which is exactly when you least need it.
+
+Three fleet tests (fleet_test.go's "per-op results" and the idempotence
+file's repeat passes) read per-op detail out of records produced by this
+path; none of them pins the path itself.
+
+### `TestSync_BrokenPolicyExitsThree`
+
+SPEC R-19/R-20: a broken policy is exit 3 — it fails identically on every
+repo, so the fleet script halts instead of grinding through 100 clones.
+
+### `TestSync_ConvergesThenIsIdempotent`
+
+SPEC R-19: sync is convergent and idempotent. The first run applies and
+exits 0; the identical second run changes nothing and STILL exits 0. The
+collapse of "applied" and "already correct" onto 0 is the entire point —
+under `set -e` at 100 repos, the common outcome must not read as failure.
+
+### `TestSync_CreateHonorsFileAndRejectsNonHeadBranch`
+
+SPEC R-23: --create honors --file when given, and hard-errors with a
+non-HEAD --branch — there is nothing to create a file "at" on a ref you are
+not standing on, and silently writing to the working tree instead would be
+the wrong file in the wrong place.
+
+### `TestSync_CreateNeverOverwrites`
+
+SPEC R-23: --create NEVER overwrites. Creating a file is the one action
+with no prior artifact to prove INV-2 against; clobbering an existing one
+would destroy ownership the tool exists to protect.
+
+### `TestSync_CreateWritesWhenAbsent`
+
+SPEC R-23: --create writes .github/CODEOWNERS when the repo has none, and
+reports created:true so the fleet aggregation can tell a new file from an
+edit.
+
+### `TestSync_DryRunWritesNoCodeownersButStillEmits`
+
+SPEC R-19/R-24: --dry-run makes NO change to CODEOWNERS but STILL emits
+--out and --summary-out. That combination is what makes a fleet preview
+useful — at 100 repos, the aggregated preview is the only review possible.
+
+### `TestSync_DuplicateOpIDsExitThree`
+
+SPEC R-20 (D3): two ops sharing one `id` is exit 3.
+
+Results are KEYED by id — syncOpResult here, fleetOpResult in fleet_test.go,
+opResultByID in the planner's tests, and every `jq` recipe an operator writes
+over results.jsonl. Every one of them returns the FIRST match. So a policy
+with a duplicated id does not fail: it silently reports the first op's
+outcome as if it were the second's, across the whole fleet, and the operator
+reading "tf: applied" cannot tell that the other `tf` refused. Nothing about
+this depends on any repo, so it belongs in the class that halts at repo 0 —
+and `check` must catch it before the first clone.
+
+### `TestSync_FormatJSONSeparatesDataFromLogs`
+
+SPEC R-24: under --format json, stdout is data and stderr is logs. A log
+line on stdout breaks `jq -s` over results.jsonl for the whole fleet.
+
+### `TestSync_HelpExitsZero`
+
+SPEC R-19: `sync -h` and `sync --help` exit 0. Under a fleet contract a
+help request reading as "the policy is broken, halt" is wrong.
+
+### `TestSync_JSONRecordPerOpResults`
+
+SPEC R-24: the record's per-op results carry id/op/status/proven, and the
+counts agree with the array. "ops_skipped: 1" alone cannot answer the
+question that motivates `skip` — WHICH repos lack Terraform.
+
+### `TestSync_NeverReturnsOtherExitCodes`
+
+SPEC R-19: sync returns ONLY 0, 2, 3. Revision 1's "3+ means halt" was
+unsafe three separate ways; reserving nothing is the fix. 1 (no-op), 4
+(findings), 5 (inconclusive) and 6 (rolled back) must all be unreachable.
+
+### `TestSync_NoCodeownersWithoutCreateExitsTwo`
+
+SPEC R-23: no CODEOWNERS and no --create is exit 2, not 3. --create is off
+by default, so treating "this repo has no file" as a policy error halted
+revision 1's fleet run at roughly repo 3.
+
+### `TestSync_NonRepoDirectoryIsAnErrorRecord`
+
+SPEC R-24: `--repo` pointing at a directory that is not a git repository is a
+RECORDED per-repo failure — exit 2, one record, status "error".
+
+This is the only producer of cli.StatusError, and it is a different animal
+from "refused": refused means the tool understood this repo and declined to
+touch it, error means it never got that far. Both need a human, so both are
+exit 2 and both must appear in results.jsonl; grouping on .status is how an
+operator separates "12 repos have awkward CODEOWNERS files" from "12 clones
+failed and were never actually synced". It must NOT be exit 3: a failed or
+half-finished clone is the most repo-specific fact there is, and halting the
+whole rollout on it strands the other 99 — the same mistake revision 1 made
+with zero-match scopes.
+
+### `TestSync_OnEmptyWithPolicyExitsThree`
+
+SPEC R-20: --on-empty is allowed only with --op. With --policy it is a hard
+error, because a flag that silently beats a policy field means the file in
+git is not the complete statement of what ran — and `check` would then
+validate something other than what executes.
+
+### `TestSync_OpAndPolicyMisuseExitsThree`
+
+SPEC R-20: --op and --policy are mutually exclusive, and --policy twice is
+an error, never a silent last-wins. Silent last-wins means the artifact in
+git is not the policy that ran.
+
+### `TestSync_OutWritesRecordToFile`
+
+SPEC R-24: the two flags are independent. `--out FILE` ALWAYS writes the JSON
+record to FILE, whatever `--format` says; `--format` governs stdout and only
+stdout.
+
+The alternative — `--out` emitting whatever `--format` names — quietly
+destroys the artifact the flag exists for. `sync --out records/$repo.json`
+with the default text format would leave a directory of human prose, and the
+`jq -s` aggregation the README builds over it fails on the first file with a
+parse error, after the whole rollout has already run and the CODEOWNERS
+writes are done. Making it depend on a flag nobody passed is worse than
+making it wrong: it works for the operator who happened to type `--format
+json` and fails for the one who did not.
+
+The converse guarantee matters as much: `--out` must not go on to SUPPRESS
+stdout. Someone piping `sync --format json ... | tee` while also archiving
+with `--out` gets both, byte-identical, and the fleet script's
+`>> results.jsonl` keeps working when a per-repo `--out` is added to it.
+
+### `TestSync_RefusalExitsTwo`
+
+SPEC R-19 (exit contract): a refusal is exit 2 — this repo's file has an
+awkward shape and needs a human. The fleet script records it and keeps
+going; it must never be confused with a broken policy.
+
+### `TestSync_RefusalRecordCarriesError`
+
+SPEC R-24: a refusal still produces a parseable record carrying the reason.
+The fleet script appends every run to results.jsonl; a refused repo that
+emits nothing (or emits prose) is a hole in the aggregation exactly where
+the operator needs to look.
+
+### `TestSync_StatusSkippedWhenNothingApplied`
+
+SPEC R-24: `skipped` is a DISTINCT status, used when at least one op
+skipped and none applied. Without it a policy with one typo'd path prefix
+skips everywhere and reports 100 × `unchanged` — the operator groups on
+.status, reads "already correct", and ships a no-op rollout.
+
+### `TestSync_SummaryOutNamesPolicyAndStructuralOps`
+
+SPEC R-24/INV-6: --summary-out renders markdown for a PR body. It must name
+the policy (that is why `name` and `description` exist) and call out every
+op proven only structurally, so a reviewer finds the weakened INV-1 cases
+without reading the diff.
+
+### `TestSync_ZeroMatchUnderRequireExitsTwo`
+
+SPEC R-19/R-21: a scope matching zero tracked files under the default
+`require` is exit 2, NOT 3. `plan` calls it invalid input; sync remaps it
+because whether a path exists is the most repo-specific fact there is.
+Getting this backwards halts a 100-repo run on repo 3.
+
 ## internal/file
+
+**`file_test.go`**
 
 > Package file_test defines the CODEOWNERS file model: a byte-preserving
 > parse that can always be serialized back to the exact input.
-> 
+>
 > SPEC INV-5: comments, blank lines, inline spacing, and line ordering outside
 > of directly modified lines are preserved exactly.
 > SPEC S-9: a rule may legally have zero owners (GitHub's sanctioned
@@ -270,8 +1021,10 @@ InsertRule adds a new line without disturbing any existing line (R-1).
 
 ## internal/ghapi
 
+**`ghapi_test.go`**
+
 > Package ghapi_test defines the GitHub API client's fail-closed contract.
-> 
+>
 > SPEC R-12: a lookup that cannot be answered definitively (bad token,
 > missing scope, rate limit, network failure) is INCONCLUSIVE — never a
 > negative. The worst failure this tool can produce is an expired token
@@ -340,8 +1093,10 @@ A 404 on /users/{login} with a working token is a definitive negative.
 
 ## internal/gittree
 
+**`gittree_test.go`**
+
 > Package gittree_test defines how the tool obtains the tracked file tree.
-> 
+>
 > SPEC S-7 / INV-3: resolution runs against the tracked tree of a specific
 > ref (default HEAD) of a local repository — never the working directory
 > listing, never the pattern set.
@@ -371,6 +1126,8 @@ GitHub's precedence order (.github/, root, docs/) — S-8: more than one is
 an error condition for the caller, never a merge.
 
 ## internal/ops
+
+**`ops_test.go`**
 
 > Package ops_test defines the intent language: operations are expressed
 > over resolved ownership, never over lines (§1 of the spec).
@@ -418,13 +1175,15 @@ spells such patterns with escaped spaces, and so must ops.
 
 ## internal/pattern
 
+**`pattern_test.go`**
+
 > Package pattern_test defines the CODEOWNERS pattern-matching semantics.
-> 
+>
 > SPEC S-2: patterns are gitignore-LIKE, but with no negation (`!`) and no
 > character ranges (`[a-z]`). GitHub's docs list three explicit exceptions to
 > gitignore syntax; everything else follows gitignore matching rules.
 > SPEC S-6: matching is case-sensitive regardless of local filesystem.
-> 
+>
 > The authoritative corpus in testdata/patterns.json is vendored from
 > hmarr/codeowners (MIT), the reference implementation this matcher is
 > differentially tested against.
@@ -476,10 +1235,29 @@ An unsound answer here lets the planner amend a rule in place and silently
 hand an owner every future file that rule will ever match — the defect this
 whole mechanism exists to prevent.
 
+### `TestContainsIsSoundOverGlobstarFamily`
+
+The soundness rule TestContainsIsSound states, generalized over the "**"
+family so the next member of it cannot slip through by simply not being
+listed in containsCorpus. Whenever Contains(outer, inner) is true, NO
+concrete path may match inner without also matching outer; a violation means
+the planner would amend a rule in place and silently widen an owner's reach.
+
 ### `TestContainsKnownPairs`
 
 The containments the planner relies on to amend a rule in place, and the
 near-miss shapes it must NOT accept.
+
+### `TestContainsRejectsAdjacentGlobstars`
+
+Contains(`**/`, `*`) is the witness that broke soundness: `**/` normalizes to
+the segments ["**", "**"], and buildPatternRegex compiles that to
+`\A(?:.+/)?/.*\z` — the leading globstar consumes the separator, then the
+trailing globstar re-emits one, so no repo-relative path can ever match it.
+The token model read the same pattern as [many, any1, many] and called it
+universal, so Contains claimed `**/` contained every pattern in the language.
+That is the exact shape that would let the planner amend a dead rule in place
+and hand its owner every file the inner rule will ever match.
 
 ### `TestContainsRejectsInvalid`
 
@@ -487,16 +1265,72 @@ Contains must not blow up or report true on patterns Compile rejects.
 
 ## internal/plan
 
+**`plan_test.go`**
+
 > Package plan_test encodes the spec's acceptance tests for Engine A.
-> 
+>
 > The planner takes intent-level ops, computes the resolved ownership
 > before/after over the real tree, synthesizes line edits, and GATES the
 > result on two invariants:
-> 
+>
 > 	INV-1: every path in scope resolves to exactly what the op requires.
 > 	INV-2: every path outside scope resolves to exactly what it did before.
-> 
+>
 > A plan that cannot be proven is refused (exit 2), never guessed at.
+
+**`property_test.go`**
+
+> Property tests for the planner (T-4, T-5): thousands of generated
+> (file, tree, op) cases, all checked against independently computed
+> expectations. Deterministic seeds — failures reproduce exactly.
+
+**`schema_test.go`**
+
+> Schema pins for the plan document (R-16).
+>
+> The plan JSON is not an output format, it is a CONTRACT. `plan` writes it,
+> `apply` reads it, and nothing else validates it in between: apply unmarshals
+> the document straight into plan.Plan and writes bytes to disk from
+> after_content, gated only on sha256_before. Every invariant the planner
+> proved is carried across that boundary by the document alone.
+>
+> The document is also a CI artifact: `plan --out plan.json` in one job,
+> `apply --plan plan.json` in a later job, possibly with a newer binary. That
+> makes both directions of compatibility load-bearing — a newer binary must
+> read an older plan, and an older reader must not choke on a field it does
+> not know.
+>
+> Until these tests existed the shape was pinned by NOTHING. No test in the
+> suite marshalled a Plan and compared the result to anything, so a field
+> added to Plan silently changed `plan --out`'s output and the suite stayed
+> green. Plan.OpResults was added exactly that way. These tests are
+> characterization tests: they record the CURRENT shape as intentional, so the
+> next change to it is a deliberate, reviewed one.
+>
+> They assert the key SET, never the key ORDER. Go's marshaller emits fields
+> in declaration order, but that ordering is not part of the contract and
+> pinning it would fail on a harmless field reshuffle.
+
+**`settle_internal_test.go`**
+
+> White-box test for the remove_owner settling logic (second-review
+> regression): divergence between the pure transform desired∖{owner} and the
+> file's actual resolution is accepted ONLY under --on-empty=inherit, where
+> rule deletion legitimately resurrects owners from surviving rules. Under
+> any other policy no rule is deleted, so divergence means a synthesis bug
+> (or a bad earlier batched edit) and must REFUSE — accepting it would
+> launder the error past the gate.
+
+**`zeromatch_test.go`**
+
+> These tests cover R-21 (on_zero_match: require | skip | declare), R-22
+> (what `declare` actually writes) and INV-6 (a declare op is proven
+> STRUCTURALLY, because there is no tracked file to prove it against).
+>
+> The whole safety argument for fleet automation lives here. A declare op is
+> the one place the tool writes a rule it cannot check against the repo, and
+> it is executed unattended across 100 repositories on a schedule — so every
+> defect in it is multiplied by 100 and nobody is watching.
 
 ### `TestAddOwner_CoversUnownedPaths`
 
@@ -529,6 +1363,96 @@ TestShape4_TreeConfirmationRefusesInexactDerivation.
 
 INV-5 property: parse→serialize round-trips any generated file (plus junk
 mutations) byte-identically.
+
+### `TestINV6_DeclareDoesNotWeakenINV2`
+
+TRAP 3 — SPEC INV-6 / INV-2: declare weakens INV-1 and NOTHING else. INV-2
+is still proven over the whole tree exactly as today.
+
+This is the promise the feature is sold on ("a pattern matching nothing
+tracked cannot move any existing path's resolution"). If a declare op could
+move even one tracked path, the fleet rollout would be silently
+reassigning ownership in 100 repositories under cover of "declaring" paths
+that do not exist.
+
+### `TestINV6_PartialOverlapBetweenSameBatchDeclaresIsAllowedAndDisclosed`
+
+SPEC INV-6 (third obligation): a scope this same policy declares LATER may
+overlap an earlier declared scope PARTIALLY — allowed, and disclosed.
+
+The canonical fleet baseline is "CI owns workflows everywhere, infra owns
+Terraform where it exists". Those scopes meet on .github/workflows/deploy.tf,
+and CODEOWNERS gives a path exactly one owner set, so one of them must lose
+there. Refusing the pair made that baseline inexpressible in EVERY repo,
+forever, and reported a policy-level conflict as an identical per-repo exit 2
+on all 100 repos — the misclassification the exit-2/exit-3 split exists to
+prevent. The author wrote both in one document; its order is the precedence,
+exactly as in a hand-written file. R-7 sets the precedent: disclose the
+shadowing, do not refuse it.
+
+The plan suite never covered this before — TestR22_MultipleDeclaresStackAtEOF
+InPolicyOrder and TestR22_CommutingDeclareBatchIsAccepted both stack
+anchored, wildcard-free scopes, which are provably disjoint — so the
+overlapping-but-satisfiable case stayed invisible until the CLI wired it up.
+
+### `TestINV6_PartialOverlapWithAPreexistingLaterRuleIsStillRefused`
+
+SPEC INV-6 / R-1: a partial overlap with a PRE-EXISTING later rule is still a
+refusal. Same geometry as the allowed case above — "/.github/workflows/"
+against a later "**/*.tf" — and the opposite answer, because the difference is
+authority, not shape: R-1 forbids reordering lines this run did not write, so
+unlike a same-policy overlap there is no order the planner is entitled to
+choose. Accepting it would let the tool silently ratify whatever precedence
+the existing file happens to encode.
+
+### `TestINV6_ProvenIsStructuralOnlyForZeroMatchDeclares`
+
+TRAP 3 — SPEC INV-6: `proven` distinguishes an op checked against real
+files from one that could only be argued structurally.
+
+The gate iterates the TREE. For an op whose scope set is empty it iterates
+nothing, so INV-1 is vacuously true — the plan is "proven" without a single
+statement having been made about the line just written. That is precisely
+the case where a reviewer most needs to be told. `proven: "structural"` is
+the disclosure that a rule went in unverified against the repo; without it,
+a fleet operator reading 100 JSON records cannot tell a checked rollout
+from an unchecked one.
+
+### `TestINV6_RefusesADeclareWhoseEmittedLineDoesNotRoundTrip`
+
+TRAP 3 — SPEC INV-6: the structural proof must be a real proof. Since the
+gate's tree loop is vacuous for a zero-match op, the ONLY thing standing
+between the user and a wrong line is the structural check, and it must
+re-read the emitted bytes exactly as the gate does for tracked paths.
+
+Here the scope contains unescaped whitespace, so the line written for it —
+`docs x@y.zz @a` — re-parses as a DIFFERENT rule (pattern `docs`). With a
+tracked match this is caught today (TestGate_ProvesSerializedBytesNotModel).
+With zero matches nothing looks, and the tool would hand @a every `docs`
+directory in the repo while reporting that it declared ownership of a path
+with a space in it. Must refuse (exit 2).
+
+### `TestINV6_TotalShadowingBetweenSameBatchDeclaresIsRefused`
+
+SPEC INV-6 (third obligation): TOTAL capture by a same-batch declare is still
+a refusal. The relaxation above is only for overlaps that leave the declared
+rule the last word SOMEWHERE. A rule no path can ever reach is dead on
+arrival: the tool would report it applied with proven=structural, the diff
+would look right in review, and the declaration would never take effect —
+which is the entire failure mode this file exists to prevent.
+
+### `TestINV6_TrailingStarStarIsNotADirectoryPrefix`
+
+SPEC INV-6 / R-8 (regression, adversarial audit of Wave 1): the disjointness
+proof must not treat "/src**" as the directory "/src/".
+
+anchoredDirPrefix stripped the trailing "**" BEFORE testing for wildcards, so
+"/src**" normalized to "/src/" and patternsProvablyDisjoint("/src**",
+"/srcx/") answered TRUE. It is false: "/src**" compiles to
+`\Asrc[^/]*[^/]*(?:/.*)?\z` and matches srcx/a.go, which "/srcx/" matches too.
+A false disjointness proof is the one failure mode this package is built to
+exclude — it is a WRONG WRITE, not a missed one, and both reproducers below
+were accepted at exit 0 before the fix.
 
 ### `TestR2_ContainmentIsSemanticNotTextual`
 
@@ -724,10 +1648,291 @@ E2E-testing finding: add_owner amend records recorded the POST-op owner
 set as old_owners (OwnersCopy taken after SetOwners mutated the aliased
 rule). The change record must show the true before/after.
 
+### `TestR16_ChangeKeys`
+
+SPEC R-16 (change records): a Change's JSON keys, enumerated. Each change is
+one line edit plus the reason it was chosen; a reviewer reading a plan in CI
+reads these fields, so renaming one silently breaks every consumer that is
+not the Go binary.
+
+### `TestR16_FieldTypes`
+
+SPEC R-16 (field types): every field's JSON name mapped to its JSON type.
+The key-set tests catch renames and additions; this catches a type change
+under an unchanged name — a string becoming an int, a scalar becoming a
+list — which is the change most likely to pass review and then break a
+consumer at runtime.
+
+### `TestR16_ForwardCompatMissingFieldIsZero`
+
+SPEC R-16 (forward compatibility, missing field): a plan document written
+before a field existed unmarshals with that field at its zero value, and
+every other field intact. op_results is the concrete case — it was added on
+this branch, so every plan.json already sitting in a CI artifact lacks it,
+and this is what lets a newer binary still apply one.
+
+### `TestR16_ForwardCompatUnknownFieldIsIgnored`
+
+SPEC R-16 (forward compatibility, unknown field): a plan document containing
+a field this binary does not know still unmarshals. Plans are written to CI
+artifacts and read back by a possibly-newer or possibly-older binary, so an
+unknown key must be ignored rather than rejected. This is Go's default —
+apply must never opt into DisallowUnknownFields, and this test is what
+notices if it ever does.
+
+### `TestR16_HashBeforeSurvivesRoundTrip`
+
+SPEC R-16 (drift gate): sha256_before is the pin that makes apply REFUSE a
+CODEOWNERS file that changed since the plan was computed — the plan's
+invariants were proven against those exact bytes and are worthless against
+any others. It must be the hash of the planned-over content and it must
+survive the round trip byte for byte; a plan whose hash is lost or mangled
+either fails safe (refuses forever) or, worse, would need the check
+disabled.
+
+### `TestR16_OmitEmptyKeysDisappear`
+
+SPEC R-16 (omitempty): which keys DISAPPEAR from a minimal document, pinned
+explicitly. omitempty is not cosmetic here — it decides whether a consumer
+can distinguish "this plan produced no warnings" from "this plan is from a
+binary that predates warnings". The unconditional keys (ops, changes,
+ownership_rows, diff, after_content) are always present, so a reader can
+treat their absence as a malformed document rather than as an empty result.
+
+### `TestR16_OpResultKeys`
+
+SPEC R-24 (op results): an OpResult's JSON keys, enumerated. This is the
+newest member of the plan document and the one whose addition this suite
+failed to notice.
+
+### `TestR16_OwnershipRowsDistinguishNullFromEmpty`
+
+SPEC R-16/S-9 (null vs []): ownership_rows must distinguish JSON null —
+"no rule matches this path", i.e. genuinely unowned — from [] — "a rule
+matches and deliberately lists zero owners" (--on-empty=unowned). They are
+different states of the repository and internal/verify treats a transition
+between them as a real change (see internal/verify/verify_test.go, which
+pins the same distinction at the snapshot layer).
+
+This is why Row carries no omitempty: `owners_before,omitempty` would erase
+nil and [] into the same absent key, collapsing the two states into one on
+the way through the plan document.
+
+### `TestR16_OwnershipRowsNullVsEmptyFromRealPlan`
+
+SPEC R-16/S-9 (null vs [], end to end): the same distinction as produced by
+the real planner, not by a hand-built struct. remove_owner under
+--on-empty=unowned keeps the pattern with zero owners, and the row for that
+path must serialize owners_after as [], not null — a reviewer reading the
+plan in CI is being told "deliberately un-owned", which is a different (and
+legal, S-9) outcome from "no rule matches".
+
+### `TestR16_PlanFileEnvelopeInlinesPlan`
+
+SPEC R-16 (envelope): the CLI wraps a Plan in planFile, adding repo, ref and
+codeowners_path. Because Plan is EMBEDDED without a json tag, encoding/json
+inlines its fields — the document has no nested "Plan" object, and apply
+unmarshalling the file gets both the envelope and the plan in one pass.
+Pinning that inlining matters: giving the embedded field a name would nest
+every plan key one level deeper and break every existing plan.json, with no
+compile error anywhere.
+
 ### `TestR16_PlanIsMachineReadable`
 
 SPEC R-16: the plan carries both views — ownership rows AND the literal
 line diff — plus byte sizes and per-change reasons.
+
+### `TestR16_PlanTopLevelKeys`
+
+SPEC R-16 (plan document, top level): the set of keys a marshalled Plan
+emits is pinned to a literal list. This is deliberately an ENUMERATION and
+not a spot-check: the failure this guards against is a field being ADDED
+without anyone noticing that `plan --out`'s output changed, and a
+spot-checking test cannot see an addition. op_results is included because
+it was added without a test noticing; listing it here records the current
+shape as intentional.
+
+### `TestR16_RoundTripPreservesRealPlan`
+
+SPEC R-16 (round trip, real plan): the same round trip over a plan produced
+by the planner rather than by hand, including the two fields apply actually
+consumes — after_content (the bytes written to disk) and sha256_before (the
+drift gate).
+
+### `TestR16_RoundTripThroughApplyPath`
+
+SPEC R-16 (round trip): a plan marshalled and unmarshalled through the exact
+path `apply` uses — json.MarshalIndent of the planFile envelope, then
+json.Unmarshal back into it — is semantically identical. This is the actual
+apply contract: everything the planner proved reaches the writer through
+this round trip and nothing else, so any field that does not survive it is a
+proof that silently does not reach `apply`.
+
+### `TestR16_RowKeys`
+
+SPEC R-16 (ownership rows): a Row's JSON keys, enumerated. Note the Go field
+names (Before/After) differ from the JSON names (owners_before/owners_after)
+— exactly the kind of mapping a refactor of the struct can break without any
+compile error.
+
+### `TestR21_AllOpsSkippedIsAWholePlanNoOp`
+
+SPEC R-21 (`skip`): when EVERY op skips, the plan as a whole is a no-op
+(exit 1) — there is nothing to write.
+
+The planner must not emit a plan whose AfterContent equals its input:
+`apply` would then rewrite the file with identical bytes and the fleet
+would open a PR per repo containing no diff.
+
+### `TestR21_RequireAndZeroValuePreserveR5`
+
+SPEC R-21 (compatibility): `require` and its zero value "" preserve R-5
+exactly — a scope matching zero tracked files is invalid input (exit 3).
+
+This is the guarantee that lets `on_zero_match` be added at all: ops parsed
+from `--op` never set the field, so every pre-existing test and every
+existing caller must keep the behavior TestT7_ZeroMatchScopeRejected pins.
+If this regresses, adding the field silently changed what one-repo `plan`
+does — the tool's oldest documented refusal.
+
+### `TestR21_SkipIsANoOpForThatOpOnly`
+
+SPEC R-21 (`skip`): a skipped op changes nothing, is reported as skipped
+with a reason, and does not stop the rest of the batch from applying.
+
+This is the opportunistic-op case — "if this repo has Terraform, @org/infra
+owns it". If a skip silently aborted the batch, the baseline ops that DO
+apply here would never land; if it silently applied something, `skip` would
+mean nothing.
+
+### `TestR22_CommutingDeclareBatchIsAccepted`
+
+TRAP 4, the other half — SPEC R-22: the order-dependence guard must not
+become "reject any batch containing a declare op". A fleet policy is mostly
+declare ops; a guard that refused all of them would make the feature
+unusable and push operators back to hand-editing 100 files.
+
+### `TestR22_DeclareAmendsAnExistingRuleWithDifferentOwners`
+
+TRAP 1, second face — SPEC R-22: when the declared rule is already present
+but with DIFFERENT owners, the op must amend that rule in place, not append
+a second copy of the pattern.
+
+Appending instead would leave two rules for the same pattern; last-match
+wins, so `add_owner` would silently DROP the owners on the shadowed line
+(the exact R-4/R-7 failure the amend-preferred rule exists to prevent), and
+the file would gain a line on every ownership change forever.
+
+### `TestR22_DeclareAppendsAtEOFBelowACatchAll`
+
+TRAP 2 — SPEC R-22: a declare op appends at EOF. It must NOT reuse
+synthAdd's unowned-path insert point, which inserts at firstRuleIndex,
+i.e. BEFORE every existing rule.
+
+CODEOWNERS is last-match-wins, so a rule written above a trailing
+`* @org/everyone` catch-all — the single most common line in real
+CODEOWNERS files — is shadowed for every path it was meant to govern. The
+tool would report "applied", the diff would look right in review, and the
+declared ownership would never take effect: 100 pull requests that do
+nothing, discovered months later when the first workflow file lands and
+pings the wrong team.
+
+The tracked tree cannot show any of this (the scope matches nothing), so
+the assertion resolves a path that does not exist yet against the emitted
+bytes.
+
+### `TestR22_DeclareAppendsAtEOFInACommentOnlyFile`
+
+TRAP 2, EOF edge: a file containing only comments has no rules at all, so
+"after the last rule" and "before the first rule" are the same index. The
+declared rule still goes at the end, and every comment line stays
+byte-identical (INV-5) — a header explaining the file must not be pushed
+below the rules it introduces.
+
+### `TestR22_DeclareAppendsAtEOFWithoutATrailingNewline`
+
+TRAP 2, EOF edge: the file's final line has NO trailing newline. Appending
+must put the declared rule on its own line — concatenating onto the last
+line would rewrite an existing rule into something else entirely (pattern
+plus a stray owner list), which is a silent ownership change, not a
+declaration.
+
+### `TestR22_DeclareIsIdempotent`
+
+TRAP 1 — SPEC R-22 (INV-4 for declare): a declare op must be IDEMPOTENT.
+
+This is the highest-cost defect in the feature. The planner's only no-op
+detector is `bytes.Equal(afterBytes, content)`, and the desired-state map
+is keyed by TRACKED path — a declare op has none. So a declare resolves
+identically before and after, and nothing in the current design can notice
+that the line it is about to append is already the line at the bottom of
+the file.
+
+Unfixed, the failure is not subtle and not local: a scheduled fleet run
+appends the same rule to all 100 CODEOWNERS files, every run, forever. That
+is R-4's unbounded growth, once per repo per night, ending at S-4's 3 MB
+cap where GitHub stops loading the file and the repo silently has NO
+ownership at all. The second run must be a no-op (exit 1).
+
+### `TestR22_DeclareRespectsTheSizeCap`
+
+SPEC R-22 (S-4): the size cap applies to declared lines too. A rule for
+files that do not exist yet is still bytes GitHub has to load, and past
+3 MB GitHub silently ignores the whole file — every path in the repo loses
+its owners at once. A declare op is exactly the kind of op a fleet script
+runs on a schedule, so it is the likeliest way to cross the line.
+
+### `TestR22_DeclareSeesAnExistingRuleThroughSpacing`
+
+TRAP 1, third face — SPEC R-22: "already declared" is a question about
+RESOLUTION, not about bytes. A rule written with a tab, extra spaces, or an
+inline comment already grants the declared owners, so re-declaring it is a
+no-op — and must not rewrite the line, which would churn a diff into 100
+pull requests that change only whitespace.
+
+### `TestR22_DeclareSetOwners`
+
+SPEC R-22: `declare` on set_owners, including the empty owner list. An
+empty list is a legal, deliberate un-owning (S-9): the rule keeps its
+pattern with zero owners, so a future matching file is explicitly NOT
+governed by whatever broader rule sits above it — the only way to say "this
+path is deliberately unowned" for paths that do not exist yet.
+
+### `TestR22_DeclareWithMatchesIsTheOrdinaryPath`
+
+SPEC R-22: a declare op whose scope matches SOME tracked files is not a
+zero-match at all. It takes the ordinary path — same edits, same bytes,
+proven over the tree.
+
+`on_zero_match` describes what to do when the scope matches NOTHING. If
+setting it to `declare` changed how an op that does match is written, then
+adding the field to a policy would quietly alter the behavior of every op
+in it, and reviewers of the policy file would be reading the wrong thing.
+
+### `TestR22_MultipleDeclaresStackAtEOFInPolicyOrder`
+
+SPEC R-22: several declare ops stack at EOF in POLICY order.
+
+Order is not cosmetic in a last-match-wins file: the order the lines land
+in is the order that decides overlaps for every file added later. It must
+be the order the policy author wrote and a reviewer read — not map order,
+which would differ run to run and make two repos with identical inputs
+produce different files.
+
+### `TestR22_ZeroMatchBatchIsNotVacuouslyCommuting`
+
+TRAP 4 — SPEC R-22 (R-8 for declare ops): the batch commutativity check
+intersects TREE path sets. Two zero-match scopes intersect on nothing, so
+an order-dependent batch of declare ops sails through the R-8 check as
+"commuting" and is written in input order.
+
+The pair below is genuinely contradictory: for a future `terraform/main.tf`
+the first op asks for @org/infra among the owners and the second asks for
+exactly {@org/tf}. Last-match-wins means whichever line is written second
+decides — the two orderings produce different CODEOWNERS files and both are
+accepted today. The refusal must cite R-8; a refusal citing R-5 means
+`declare` was never implemented and this test is passing for the wrong
+reason.
 
 ### `TestRenameOwner_Global`
 
@@ -884,11 +2089,342 @@ create them.
 SPEC T-10 (R-9, S-4): refuse to produce a file over 3 MB — GitHub would
 silently not load it, which is total ownership failure.
 
+### `TestZeroMatch_DeclareByteIdenticalToAnExistingRule`
+
+SPEC R-22: a declare op whose rule would be byte-identical to a rule
+already in the file.
+
+Two cases with opposite answers, and the difference is precedence, not
+bytes. When the identical rule is already the last word, there is nothing
+to do (exit 1). When a later catch-all shadows it, the declaration is NOT
+satisfied — reporting "already correct" there is the silent no-op rollout
+that `skip` vs `declare` exists to distinguish, and it would read as 100
+converged repos in the fleet summary.
+
+### `TestZeroMatch_OpResultsAreInOpOrder`
+
+SPEC R-22 (R-24): OpResults is one entry per op, in op order, carrying the
+op's id and text.
+
+The fleet record is the only artifact of an unattended run. "Which repos
+lack Terraform" is answerable only if each op reports itself, by id, in the
+order the policy lists them — a bare count cannot answer it, and a reordered
+list attributes the wrong outcome to the wrong op.
+
+## internal/policy
+
+**`policy_test.go`**
+
+> Package policy_test encodes the acceptance tests for the policy file.
+>
+> The policy file is the unit of review for a fleet rollout (R-20): one
+> artifact in git that states what ran across N repositories. That makes it
+> the one place where a silent default is unaffordable — a typo'd
+> `on_zero_mtach` that fell back to the default would apply the WRONG policy
+> to every repo at once, and nothing downstream would notice.
+>
+> So the contract is:
+>
+> 	Unknown fields, bad enum values, and duplicate JSON keys are HARD errors.
+> 	Syntax errors fail fast; semantic errors accumulate into *MultiError.
+> 	Every error carries file:line:col and names the op by index and id.
+> 	Go's own decoder messages never reach the operator.
+>
+> Per-op zero-match (R-21) is validated here too, because whether an op may
+> carry `on_zero_match` at all depends only on the op kind — a repo-independent
+> fact, and therefore a policy error, caught on repo 0 rather than repo 47.
+
+### `TestR20_AllOptionalFieldsArePopulated`
+
+SPEC R-20: every optional field round-trips. name/description/note exist so
+the PR reviewer on repo 63 learns WHY the change is in front of them; if they
+are silently dropped at parse, --summary-out has nothing to render.
+
+### `TestR20_BadOnEmptyValueRejected`
+
+SPEC R-20: on_empty is validated lazily today — plan.go only reaches "unknown
+--on-empty policy" when a removal actually empties an owner set. A policy
+saying "inhrit" would pass, work on 46 repos, and blow up on repo 47.
+Validate the enum at load; that is precisely what `check` exists to prevent.
+
+### `TestR20_BareStringIsExactlyObjectShorthand`
+
+SPEC R-20: a bare string is SHORTHAND for {"op": "<string>"} with every other
+field at its default — not a second form with its own code path. If the two
+ever diverge, a reviewer reading a mixed ops array cannot tell what runs.
+
+"Every other field at its default" includes the id, which stays EMPTY. The
+`ops[0]` form that appears in error messages and results is a display label
+the renderer computes from the position; storing it in the field instead
+would make an unnamed op indistinguishable from one a policy author
+deliberately named "ops[0]", and would key that op's fleet-wide results by a
+name that shifts the moment somebody inserts an op above it.
+
+### `TestR20_DuplicateKeyInsideOpRejected`
+
+SPEC R-20: the same, one level down. Per-element decoders are built fresh for
+each op, so it is easy to implement duplicate detection at the top level and
+forget it inside the ops array — where the values that steer behavior live.
+Every value here is a scalar, so the message has no excuse: it must name the
+key and show both of the values that were in conflict.
+
+### `TestR20_DuplicateOpIDRejected`
+
+SPEC R-20: two ops in one policy may not share an id. Results are keyed by
+id — the summary a reviewer reads, and whatever a fleet script pipes into
+jq — so a repeated id silently overwrites one op's outcome with another's.
+The reviewer then sees a policy that ran N ops reporting N-1 results, with
+no indication which repo the missing one applied to.
+
+An op with NO id is not a duplicate of another op with no id: the empty id
+is the absence of a name, and unnamed ops are referred to by position.
+
+### `TestR20_DuplicateTopLevelKeyRejected`
+
+SPEC R-20: encoding/json silently takes the LAST duplicate key. A generator
+concatenating fragments produces on_empty twice and `inherit` wins without a
+word — the same failure class as the typo, and invisible in review because
+both lines are individually correct.
+The message must show BOTH values, because the whole failure is that one of
+them vanished without trace. Naming the key alone leaves the reviewer to
+work out which of their two lines the tool would have obeyed.
+
+### `TestR20_EmptyOpsArrayRejected`
+
+SPEC R-20: an EMPTY ops array is the same silent success, and is what a
+generator emits when its input query returned nothing.
+
+### `TestR20_ErrorCarriesAPlausibleLineNumber`
+
+SPEC R-20 (error quality): a real multi-line policy must report the line the
+mistake is actually on. Line 0 — the value you get by not converting the byte
+offset — is the whole feature failing quietly.
+
+### `TestR20_ErrorFormatsFileLineColAndOp`
+
+SPEC R-20 (error quality): the format is file:line:col, then the op by index
+and id, then the message. A byte offset is what encoding/json gives and what
+nobody can use; this string is what a person greps out of a 100-repo log at
+2am.
+
+### `TestR20_ErrorsIdentifyTheOpByIndexAndID`
+
+SPEC R-20 (error quality): the op is identified by index AND id. The index
+alone makes a reviewer count array elements; the id alone is optional and may
+be absent. Both, always.
+
+When the op has no id the index still stands alone, and no id is invented to
+fill the gap: `ops[1]` is how the renderer refers to an unnamed op, and an
+error claiming an op is named "ops[1]" sends a reviewer searching the policy
+file for a string that is not in it.
+
+### `TestR20_GoUnmarshalMessagesNeverEscape`
+
+SPEC R-20 (error quality, rule 5): `json: cannot unmarshal object into Go
+value of type string` names Go types and points at the wrong concept. It must
+never reach an operator, for ANY malformed input.
+
+### `TestR20_LoadOfMissingPathFails`
+
+SPEC R-20: a missing policy file is a policy error, not a crash and not a
+silent empty policy — the fleet script's first line is `check --policy`, and
+a typo'd path must halt there rather than run zero ops against 100 repos.
+
+### `TestR20_LoadReadsAPolicyFromDisk`
+
+SPEC R-20: Load is Parse over a file on disk — same policy, same result. The
+filename in the errors is the path the operator passed, so they can open it.
+
+### `TestR20_MalformedOpStringIsAPolicyError`
+
+SPEC R-20: an op string that ops.Parse rejects is a POLICY error. Letting the
+raw ops.Parse text out loses the file, line, and op index — the operator gets
+`unknown op "add_ownr"` with no idea which of 40 ops in which of 100 repos.
+
+### `TestR20_MalformedPolicyIsCaughtWithoutARepo`
+
+SPEC R-20: the policy is the unit of review, and reviewing it touches NO
+repository. Every error above is reachable with nothing on disk but the file
+itself — no git, no tree, no CODEOWNERS — which is what lets `check` run once
+before the loop instead of failing on repo 100.
+
+### `TestR20_MinimalPolicyParses`
+
+SPEC R-20: the smallest policy anyone would write by hand — a version and a
+list of op strings — is accepted exactly as written, and every field the
+author did not mention stays at its default rather than acquiring one.
+
+This is step two of the escalation the README promises: run one operation
+with --op, decide you want to keep it, paste it into a file. If the minimal
+file needs a name, a description, or a per-op object before the tool will
+take it, that promise breaks at the moment an operator first tries to save
+their work — and a policy file nobody can write by hand is a policy file
+nobody reviews.
+
+### `TestR20_MissingOpsRejected`
+
+SPEC R-20: a policy with no ops does nothing on 100 repos and exits 0 on all
+of them — the silent-success failure this design exists to make impossible.
+
+### `TestR20_MissingVersionRejected`
+
+SPEC R-20: version is required, not optional-defaulting-to-1. A strict format
+read by pinned binaries across a fleet, with no version marker, is a corner
+with no way out.
+
+### `TestR20_NearMissTypoNamesTheOffendingField`
+
+SPEC R-20: the motivating case. `on_zero_mtach` differs from the real field by
+two transposed letters; under a permissive decoder it applies the DEFAULT
+zero-match policy to 100 repos while the file in git says "skip". The error
+must quote the offending key and point at the one that was meant.
+
+### `TestR20_NewerVersionDistinguishedFromGarbage`
+
+SPEC R-20: "your binary is too old" and "this file is nonsense" are two
+different jobs for the operator — upgrade the tool, or go fix whatever
+generated the file. A pinned fleet binary that meets a version it does not
+implement has to say which one it is, or the operator picks wrong and
+spends the outage on the other.
+
+The message carries that verdict in the two NUMBERS it names: the version
+the file asks for and the version this binary implements. A malformed
+version has no such pair — there is nothing to compare — so it names the
+field and shows what it actually found, and must never send anyone off to
+upgrade over a stray quote mark.
+
+### `TestR20_OpObjectWithoutOpKeyRejected`
+
+SPEC R-20: `op` is the one required field of the object form. An object
+carrying only id and note describes nothing; accepting it would put a
+phantom entry in the per-op results of every repo.
+
+### `TestR20_OpsEntryOfWrongJSONTypeRejected`
+
+SPEC R-20: dispatch is on the first non-space byte — `"` is the string form,
+`{` the object form, and ANYTHING ELSE is a typed error. A number or null
+slipping through as a zero-value op would run an empty op against the fleet.
+
+### `TestR20_OpsItselfMustBeAnArray`
+
+SPEC R-20: "ops" itself must be an array. A single string is the plausible
+generator mistake, and reading it as one op would be a helpful guess — the
+exact behavior a strict format forbids.
+
+### `TestR20_RemoveOwnerRequiresTopLevelOnEmpty`
+
+SPEC R-20: on_empty is REQUIRED when any op is a remove_owner, validated
+statically. Otherwise the R-6 question ("what happens when a removal empties
+an owner set?") is answered lazily on whichever repo first hits it — a repo-47
+surprise, turned here into a repo-0 one.
+
+### `TestR20_SemanticErrorsAccumulate`
+
+SPEC R-20: SEMANTIC errors accumulate. Fixing a generated 40-op policy one
+error per run is miserable and is how an operator gives up and stops running
+`check` at all.
+
+### `TestR20_ShorthandAndObjectFormsMix`
+
+SPEC R-20: both forms are legal in the same ops array, in any order, and
+order is preserved (R-8 conflict detection downstream depends on it).
+
+### `TestR20_SyntaxErrorsFailFast`
+
+SPEC R-20: SYNTAX errors fail fast. Once the token stream is broken every
+subsequent "error" is invented, and a wall of phantom problems is worse than
+the one real one.
+
+### `TestR20_UnderscoreAndSlashKeysAreIgnored`
+
+SPEC R-20: JSON has no comments and unknown fields are fatal, so without an
+escape hatch the universal "_comment" convention would be ILLEGAL. Keys
+starting with _ and the key // are ignored at EVERY level. This does not
+weaken typo detection — on_zero_mtach does not start with an underscore.
+
+### `TestR20_UnknownFieldInsideOpRejected`
+
+SPEC R-20: unknown fields inside an OP object are the dangerous case — the
+natural string-or-object implementation loses DisallowUnknownFields the
+moment a custom unmarshaler takes over, so this is the test that catches the
+regression the UX doc calls out by name.
+
+### `TestR20_UnknownTopLevelFieldRejected`
+
+SPEC R-20: an unknown top-level field is a hard error. Silently ignoring
+"opps" means the policy that ran is not the policy that was reviewed.
+
+### `TestR20_VersionZeroRejected`
+
+SPEC R-20: version 0 is what an absent field decodes to. It must be rejected
+for the same reason absence is — otherwise "version": 0 and "no version at
+all" become indistinguishable and the marker stops carrying information.
+
+### `TestR21_AllZeroMatchValuesLegalOnAddOwnerAndSetOwners`
+
+SPEC R-21: all three values are legal on add_owner and set_owners, including
+set_owners with an empty list (the zero-owner rule, S-9) under declare.
+The legality table is the contract; a value legal in the docs and rejected by
+the parser halts a fleet on repo 0 for no reason.
+
+### `TestR21_BadOnZeroMatchValueRejected`
+
+SPEC R-21: the enum is exactly require|skip|declare, case-sensitively. "write"
+is the OLD name from revision 1 — accepting it would silently give a fleet
+the default behavior under a spelling whose author meant something else, and
+the rename would never actually have happened.
+
+### `TestR21_DeclareRejectedOnRemoveOwner`
+
+SPEC R-21: `declare` means "write the rule anyway, for files that do not
+exist yet". A remove_owner has nothing to write — there is no rule to declare
+the absence of an owner on paths that are not there. Reject at parse.
+
+### `TestR21_ExplicitEmptyOnZeroMatchIsNotTheSameAsAbsent`
+
+SPEC R-21: an ABSENT on_zero_match means require. An on_zero_match that is
+PRESENT and empty is an error. These are two different states of the file and
+the parser must be able to tell them apart.
+
+The distinction is easy to lose: a plain Go struct field decodes both to the
+empty string, so an implementation that reads the field and checks its value
+cannot see the difference and will accept `"on_zero_match": ""` as a default.
+Detecting which keys the file actually contained is therefore part of the
+contract, not an implementation preference.
+
+What it buys: a generator that emits an empty string where it meant to emit
+a decision has produced a file that reads, to a human reviewer, as if a
+choice was made. Accepting it applies the default across the fleet under a
+spelling that says otherwise — the same silent-default failure as the typo,
+arriving through the correctly-spelled field.
+
+### `TestR21_OnZeroMatchAndIDComeFromTheFile`
+
+SPEC R-21: on_zero_match and id ride on ops.Op, because plan.Build's signature
+does not change — the planner learns per-op zero-match behavior only from the
+op it is handed. A policy that parsed but left these zero would silently run
+the default everywhere.
+
+### `TestR21_OnZeroMatchRejectedOnRenameOwner`
+
+SPEC R-21: rename_owner's scope is derived from current ownership, not a
+pattern — plan.go exempts it from R-5 entirely, so on_zero_match can never
+fire on it. Accepting the field and ignoring it is the same class of failure
+as the typo the strictness rule exists to catch.
+
+### `TestR21_RequireAndSkipAreLegalOnRemoveOwner`
+
+SPEC R-21: require and skip ARE meaningful on remove_owner — "this repo must
+have had @a here" versus "clean it up where it exists". Rejecting them would
+make the only fleet-safe removal impossible.
+
 ## internal/resolve
+
+**`resolve_test.go`**
 
 > Package resolve_test defines ownership resolution: mapping every tracked
 > path to its owner set via the LAST matching rule.
-> 
+>
 > SPEC S-1: last matching rule wins; owner sets do not union.
 > SPEC S-9: matching a zero-owner rule yields an explicitly-empty owner set,
 > distinct from "no rule matched".
@@ -924,6 +2460,8 @@ SPEC S-9: GitHub's official example — a zero-owner rule un-owns a subtree.
 
 ## internal/verify
 
+**`verify_test.go`**
+
 > Package verify_test defines snapshot comparison (R-18): the invariant can
 > be checked in CI from two ownership snapshots WITHOUT trusting the tool
 > that produced the change.
@@ -952,4 +2490,4 @@ DIFFERENT states; transitioning between them is a real ownership change.
 
 ---
 
-144 documented test cases across 11 packages.
+293 documented test cases across 12 packages.

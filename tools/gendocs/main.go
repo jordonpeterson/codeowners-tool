@@ -5,6 +5,11 @@
 // implementation honors it. This tool extracts package and test doc comments
 // with go/ast so the documentation cannot drift from what is actually
 // verified — regenerate with `make docs`.
+//
+// Determinism is a hard requirement, not a nicety: `make docs` is checked in
+// CI with `git diff --exit-code`, so any map-iteration order leaking into the
+// output would produce spurious failures and destroy trust in the check.
+// Every collection this tool walks is therefore sorted before use.
 package main
 
 import (
@@ -23,9 +28,16 @@ type testDoc struct {
 	Doc  string
 }
 
+// fileDoc is the file-level prose of a single _test.go file: its package doc
+// comment plus every free-floating comment group in it, in source order.
+type fileDoc struct {
+	Name  string // base filename, e.g. "fleet_idempotence_test.go"
+	Prose []string
+}
+
 type pkgDoc struct {
 	Dir   string
-	Doc   string
+	Files []fileDoc
 	Tests []testDoc
 }
 
@@ -50,12 +62,18 @@ func main() {
 	sb.WriteString("Every statement below is enforced by a named test. Spec references\n")
 	sb.WriteString("(S-* semantics, R-* rules, INV-* invariants, T-* acceptance tests, A-* audit\n")
 	sb.WriteString("checks) map to the specification this tool was built against.\n\n")
+	sb.WriteString("Each package section opens with the file-level prose of its test files —\n")
+	sb.WriteString("package doc comments and free-floating commentary — quoted per file in\n")
+	sb.WriteString("filename order, then one entry per test in spec-tag order.\n\n")
 
 	total := 0
 	for _, p := range pkgs {
 		sb.WriteString("## " + p.Dir + "\n\n")
-		if p.Doc != "" {
-			sb.WriteString(quote(p.Doc) + "\n")
+		for _, f := range p.Files {
+			sb.WriteString("**`" + f.Name + "`**\n\n")
+			for _, prose := range f.Prose {
+				sb.WriteString(quote(prose) + "\n")
+			}
 		}
 		for _, t := range p.Tests {
 			total++
@@ -85,32 +103,61 @@ func scan(dir string) *pkgDoc {
 	if err != nil {
 		return nil
 	}
+
+	// A directory can hold two Go packages (e.g. `plan` and `plan_test`), and
+	// both parser.ParseDir's result and each package's Files field are maps.
+	// Flatten to a single filename-keyed map and walk it in sorted filename
+	// order, so neither the prose we emit nor the tie-breaking below depends
+	// on Go's randomized map iteration.
+	files := map[string]*ast.File{}
+	for _, pkg := range pkgsMap {
+		for path, f := range pkg.Files {
+			files[path] = f
+		}
+	}
+	paths := make([]string, 0, len(files))
+	for path := range files {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+
 	out := &pkgDoc{Dir: filepath.ToSlash(dir)}
 	var names []string
 	byName := map[string]testDoc{}
-	for _, pkg := range pkgsMap {
-		for _, f := range pkg.Files {
-			if f.Doc != nil && out.Doc == "" {
-				out.Doc = strings.TrimSpace(f.Doc.Text())
+	for _, path := range paths {
+		f := files[path]
+
+		// RULE: no file-level prose is dropped. Every package doc comment in
+		// the directory is emitted, attributed to its file, in filename order
+		// — rather than picking one file's comment and discarding the rest,
+		// which both lost documentation and made the choice order-dependent.
+		// Free-floating comments (attached to no declaration, and outside
+		// every declaration's body) are emitted the same way: much of the
+		// project's best prose is a file preamble separated from the package
+		// clause by a blank line, which go/ast does NOT record as a package
+		// doc, so requiring attachment would silently drop it.
+		if prose := fileProse(f); len(prose) > 0 {
+			out.Files = append(out.Files, fileDoc{Name: filepath.Base(path), Prose: prose})
+		}
+
+		for _, decl := range f.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok || !strings.HasPrefix(fn.Name.Name, "Test") {
+				continue
 			}
-			for _, decl := range f.Decls {
-				fn, ok := decl.(*ast.FuncDecl)
-				if !ok || !strings.HasPrefix(fn.Name.Name, "Test") {
-					continue
-				}
-				d := ""
-				if fn.Doc != nil {
-					d = strings.TrimSpace(fn.Doc.Text())
-				}
-				byName[fn.Name.Name] = testDoc{Name: fn.Name.Name, Doc: d}
-				names = append(names, fn.Name.Name)
+			d := ""
+			if fn.Doc != nil {
+				d = strings.TrimSpace(fn.Doc.Text())
 			}
+			byName[fn.Name.Name] = testDoc{Name: fn.Name.Name, Doc: d}
+			names = append(names, fn.Name.Name)
 		}
 	}
 	if len(names) == 0 {
 		return nil
 	}
-	// Keep declaration order within a file set: sort by spec-tag-aware name.
+	// Order tests by spec tag. `names` is already in (filename, declaration)
+	// order, so the stable sort's tie-break is deterministic too.
 	sort.SliceStable(names, func(i, j int) bool { return specKey(names[i]) < specKey(names[j]) })
 	seen := map[string]bool{}
 	for _, n := range names {
@@ -120,6 +167,67 @@ func scan(dir string) *pkgDoc {
 		}
 	}
 	return out
+}
+
+// fileProse returns the file's package doc comment followed by every
+// free-floating comment group, in source order. A comment group is
+// free-floating when it documents no declaration: it is not the doc comment of
+// a top-level declaration and does not sit inside one. Comments inside a
+// function body, and doc comments on tests, types and vars, are excluded —
+// tests are rendered from their own doc comments below.
+func fileProse(f *ast.File) []string {
+	attached := map[*ast.CommentGroup]bool{}
+	for _, decl := range f.Decls {
+		switch d := decl.(type) {
+		case *ast.FuncDecl:
+			attached[d.Doc] = true
+		case *ast.GenDecl:
+			attached[d.Doc] = true
+		}
+	}
+	var prose []string
+	for _, cg := range f.Comments {
+		if cg != f.Doc && attached[cg] {
+			continue
+		}
+		if cg != f.Doc && withinDecl(f, cg) {
+			continue
+		}
+		if s := cleanProse(cg.Text()); s != "" {
+			prose = append(prose, s)
+		}
+	}
+	return prose
+}
+
+func withinDecl(f *ast.File, cg *ast.CommentGroup) bool {
+	for _, decl := range f.Decls {
+		if cg.Pos() >= decl.Pos() && cg.End() <= decl.End() {
+			return true
+		}
+	}
+	return false
+}
+
+// cleanProse strips the ASCII rule lines ("// ------...") the test files use to
+// bracket section headers. They carry no information, and in a Markdown
+// blockquote a trailing run of dashes turns the line above it into a heading.
+func cleanProse(s string) string {
+	var keep []string
+	for _, line := range strings.Split(s, "\n") {
+		if isRule(strings.TrimSpace(line)) {
+			continue
+		}
+		keep = append(keep, line)
+	}
+	return strings.TrimSpace(strings.Join(keep, "\n"))
+}
+
+func isRule(s string) bool {
+	if len(s) < 3 {
+		return false
+	}
+	return strings.Trim(s, "-=*_") == ""
 }
 
 // specKey orders tests by their spec tag (T-1 before T-10, S before R…).
@@ -145,6 +253,10 @@ func specKey(name string) string {
 func quote(s string) string {
 	var out strings.Builder
 	for _, line := range strings.Split(s, "\n") {
+		if line == "" {
+			out.WriteString(">\n")
+			continue
+		}
 		out.WriteString("> " + line + "\n")
 	}
 	return out.String()

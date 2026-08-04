@@ -29,7 +29,22 @@ type Op struct {
 	NewOwner string   `json:"new_owner,omitempty"` // rename new name
 	Owners   []string `json:"owners,omitempty"`    // set_owners exact set (non-nil, may be empty)
 	Raw      string   `json:"raw"`
+
+	// OnZeroMatch selects behavior when Scope matches zero tracked files:
+	// "" (== "require") | "require" | "skip" | "declare". The zero value
+	// preserves R-5 exactly, which is why adding this changes nothing for
+	// ops built by Parse.
+	OnZeroMatch string `json:"on_zero_match,omitempty"`
+	// ID is a policy-file label used in results and errors; "" from --op.
+	ID string `json:"id,omitempty"`
 }
+
+// Zero-match policies (R-21).
+const (
+	ZeroMatchRequire = "require"
+	ZeroMatchSkip    = "skip"
+	ZeroMatchDeclare = "declare"
+)
 
 func (o Op) String() string { return o.Raw }
 

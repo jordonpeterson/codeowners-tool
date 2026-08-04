@@ -99,13 +99,30 @@ type token struct {
 }
 
 // tokenize converts a pattern into its token sequence, mirroring the regex
-// buildPatternRegex emits for each normalized segment.
+// buildPatternRegex emits for each normalized segment. It reports false for any
+// pattern it cannot model faithfully; callers then answer "unproven", which is
+// always safe.
 func tokenize(pat string) ([]token, bool) {
 	if pat == "" || pat[0] == '!' || strings.Contains(pat, "***") {
 		return nil, false
 	}
 	segs := normalizeSegs(pat)
 	last := len(segs) - 1
+	// Refuse patterns with two adjacent "**" segments. buildPatternRegex tracks
+	// whether the separator has already been consumed (its needSlash flag), and
+	// the "**" arms do not honour it: a leading "**" compiles to "(?:.+/)?" and
+	// clears needSlash, then the next "**" emits the separator again anyway. So
+	// "**/" — segments ["**", "**"] — compiles to `\A(?:.+/)?/.*\z`, which no
+	// repo-relative path can match. Modeling those segments as tokens loses that
+	// bookkeeping entirely and reads the pattern as universal, which is UNSOUND:
+	// Contains("**/", "*") would be true while "a.go" matches "*" and not "**/".
+	// These spellings match nothing (or, like "*/**/**", are simply degenerate),
+	// so declining to reason about them costs a refusal and nothing real.
+	for i := 1; i <= last; i++ {
+		if segs[i] == "**" && segs[i-1] == "**" {
+			return nil, false
+		}
+	}
 	var out []token
 	for i, seg := range segs {
 		switch seg {

@@ -32,8 +32,14 @@ func ReadFileAtRef(repoDir, ref, path string) ([]byte, error) {
 	return gitOutput(repoDir, "cat-file", "blob", ref+":"+path)
 }
 
-// codeownersLocations is GitHub's search order: first found wins (S-8).
-var codeownersLocations = []string{".github/CODEOWNERS", "CODEOWNERS", "docs/CODEOWNERS"}
+// CodeownersLocations is GitHub's search order: first found wins (S-8).
+//
+// Exported because the same order governs two different lookups — "what governs
+// at this ref", over the tracked tree below, and "what is on disk right now",
+// which `sync` needs for its working-tree fallback. The questions differ; the
+// list is one fact about GitHub, and a second copy of it is a place for the two
+// to disagree the day GitHub adds a location.
+var CodeownersLocations = []string{".github/CODEOWNERS", "CODEOWNERS", "docs/CODEOWNERS"}
 
 // FindCodeownersPaths returns every CODEOWNERS file present in the tree, in
 // precedence order. More than one entry is an error condition for callers
@@ -44,7 +50,7 @@ func FindCodeownersPaths(tree []string) []string {
 		present[p] = true
 	}
 	var found []string
-	for _, loc := range codeownersLocations {
+	for _, loc := range CodeownersLocations {
 		if present[loc] {
 			found = append(found, loc)
 		}
