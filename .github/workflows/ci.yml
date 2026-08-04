@@ -34,6 +34,30 @@ jobs:
       - name: Build
         run: make build
 
+  docs:
+    name: docs are not stale
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # docs/BEHAVIOR.md is generated from the test doc comments, so a change
+      # to a test that is not regenerated is documentation drift. Regenerate
+      # and fail if the committed file differs from what the tests produce.
+      - name: Regenerate docs
+        run: make docs
+
+      - name: Check docs/BEHAVIOR.md is up to date
+        run: |
+          git diff --exit-code docs/BEHAVIOR.md \
+            || (echo "docs/BEHAVIOR.md is stale: run 'make docs' and commit the result" && exit 1)
+
   lint:
     name: lint
     runs-on: ubuntu-latest
