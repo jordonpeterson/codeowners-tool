@@ -135,11 +135,18 @@ func Build(content []byte, tree []string, opList []ops.Op, opts Options) (*Plan,
 		beforeOwners[p] = r.Owners // nil if unmatched
 	}
 
-	// Per-op scope path sets (R-5: empty scope is invalid input).
+	// Per-op scope path sets (R-5: empty scope is invalid input, unless a
+	// policy op opts out per R-21).
 	scopeSets := make([]map[string]bool, len(opList))
+	skipped := make([]bool, len(opList))
+	declared := make([]bool, len(opList))
 	for i, op := range opList {
 		set := map[string]bool{}
 		if op.Kind == ops.RenameOwner {
+			// R-21 never reaches a rename: its scope comes from current
+			// ownership, not from a pattern, so there is no zero-match branch
+			// to take here. Rejecting on_zero_match on a rename is a static
+			// property of the policy and belongs to internal/policy.
 			for p, own := range beforeOwners {
 				if contains(own, op.Owner) {
 					set[p] = true
@@ -156,7 +163,29 @@ func Build(content []byte, tree []string, opList []ops.Op, opts Options) (*Plan,
 				}
 			}
 			if len(set) == 0 {
-				return nil, &InvalidError{Msg: fmt.Sprintf("scope %q matches zero tracked files (R-5: refusing to create a dead rule)", op.Scope)}
+				switch op.OnZeroMatch {
+				case ops.ZeroMatchSkip:
+					// The op stays in opList with an empty scope set rather
+					// than being filtered out. Filtering would drop its raw
+					// string from Plan.Ops, which is R-16's record of what was
+					// REQUESTED, and an all-skip batch would fall into "no
+					// operations supplied" (exit 3) where R-21 requires a
+					// per-repo no-op (exit 1).
+					skipped[i] = true
+				case ops.ZeroMatchDeclare:
+					if op.Kind == ops.RemoveOwner {
+						return nil, &InvalidError{Msg: fmt.Sprintf(
+							"on_zero_match=declare is meaningless on %s: there is no rule to remove an owner from (R-21)", op.Raw)}
+					}
+					declared[i] = true
+				default:
+					// "" and "require" are the same state, and this arm — not a
+					// comparison against "require" — is what makes that true:
+					// every op parsed from --op carries "", and R-21's
+					// compatibility guarantee is that those keep hitting R-5
+					// exactly as before the field existed.
+					return nil, &InvalidError{Msg: fmt.Sprintf("scope %q matches zero tracked files (R-5: refusing to create a dead rule)", op.Scope)}
+				}
 			}
 		}
 		scopeSets[i] = set
@@ -229,6 +258,30 @@ func Build(content []byte, tree []string, opList []ops.Op, opts Options) (*Plan,
 		}
 	}
 
+	// R-8 for zero-match ops. The loop above intersects TREE path sets, and a
+	// declared scope owns none — so two contradictory declares meet on the
+	// empty set, are waved through as "commuting", and get written in input
+	// order with last-match-wins silently picking the winner. There is no path
+	// to test, so decide these pairs over the patterns and the transforms
+	// instead. Skipped ops write nothing and commute with everything; pairs of
+	// ordinary ops are left entirely to the check above, so nothing that
+	// planned before this existed can start refusing now.
+	for i := 0; i < len(opList); i++ {
+		for j := i + 1; j < len(opList); j++ {
+			if skipped[i] || skipped[j] || (!declared[i] && !declared[j]) {
+				continue
+			}
+			if patternsProvablyDisjoint(opList[i].Scope, opList[j].Scope) {
+				continue
+			}
+			if !commuteOnEveryOwnerSet(opList[i], opList[j]) {
+				return nil, &InvalidError{Msg: fmt.Sprintf(
+					"ops %q and %q can both govern a path that does not exist yet and do not commute (R-8: refusing order-dependent batch)",
+					opList[i].Raw, opList[j].Raw)}
+			}
+		}
+	}
+
 	// Desired final ownership, computed independently of edit synthesis.
 	desired := make(map[string][]string, len(tree))
 	for p, own := range beforeOwners {
@@ -240,22 +293,36 @@ func Build(content []byte, tree []string, opList []ops.Op, opts Options) (*Plan,
 		pl.Ops = append(pl.Ops, op.Raw)
 	}
 
-	// Synthesize edits op by op on the evolving file.
+	// Synthesize edits op by op on the evolving file. A declare op runs against
+	// the SAME evolving file, which is what lets two declares on one scope
+	// merge into a single rule instead of stacking two lines where the second
+	// shadows the first.
+	var declares []*declareCheck
 	for i, op := range opList {
+		mark := len(pl.Changes)
 		var err error
-		switch op.Kind {
-		case ops.AddOwner:
-			err = synthAdd(f, tree, op, scopeSets[i], desired, pl)
-		case ops.SetOwners:
-			err = synthSet(f, tree, op, scopeSets[i], desired, pl)
-		case ops.RemoveOwner:
-			err = synthRemove(f, tree, op, scopeSets[i], desired, opts.OnEmpty, pl)
-		case ops.RenameOwner:
-			err = synthRename(f, op, desired, pl)
+		switch {
+		case skipped[i]:
+			// R-21: a skipped op changes nothing and does not stop the rest of
+			// the batch from applying.
+		case declared[i]:
+			err = synthDeclare(f, op, &declares, pl)
+		default:
+			switch op.Kind {
+			case ops.AddOwner:
+				err = synthAdd(f, tree, op, scopeSets[i], desired, pl)
+			case ops.SetOwners:
+				err = synthSet(f, tree, op, scopeSets[i], desired, pl)
+			case ops.RemoveOwner:
+				err = synthRemove(f, tree, op, scopeSets[i], desired, opts.OnEmpty, pl)
+			case ops.RenameOwner:
+				err = synthRename(f, op, desired, pl)
+			}
 		}
 		if err != nil {
 			return nil, err
 		}
+		pl.OpResults = append(pl.OpResults, opResultFor(op, skipped[i], declared[i], len(pl.Changes) > mark))
 	}
 
 	// ASSERT: the gate. Serialize, RE-PARSE, and re-resolve over the real
@@ -290,8 +357,29 @@ func Build(content []byte, tree []string, opList []ops.Op, opts Options) (*Plan,
 		return nil, &RefusalError{Msg: "refusing: synthesized edits do not satisfy the invariants", Details: violations}
 	}
 
+	// INV-6. The loop above ranged the tree; for a declared scope it ranged
+	// nothing, so INV-1 came out true without a single statement having been
+	// made about the line just written — precisely the case a reviewer most
+	// needs told. Prove it structurally instead, or refuse.
+	if err := proveDeclares(file.Parse(afterBytes), declares); err != nil {
+		return nil, err
+	}
+
 	if bytes.Equal(afterBytes, content) {
-		return nil, &NoOpError{Msg: "nothing to change: file already satisfies the requested ops"}
+		// A populated plan, not nil: "already correct" is the modal outcome of
+		// a scheduled fleet run and must still report one result per op, or the
+		// sync record cannot say which repos are converged. Callers that only
+		// check err are unaffected. Nothing moved, so nothing was applied —
+		// an op whose synthesized edit rendered byte-identical text is reported
+		// as unchanged rather than left claiming a change nobody can see.
+		for k := range pl.OpResults {
+			if pl.OpResults[k].Status == "applied" {
+				pl.OpResults[k].Status = "unchanged"
+			}
+		}
+		pl.AfterContent = string(afterBytes)
+		pl.SizeAfter = len(afterBytes)
+		return pl, &NoOpError{Msg: "nothing to change: file already satisfies the requested ops"}
 	}
 
 	pl.AfterContent = string(afterBytes)

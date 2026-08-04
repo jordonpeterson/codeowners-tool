@@ -323,10 +323,21 @@ func TestR22_DeclareAppendsAtEOFBelowACatchAll(t *testing.T) {
 	if !reflect.DeepEqual(future.Owners, []string{"@org/ci"}) {
 		t.Errorf("future .github/workflows/ci.yml = %v, want {@org/ci} — the declared rule is shadowed", future.Owners)
 	}
-	// INV-2 is unaffected: nothing tracked moves.
+	// INV-2 is unaffected: nothing tracked moves. Note both tracked paths
+	// resolve to the catch-all BEFORE any op runs — the trailing `*` shadows
+	// `/services/api/` under last-match-wins (S-1), which is the whole point of
+	// the fixture. Asserting {@org/api} here would demand the declare op MOVE a
+	// tracked path, i.e. the exact INV-2 violation this block exists to rule
+	// out. (An earlier revision did assert that and was unsatisfiable by any
+	// correct implementation.)
+	before := plan.ResolveContent(content, tree)
+	wantOwners(t, before, map[string][]string{
+		"services/api/main.go": {"@org/everyone"},
+		"README.md":            {"@org/everyone"},
+	})
 	after := plan.ResolveContent(p.AfterContent, tree)
 	wantOwners(t, after, map[string][]string{
-		"services/api/main.go": {"@org/api"},
+		"services/api/main.go": {"@org/everyone"},
 		"README.md":            {"@org/everyone"},
 	})
 }
