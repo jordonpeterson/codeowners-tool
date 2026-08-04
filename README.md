@@ -338,12 +338,14 @@ anywhere", read `.status`; if you want "is this op reaching any repo at all", co
 out of `.ops[]`:
 
 ```sh
-jq -s '[.[].ops[]] | group_by(.op) | map({op: .[0].op, n: length,
+jq -s '[.[] | (.ops // [])[]] | group_by(.op) | map({op: .[0].op, n: length,
         applied: (map(select(.status=="applied")) | length)})' results.jsonl
 ```
 
-`warnings` is omitted entirely when there are none, so use `.warnings // []` rather
-than `.warnings` if you pipe it to `length`.
+Note the `// []`. Keys with nothing in them are **omitted entirely** rather than
+emitted empty — that applies to `ops`, `warnings` and `changes`. A refused repo has no
+`.ops` at all, so the same query without the guard dies with `Cannot iterate over
+null` on the first repo that needed a human, which is the one you most wanted to see.
 
 ## `plan` and `apply`
 
