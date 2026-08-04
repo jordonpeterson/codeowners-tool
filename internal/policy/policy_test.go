@@ -23,6 +23,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -90,6 +91,50 @@ func assertMentions(t *testing.T, err error, want ...string) {
 	}
 }
 
+// assertMentionsAny fails unless at least one wanted fragment appears. Used
+// where the message must SHOW the operator what it found but the natural
+// rendering differs by JSON type — a literal for scalars, a type name for a
+// composite. Pinning one of those spellings would be pinning wording.
+func assertMentionsAny(t *testing.T, err error, want ...string) {
+	t.Helper()
+	got := err.Error()
+	for _, w := range want {
+		if strings.Contains(got, w) {
+			return
+		}
+	}
+	t.Errorf("error must show the offending value, as one of %q; got:\n%s", want, got)
+}
+
+// findLocated returns the first problem satisfying match. Tests search the
+// error set instead of indexing it: an accumulating *MultiError makes no
+// promise about WHICH problem prints first, and a test that indexes locs[0]
+// turns any future reordering of the validation passes into a false failure.
+func findLocated(err error, match func(*policy.Error) bool) (*policy.Error, bool) {
+	for _, e := range located(err) {
+		if match(e) {
+			return e, true
+		}
+	}
+	return nil, false
+}
+
+// readsAsFutureVersion reports whether an error tells the operator that their
+// BINARY is behind the file, rather than that the file is wrong. The vocabulary
+// is a set rather than one word so that a rewritten message keeps passing; it
+// is checked in the negative for malformed versions, where a broad set makes
+// the guard stricter, and in the positive alongside the version numbers
+// themselves, which carry the actual meaning.
+func readsAsFutureVersion(err error) bool {
+	got := strings.ToLower(err.Error())
+	for _, phrase := range []string{"newer", "too new", "future", "upgrade"} {
+		if strings.Contains(got, phrase) {
+			return true
+		}
+	}
+	return false
+}
+
 // assertNoGoInternals enforces UX rule 5: Go's default decoder message names Go
 // types and points at the wrong concept, so it must never reach the operator.
 func assertNoGoInternals(t *testing.T, err error) {
@@ -102,9 +147,16 @@ func assertNoGoInternals(t *testing.T, err error) {
 	}
 }
 
-// SPEC R-20: the minimum viable policy is a version and an ops array of bare
-// strings. If this ever needs more, the escalation path documented in the
-// README ("try it on one repo, then point it at a file") is broken at step two.
+// SPEC R-20: the smallest policy anyone would write by hand — a version and a
+// list of op strings — is accepted exactly as written, and every field the
+// author did not mention stays at its default rather than acquiring one.
+//
+// This is step two of the escalation the README promises: run one operation
+// with --op, decide you want to keep it, paste it into a file. If the minimal
+// file needs a name, a description, or a per-op object before the tool will
+// take it, that promise breaks at the moment an operator first tries to save
+// their work — and a policy file nobody can write by hand is a policy file
+// nobody reviews.
 func TestR20_MinimalPolicyParses(t *testing.T) {
 	p := mustParse(t, `{
   "version": 1,
@@ -130,6 +182,13 @@ func TestR20_MinimalPolicyParses(t *testing.T) {
 // SPEC R-20: a bare string is SHORTHAND for {"op": "<string>"} with every other
 // field at its default — not a second form with its own code path. If the two
 // ever diverge, a reviewer reading a mixed ops array cannot tell what runs.
+//
+// "Every other field at its default" includes the id, which stays EMPTY. The
+// `ops[0]` form that appears in error messages and results is a display label
+// the renderer computes from the position; storing it in the field instead
+// would make an unnamed op indistinguishable from one a policy author
+// deliberately named "ops[0]", and would key that op's fleet-wide results by a
+// name that shifts the moment somebody inserts an op above it.
 func TestR20_BareStringIsExactlyObjectShorthand(t *testing.T) {
 	const spec = "add_owner(/x/, @a)"
 	bare := mustParse(t, `{"version":1,"ops":["`+spec+`"]}`)
@@ -148,6 +207,12 @@ func TestR20_BareStringIsExactlyObjectShorthand(t *testing.T) {
 	}
 	if got.OnZeroMatch != "" {
 		t.Errorf("OnZeroMatch = %q, want \"\" — the zero value must mean require, so shorthand preserves R-5 exactly", got.OnZeroMatch)
+	}
+	if got.ID != "" {
+		t.Errorf("ID = %q, want \"\" — `ops[0]` is a display label, never a stored value", got.ID)
+	}
+	if object.Ops[0].ID != "" {
+		t.Errorf("object-form ID = %q, want \"\" — omitting `id` must not synthesize one either", object.Ops[0].ID)
 	}
 }
 
@@ -297,24 +362,47 @@ func TestR20_VersionZeroRejected(t *testing.T) {
 	assertNoGoInternals(t, err)
 }
 
-// SPEC R-20: "your binary is too old" and "this file is nonsense" are different
-// operator actions — upgrade versus fix the generator. A pinned fleet binary
-// meeting a version it does not know must say so in those words.
+// SPEC R-20: "your binary is too old" and "this file is nonsense" are two
+// different jobs for the operator — upgrade the tool, or go fix whatever
+// generated the file. A pinned fleet binary that meets a version it does not
+// implement has to say which one it is, or the operator picks wrong and
+// spends the outage on the other.
+//
+// The message carries that verdict in the two NUMBERS it names: the version
+// the file asks for and the version this binary implements. A malformed
+// version has no such pair — there is nothing to compare — so it names the
+// field and shows what it actually found, and must never send anyone off to
+// upgrade over a stray quote mark.
 func TestR20_NewerVersionDistinguishedFromGarbage(t *testing.T) {
 	newer := mustReject(t, `{"version":2,"ops":["add_owner(/x/, @a)"]}`)
-	assertMentions(t, newer, "2")
 	assertNoGoInternals(t, newer)
-	lowered := strings.ToLower(newer.Error())
-	if !strings.Contains(lowered, "newer") {
-		t.Errorf("an unsupported FUTURE version must tell the operator the file is newer than this binary; got:\n%s", newer.Error())
+	assertMentions(t, newer, "version", "2", strconv.Itoa(policy.Version))
+	if !readsAsFutureVersion(newer) {
+		t.Errorf("an unsupported FUTURE version must tell the operator the file came from a later release than this binary; got:\n%s", newer.Error())
 	}
 
-	for _, garbage := range []string{`"1"`, `-1`, `1.5`, `true`, `null`, `[1]`} {
-		t.Run("garbage_"+garbage, func(t *testing.T) {
-			err := mustReject(t, `{"version":`+garbage+`,"ops":["add_owner(/x/, @a)"]}`)
+	// Each malformed version must name the field and show the value that was
+	// found. `shown` lists the renderings that count: a scalar can be echoed
+	// literally, a composite is more honestly named by its JSON type.
+	garbage := []struct {
+		json  string
+		shown []string
+	}{
+		{`"1"`, []string{`"1"`, "string"}},
+		{`-1`, []string{"-1"}},
+		{`1.5`, []string{"1.5"}},
+		{`true`, []string{"true", "bool"}},
+		{`null`, []string{"null"}},
+		{`[1]`, []string{"[1]", "array", "list"}},
+	}
+	for _, g := range garbage {
+		t.Run("garbage_"+g.json, func(t *testing.T) {
+			err := mustReject(t, `{"version":`+g.json+`,"ops":["add_owner(/x/, @a)"]}`)
 			assertNoGoInternals(t, err)
-			if strings.Contains(strings.ToLower(err.Error()), "newer") {
-				t.Errorf("version %s is malformed, not from the future; the message must not send the operator to upgrade:\n%s", garbage, err.Error())
+			assertMentions(t, err, "version")
+			assertMentionsAny(t, err, g.shown...)
+			if readsAsFutureVersion(err) {
+				t.Errorf("version %s is malformed, not from the future; the message must not send the operator to upgrade:\n%s", g.json, err.Error())
 			}
 		})
 	}
@@ -439,21 +527,32 @@ func TestR20_BadOnEmptyValueRejected(t *testing.T) {
 // concatenating fragments produces on_empty twice and `inherit` wins without a
 // word — the same failure class as the typo, and invisible in review because
 // both lines are individually correct.
+// The message must show BOTH values, because the whole failure is that one of
+// them vanished without trace. Naming the key alone leaves the reviewer to
+// work out which of their two lines the tool would have obeyed.
 func TestR20_DuplicateTopLevelKeyRejected(t *testing.T) {
-	cases := map[string]string{
-		"on_empty": `{"version":1,"on_empty":"error","ops":["remove_owner(/x/, @a)"],"on_empty":"inherit"}`,
-		"ops":      `{"version":1,"ops":["add_owner(/x/, @a)"],"ops":["add_owner(/y/, @b)"]}`,
-		"version":  `{"version":1,"ops":["add_owner(/x/, @a)"],"version":2}`,
-		"name":     `{"version":1,"name":"a","name":"b","ops":["add_owner(/x/, @a)"]}`,
+	cases := []struct {
+		key string
+		src string
+		// The two values in conflict, which the message must both show. Empty
+		// for a key whose values are whole arrays: quoting those back is not a
+		// readable message, so `ops` is held only to naming the key.
+		conflicting []string
+	}{
+		{"on_empty", `{"version":1,"on_empty":"error","ops":["remove_owner(/x/, @a)"],"on_empty":"inherit"}`,
+			[]string{"error", "inherit"}},
+		{"ops", `{"version":1,"ops":["add_owner(/x/, @a)"],"ops":["add_owner(/y/, @b)"]}`, nil},
+		{"version", `{"version":1,"ops":["add_owner(/x/, @a)"],"version":2}`,
+			[]string{"1", "2"}},
+		{"name", `{"version":1,"name":"baseline-fragment-one","name":"baseline-fragment-two","ops":["add_owner(/x/, @a)"]}`,
+			[]string{"baseline-fragment-one", "baseline-fragment-two"}},
 	}
-	for key, src := range cases {
-		t.Run(key, func(t *testing.T) {
-			err := mustReject(t, src)
-			assertMentions(t, err, key)
+	for _, c := range cases {
+		t.Run(c.key, func(t *testing.T) {
+			err := mustReject(t, c.src)
+			assertMentions(t, err, c.key)
+			assertMentions(t, err, c.conflicting...)
 			assertNoGoInternals(t, err)
-			if !strings.Contains(strings.ToLower(err.Error()), "duplicate") {
-				t.Errorf("error must say the key is duplicated, not merely wrong:\n%s", err.Error())
-			}
 		})
 	}
 }
@@ -461,22 +560,107 @@ func TestR20_DuplicateTopLevelKeyRejected(t *testing.T) {
 // SPEC R-20: the same, one level down. Per-element decoders are built fresh for
 // each op, so it is easy to implement duplicate detection at the top level and
 // forget it inside the ops array — where the values that steer behavior live.
+// Every value here is a scalar, so the message has no excuse: it must name the
+// key and show both of the values that were in conflict.
 func TestR20_DuplicateKeyInsideOpRejected(t *testing.T) {
-	cases := map[string]string{
-		"on_zero_match": `{"version":1,"ops":[{"id":"tf","op":"add_owner(/x/, @a)","on_zero_match":"skip","on_zero_match":"declare"}]}`,
-		"op":            `{"version":1,"ops":[{"op":"add_owner(/x/, @a)","op":"add_owner(/y/, @b)"}]}`,
-		"id":            `{"version":1,"ops":[{"id":"a","id":"b","op":"add_owner(/x/, @a)"}]}`,
+	cases := []struct {
+		key         string
+		src         string
+		conflicting []string
+	}{
+		{"on_zero_match", `{"version":1,"ops":[{"id":"tf","op":"add_owner(/x/, @a)","on_zero_match":"skip","on_zero_match":"declare"}]}`,
+			[]string{"skip", "declare"}},
+		{"op", `{"version":1,"ops":[{"op":"add_owner(/x/, @a)","op":"add_owner(/y/, @b)"}]}`,
+			[]string{"add_owner(/x/, @a)", "add_owner(/y/, @b)"}},
+		{"id", `{"version":1,"ops":[{"id":"terraform-first","id":"terraform-second","op":"add_owner(/x/, @a)"}]}`,
+			[]string{"terraform-first", "terraform-second"}},
 	}
-	for key, src := range cases {
-		t.Run(key, func(t *testing.T) {
-			err := mustReject(t, src)
-			assertMentions(t, err, key)
+	for _, c := range cases {
+		t.Run(c.key, func(t *testing.T) {
+			err := mustReject(t, c.src)
+			assertMentions(t, err, c.key)
+			assertMentions(t, err, c.conflicting...)
 			assertNoGoInternals(t, err)
-			if !strings.Contains(strings.ToLower(err.Error()), "duplicate") {
-				t.Errorf("error must say the key is duplicated:\n%s", err.Error())
-			}
 		})
 	}
+}
+
+// SPEC R-20: two ops in one policy may not share an id. Results are keyed by
+// id — the summary a reviewer reads, and whatever a fleet script pipes into
+// jq — so a repeated id silently overwrites one op's outcome with another's.
+// The reviewer then sees a policy that ran N ops reporting N-1 results, with
+// no indication which repo the missing one applied to.
+//
+// An op with NO id is not a duplicate of another op with no id: the empty id
+// is the absence of a name, and unnamed ops are referred to by position.
+func TestR20_DuplicateOpIDRejected(t *testing.T) {
+	err := mustReject(t, `{"version":1,"ops":[
+  {"id":"tf","op":"add_owner(/a/, @a)"},
+  {"id":"ci","op":"add_owner(/b/, @b)"},
+  {"id":"tf","op":"add_owner(/c/, @c)"}
+]}`)
+	assertMentions(t, err, "tf")
+	assertNoGoInternals(t, err)
+	e, ok := findLocated(err, func(e *policy.Error) bool { return e.OpIndex == 0 || e.OpIndex == 2 })
+	if !ok {
+		t.Fatalf("the repeated id must be attributed to one of the ops that carries it (ops[0] or ops[2]); got %T:\n%v", err, err)
+	}
+	if e.OpID != "tf" {
+		t.Errorf("OpID = %q, want %q — the error names the id that collided", e.OpID, "tf")
+	}
+
+	// Distinct ids are fine, and so is a policy where no op is named at all.
+	mustParse(t, `{"version":1,"ops":[{"id":"a","op":"add_owner(/a/, @a)"},{"id":"b","op":"add_owner(/b/, @b)"}]}`)
+	mustParse(t, `{"version":1,"ops":[{"op":"add_owner(/a/, @a)"},{"op":"add_owner(/b/, @b)"},"add_owner(/c/, @c)"]}`)
+}
+
+// SPEC R-21: an ABSENT on_zero_match means require. An on_zero_match that is
+// PRESENT and empty is an error. These are two different states of the file and
+// the parser must be able to tell them apart.
+//
+// The distinction is easy to lose: a plain Go struct field decodes both to the
+// empty string, so an implementation that reads the field and checks its value
+// cannot see the difference and will accept `"on_zero_match": ""` as a default.
+// Detecting which keys the file actually contained is therefore part of the
+// contract, not an implementation preference.
+//
+// What it buys: a generator that emits an empty string where it meant to emit
+// a decision has produced a file that reads, to a human reviewer, as if a
+// choice was made. Accepting it applies the default across the fleet under a
+// spelling that says otherwise — the same silent-default failure as the typo,
+// arriving through the correctly-spelled field.
+func TestR21_ExplicitEmptyOnZeroMatchIsNotTheSameAsAbsent(t *testing.T) {
+	// Absent: legal, and means require.
+	absent := mustParse(t, `{"version":1,"ops":[{"id":"a","op":"add_owner(/x/, @a)"}]}`)
+	if absent.Ops[0].OnZeroMatch != "" {
+		t.Errorf("OnZeroMatch = %q, want \"\" — an absent key leaves the zero value, which means require", absent.Ops[0].OnZeroMatch)
+	}
+	// The bare-string shorthand has no key either, and lands in the same state.
+	shorthand := mustParse(t, `{"version":1,"ops":["add_owner(/x/, @a)"]}`)
+	if shorthand.Ops[0].OnZeroMatch != "" {
+		t.Errorf("OnZeroMatch = %q, want \"\"", shorthand.Ops[0].OnZeroMatch)
+	}
+
+	// Present and empty: rejected, and the message names the field so the
+	// operator can find the line their generator wrote.
+	err := mustReject(t, `{"version":1,"ops":[{"id":"a","op":"add_owner(/x/, @a)","on_zero_match":""}]}`)
+	assertMentions(t, err, "on_zero_match")
+	assertNoGoInternals(t, err)
+	for _, legal := range []string{"require", "skip", "declare"} {
+		if !strings.Contains(err.Error(), legal) {
+			t.Errorf("error must enumerate the legal set (missing %q):\n%s", legal, err.Error())
+		}
+	}
+	if _, ok := findLocated(err, func(e *policy.Error) bool { return e.OpIndex == 0 }); !ok {
+		t.Errorf("the empty on_zero_match must be attributed to ops[0]; got %T:\n%v", err, err)
+	}
+
+	// The same distinction one level up: on_empty is optional when no op
+	// removes an owner, but writing it as an empty string is not "unset".
+	mustParse(t, `{"version":1,"ops":["add_owner(/x/, @a)"]}`)
+	err = mustReject(t, `{"version":1,"on_empty":"","ops":["add_owner(/x/, @a)"]}`)
+	assertMentions(t, err, "on_empty")
+	assertNoGoInternals(t, err)
 }
 
 // SPEC R-20: JSON has no comments and unknown fields are fatal, so without an
@@ -628,7 +812,7 @@ func TestR20_RemoveOwnerRequiresTopLevelOnEmpty(t *testing.T) {
 // and id, then the message. A byte offset is what encoding/json gives and what
 // nobody can use; this string is what a person greps out of a 100-repo log at
 // 2am.
-func TestPolicy_ErrorFormatsFileLineColAndOp(t *testing.T) {
+func TestR20_ErrorFormatsFileLineColAndOp(t *testing.T) {
 	e := &policy.Error{File: "policy.json", Line: 14, Col: 22, OpIndex: 2, OpID: "tf", Msg: "unknown field \"on_zero_mtach\""}
 	if got, want := e.Error(), `policy.json:14:22: ops[2] (id "tf"): unknown field "on_zero_mtach"`; got != want {
 		t.Errorf("Error() = %q, want %q", got, want)
@@ -656,7 +840,7 @@ func TestPolicy_ErrorFormatsFileLineColAndOp(t *testing.T) {
 // SPEC R-20 (error quality): a real multi-line policy must report the line the
 // mistake is actually on. Line 0 — the value you get by not converting the byte
 // offset — is the whole feature failing quietly.
-func TestPolicy_ErrorCarriesAPlausibleLineNumber(t *testing.T) {
+func TestR20_ErrorCarriesAPlausibleLineNumber(t *testing.T) {
 	src := `{
   "version": 1,
   "on_empty": "error",
@@ -668,13 +852,9 @@ func TestPolicy_ErrorCarriesAPlausibleLineNumber(t *testing.T) {
   ]
 }`
 	err := mustReject(t, src)
-	locs := located(err)
-	if len(locs) == 0 {
-		t.Fatalf("want a located *policy.Error, got %T: %v", err, err)
-	}
-	e := locs[0]
-	if e.Line != 8 {
-		t.Errorf("Line = %d, want 8 (the on_zero_mtach line); a byte offset that was never converted reports 0", e.Line)
+	e, ok := findLocated(err, func(e *policy.Error) bool { return e.Line == 8 })
+	if !ok {
+		t.Fatalf("no problem was reported on line 8, the on_zero_mtach line; a byte offset that was never converted reports 0. Got %T:\n%v", err, err)
 	}
 	if e.Col <= 0 {
 		t.Errorf("Col = %d, want a 1-based column", e.Col)
@@ -682,27 +862,28 @@ func TestPolicy_ErrorCarriesAPlausibleLineNumber(t *testing.T) {
 	if e.File != testFile {
 		t.Errorf("File = %q, want %q — Parse's filename argument exists for exactly this", e.File, testFile)
 	}
-	if !strings.HasPrefix(err.Error(), testFile+":8:") {
-		t.Errorf("rendered error = %q, want it to start with %q", err.Error(), testFile+":8:")
+	if !strings.Contains(err.Error(), testFile+":8:") {
+		t.Errorf("rendered error = %q, want it to locate the problem at %q", err.Error(), testFile+":8:")
 	}
 }
 
 // SPEC R-20 (error quality): the op is identified by index AND id. The index
 // alone makes a reviewer count array elements; the id alone is optional and may
 // be absent. Both, always.
-func TestPolicy_ErrorsIdentifyTheOpByIndexAndID(t *testing.T) {
+//
+// When the op has no id the index still stands alone, and no id is invented to
+// fill the gap: `ops[1]` is how the renderer refers to an unnamed op, and an
+// error claiming an op is named "ops[1]" sends a reviewer searching the policy
+// file for a string that is not in it.
+func TestR20_ErrorsIdentifyTheOpByIndexAndID(t *testing.T) {
 	err := mustReject(t, `{"version":1,"ops":[
   "add_owner(/a/, @a)",
   "add_owner(/b/, @b)",
   {"id":"tf","op":"add_owner(**/*.tf, @org/infra)","on_zero_match":"nope"}
 ]}`)
-	locs := located(err)
-	if len(locs) == 0 {
-		t.Fatalf("want a located *policy.Error, got %T: %v", err, err)
-	}
-	e := locs[0]
-	if e.OpIndex != 2 {
-		t.Errorf("OpIndex = %d, want 2", e.OpIndex)
+	e, ok := findLocated(err, func(e *policy.Error) bool { return e.OpIndex == 2 })
+	if !ok {
+		t.Fatalf("no problem was attributed to ops[2], the only op with a mistake in it; got %T:\n%v", err, err)
 	}
 	if e.OpID != "tf" {
 		t.Errorf("OpID = %q, want %q", e.OpID, "tf")
@@ -711,12 +892,12 @@ func TestPolicy_ErrorsIdentifyTheOpByIndexAndID(t *testing.T) {
 
 	// An op with no id still reports its index, and reports no phantom id.
 	err = mustReject(t, `{"version":1,"ops":["add_owner(/a/, @a)",{"op":"add_owner(/b/, @b)","on_zero_match":"nope"}]}`)
-	locs = located(err)
-	if len(locs) == 0 {
-		t.Fatalf("want a located *policy.Error, got %T: %v", err, err)
+	e, ok = findLocated(err, func(e *policy.Error) bool { return e.OpIndex == 1 })
+	if !ok {
+		t.Fatalf("no problem was attributed to ops[1], the only op with a mistake in it; got %T:\n%v", err, err)
 	}
-	if locs[0].OpIndex != 1 {
-		t.Errorf("OpIndex = %d, want 1", locs[0].OpIndex)
+	if e.OpID != "" {
+		t.Errorf("OpID = %q, want \"\" — the op has no id, and `ops[1]` is the display label, never a stored value", e.OpID)
 	}
 	assertMentions(t, err, "ops[1]")
 }
@@ -785,7 +966,7 @@ func TestR20_SyntaxErrorsFailFast(t *testing.T) {
 // SPEC R-20 (error quality, rule 5): `json: cannot unmarshal object into Go
 // value of type string` names Go types and points at the wrong concept. It must
 // never reach an operator, for ANY malformed input.
-func TestPolicy_GoUnmarshalMessagesNeverEscape(t *testing.T) {
+func TestR20_GoUnmarshalMessagesNeverEscape(t *testing.T) {
 	cases := map[string]string{
 		"op is a number":            `{"version":1,"ops":[{"op":5}]}`,
 		"op is an object":           `{"version":1,"ops":[{"op":{"kind":"add_owner"}}]}`,
@@ -811,7 +992,7 @@ func TestPolicy_GoUnmarshalMessagesNeverEscape(t *testing.T) {
 
 // SPEC R-20: Load is Parse over a file on disk — same policy, same result. The
 // filename in the errors is the path the operator passed, so they can open it.
-func TestPolicy_LoadReadsAPolicyFromDisk(t *testing.T) {
+func TestR20_LoadReadsAPolicyFromDisk(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "policy.json")
 	src := `{
@@ -845,7 +1026,7 @@ func TestPolicy_LoadReadsAPolicyFromDisk(t *testing.T) {
 // SPEC R-20: a missing policy file is a policy error, not a crash and not a
 // silent empty policy — the fleet script's first line is `check --policy`, and
 // a typo'd path must halt there rather than run zero ops against 100 repos.
-func TestPolicy_LoadOfMissingPathFails(t *testing.T) {
+func TestR20_LoadOfMissingPathFails(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "nope.json")
 	p, err := policy.Load(path)
 	if err == nil {

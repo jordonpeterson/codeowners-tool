@@ -462,11 +462,27 @@ func TestFleet_OnePolicyAcrossHeterogeneousRepos(t *testing.T) {
 
 	// Nothing partially written. A refusal is a promise about the bytes.
 	t.Run("exit 2 leaves the file byte-identical", func(t *testing.T) {
-		after := fleetSnapshot(t, dirs)
-		for name, code := range out.codes {
-			if code != cli.ExitRefused {
-				continue
+		// The refusing SET is pinned before any byte is compared. Skipping
+		// every repo whose code is not 2 and then comparing bytes is a test
+		// that reports success when sync refuses nothing at all — or refuses
+		// everything — because the loop body simply never runs. The promise
+		// under test ("a refusal writes no bytes") is only meaningful once we
+		// know which repos refused, so that comes first.
+		var refused []string
+		for _, name := range order {
+			if out.codes[name] == cli.ExitRefused {
+				refused = append(refused, name)
 			}
+		}
+		// `order` is fleetShapes() order, so this is deterministic: the only
+		// two shapes that cannot be converged are the inexpressible one and
+		// the one missing the directory a `require` op names.
+		wantRefused := []string{"refuse", "zero-require"}
+		if !reflect.DeepEqual(refused, wantRefused) {
+			t.Fatalf("repos that exited 2 = %v, want exactly %v (all codes %v)", refused, wantRefused, out.codes)
+		}
+		after := fleetSnapshot(t, dirs)
+		for _, name := range refused {
 			if after[name] != before[name] {
 				t.Errorf("%s exited 2 but its CODEOWNERS changed:\nbefore %q\nafter  %q", name, before[name], after[name])
 			}
@@ -570,10 +586,17 @@ func TestFleet_MissingCodeownersNeedsCreate(t *testing.T) {
 	if _, ok := fleetCodeowners(t, dir); ok {
 		t.Error("exit 2 must write nothing at all — a file appeared without --create")
 	}
-	if recs := fleetRecords(t, out.jsonl); len(recs) == 1 {
-		if recs[0].Created {
-			t.Error("created must be false when nothing was created")
-		}
+	// An exit-2 run DOES emit its record: `needs-human` is a list of repos
+	// someone has to triage, and it is built from results.jsonl. Tolerating a
+	// count other than 1 here would let a refusal emit nothing — the exact
+	// hole this assertion exists to close — and still report a pass.
+	recs := fleetRecords(t, out.jsonl)
+	if len(recs) != 1 {
+		t.Fatalf("exit 2 emitted %d records for 1 repo, want exactly 1 — a refused repo missing from results.jsonl is a hole in the aggregation precisely where the operator has to look\nraw: %q",
+			len(recs), out.jsonl)
+	}
+	if recs[0].Created {
+		t.Error("created must be false when nothing was created")
 	}
 
 	out = fleetRunPolicy(t, dirs, order, policy, "--create")
@@ -666,6 +689,51 @@ func TestFleet_RefusalIsRecoverableAndIsolated(t *testing.T) {
 	}
 }
 
+// SPEC R-24: the record's `.repo` is the `--repo` argument BYTE-FOR-BYTE —
+// never absolutized, never symlink-resolved.
+//
+// Six tests in this file join records back to repos through fleetByRepo, which
+// keys on exactly that field; so does the README's fleet script, which pairs
+// `needs-human` entries with the paths it passed in. Deriving `.repo` from the
+// repository instead of from the argument breaks every one of them, and it
+// breaks them on developer laptops only: on macOS `t.TempDir()` hands out
+// `/var/folders/...` while `git rev-parse --show-toplevel` reports the same
+// directory as `/private/var/folders/...`, because `/var` is a symlink to
+// `/private/var`. The two strings name one directory and compare unequal, so
+// every lookup misses, every record looks orphaned, and CI on Linux — where no
+// such symlink exists — stays green the whole time.
+func TestFleet_RecordRepoIsTheArgumentVerbatim(t *testing.T) {
+	t.Parallel()
+	// One repo that converges and one that refuses: the refused row is the one
+	// an operator has to find again by path, so exit 2 must carry it too.
+	dirs, order := fleetBuild(t, "plain", "refuse")
+	policy := fleetPolicyFile(t, fleetPolicySrc)
+
+	out := fleetRunPolicy(t, dirs, order, policy, "--create")
+	recs := fleetRecords(t, out.jsonl)
+	if len(recs) != len(order) {
+		t.Fatalf("%d records for %d repos", len(recs), len(order))
+	}
+	byArg := map[string]bool{}
+	for _, r := range recs {
+		byArg[r.Repo] = true
+	}
+	for _, name := range order {
+		dir := dirs[name]
+		if !byArg[dir] {
+			t.Errorf("%s: no record whose .repo is the --repo argument %q; records name %v", name, dir, byArg)
+		}
+		// Name the specific wrong answer, so a failure reads as a diagnosis
+		// rather than a mystery.
+		if resolved, err := filepath.EvalSymlinks(dir); err == nil && resolved != dir {
+			if byArg[resolved] {
+				t.Errorf("%s: .repo is the symlink-RESOLVED path %q, but --repo was given %q — fleet aggregation keys on the argument and finds nothing",
+					name, resolved, dir)
+			}
+		}
+	}
+}
+
 // SPEC R-24: `skipped` is a status of its own. A policy with a typo'd path
 // prefix matches nothing in any repo; if those runs reported `unchanged`, the
 // jq recipe in the README would show a wall of "already correct" and the
@@ -697,6 +765,12 @@ func TestFleet_NothingMatchesAnywhereIsSkippedNotUnchanged(t *testing.T) {
 		}
 		if rec.OpsApplied != 0 || rec.OpsSkipped != 2 {
 			t.Errorf("%s: ops_applied=%d ops_skipped=%d, want 0/2", name, rec.OpsApplied, rec.OpsSkipped)
+		}
+		// The length is asserted before the loop: ranging over an empty Ops
+		// slice makes every per-op claim below vacuously true, so a record
+		// that dropped its per-op detail entirely would read as a pass.
+		if len(rec.Ops) != 2 {
+			t.Errorf("%s: %d per-op results, want one per policy op (2) — without them the record cannot say WHICH op skipped", name, len(rec.Ops))
 		}
 		for _, r := range rec.Ops {
 			if r.Status != "skipped" {

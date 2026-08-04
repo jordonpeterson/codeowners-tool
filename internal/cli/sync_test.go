@@ -284,16 +284,25 @@ func TestSync_OpAndPolicyMisuseExitsThree(t *testing.T) {
 	p1 := syncWritePolicy(t, `{"version":1,"ops":["add_owner(/x/, @b)"]}`)
 	p2 := syncWritePolicy(t, `{"version":1,"ops":["add_owner(/x/, @c)"]}`)
 
-	cases := map[string][]string{
-		"both":         {"sync", "--repo", repo, "--op", "add_owner(/x/, @b)", "--policy", p1},
-		"neither":      {"sync", "--repo", repo},
-		"policy twice": {"sync", "--repo", repo, "--policy", p1, "--policy", p2},
+	// A slice, not a map, and one t.Run per case: a map ranges in random order
+	// and, without subtests, all three cases report under this test's single
+	// name. A failure then names a case that may not be the one that failed on
+	// the next run, and `go test -run` cannot re-run just the broken one.
+	cases := []struct {
+		name string
+		args []string
+	}{
+		{"both", []string{"sync", "--repo", repo, "--op", "add_owner(/x/, @b)", "--policy", p1}},
+		{"neither", []string{"sync", "--repo", repo}},
+		{"policy twice", []string{"sync", "--repo", repo, "--policy", p1, "--policy", p2}},
 	}
-	for name, args := range cases {
-		code, _, _ := runCLI(t, args...)
-		if code != cli.ExitInvalid {
-			t.Errorf("%s: want exit 3, got %d", name, code)
-		}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			code, _, _ := runCLI(t, c.args...)
+			if code != cli.ExitInvalid {
+				t.Errorf("%s: want exit 3, got %d", c.name, code)
+			}
+		})
 	}
 	// Last-wins would have silently applied p2 and left the file changed.
 	if got := syncReadFile(t, filepath.Join(repo, "CODEOWNERS")); got != "# owners\n/x/ @a\n" {
@@ -506,9 +515,26 @@ func TestSync_FormatJSONSeparatesDataFromLogs(t *testing.T) {
 	}
 }
 
-// SPEC R-24: --out writes the JSON record to a file INSTEAD of stdout, using
-// the same spelling `plan` and `snapshot` already have.
+// SPEC R-24: the two flags are independent. `--out FILE` ALWAYS writes the JSON
+// record to FILE, whatever `--format` says; `--format` governs stdout and only
+// stdout.
+//
+// The alternative — `--out` emitting whatever `--format` names — quietly
+// destroys the artifact the flag exists for. `sync --out records/$repo.json`
+// with the default text format would leave a directory of human prose, and the
+// `jq -s` aggregation the README builds over it fails on the first file with a
+// parse error, after the whole rollout has already run and the CODEOWNERS
+// writes are done. Making it depend on a flag nobody passed is worse than
+// making it wrong: it works for the operator who happened to type `--format
+// json` and fails for the one who did not.
+//
+// The converse guarantee matters as much: `--out` must not go on to SUPPRESS
+// stdout. Someone piping `sync --format json ... | tee` while also archiving
+// with `--out` gets both, byte-identical, and the fleet script's
+// `>> results.jsonl` keeps working when a per-repo `--out` is added to it.
 func TestSync_OutWritesRecordToFile(t *testing.T) {
+	// Default format is text: the FILE is still the JSON record, stdout is
+	// still the human render.
 	repo := syncSmallRepo(t)
 	recPath := filepath.Join(t.TempDir(), "record.json")
 	code, out, errOut := runCLI(t, "sync", "--repo", repo, "--op", "add_owner(/x/, @b)", "--out", recPath)
@@ -520,7 +546,31 @@ func TestSync_OutWritesRecordToFile(t *testing.T) {
 		t.Errorf("record status = %q, want %q", rec.Status, cli.StatusApplied)
 	}
 	if strings.HasPrefix(strings.TrimSpace(out), "{") {
-		t.Errorf("--out was given: the record must not ALSO go to stdout:\n%s", out)
+		t.Errorf("--format defaults to text: stdout must carry the human render, not the record:\n%s", out)
+	}
+	if strings.TrimSpace(out) == "" {
+		t.Error("--out must not silence stdout: --format governs stdout, --out governs the file, and neither implies the other")
+	}
+
+	// --format json --out FILE: both sinks, same record, no interaction.
+	repo2 := syncSmallRepo(t)
+	recPath2 := filepath.Join(t.TempDir(), "record2.json")
+	code2, out2, errOut2 := runCLI(t, "sync", "--repo", repo2, "--op", "add_owner(/x/, @b)",
+		"--format", "json", "--out", recPath2)
+	if code2 != cli.ExitOK {
+		t.Fatalf("--format json --out: want exit 0, got %d\n%s", code2, errOut2)
+	}
+	fromFile := syncDecodeRecord(t, syncReadFile(t, recPath2))
+	fromStdout := syncDecodeRecord(t, out2)
+	if fromFile.Status != cli.StatusApplied {
+		t.Errorf("--format json --out: file record status = %q, want %q", fromFile.Status, cli.StatusApplied)
+	}
+	if fromStdout.Status != fromFile.Status || fromStdout.Repo != fromFile.Repo {
+		t.Errorf("--format json --out: stdout and file disagree:\nstdout %+v\nfile   %+v", fromStdout, fromFile)
+	}
+	if strings.TrimSpace(out2) != strings.TrimSpace(syncReadFile(t, recPath2)) {
+		t.Errorf("--format json --out: the two sinks must be byte-identical\nstdout: %q\nfile:   %q",
+			out2, syncReadFile(t, recPath2))
 	}
 }
 
@@ -617,6 +667,156 @@ func TestSync_JSONRecordPerOpResults(t *testing.T) {
 	}
 	if len(rec.Warnings) != 0 {
 		t.Errorf("clean run must carry no warnings, got %v", rec.Warnings)
+	}
+}
+
+// SPEC R-24 (D1): an already-correct repo STILL reports one per-op result per
+// policy op, each `unchanged`.
+//
+// This pins the no-op path specifically, and it is a real hole today:
+// plan.Build returns `nil, &NoOpError{}` when the file already says what the
+// policy wants, so a caller that renders the record from the returned *Plan
+// has nothing to render and emits `"ops": []`. `unchanged` is the MODAL
+// outcome of a mature fleet — most repos are already correct most nights — so
+// the empty case is the one an operator sees on 90 of 100 rows. Without it the
+// record cannot answer "is op `tf` actually in place here, or did the policy
+// never mention this repo?", and the whole per-op array degrades to detail that
+// appears only when something changed, which is exactly when you least need it.
+//
+// Three fleet tests (fleet_test.go's "per-op results" and the idempotence
+// file's repeat passes) read per-op detail out of records produced by this
+// path; none of them pins the path itself.
+func TestSync_AlreadyCorrectStillCarriesPerOpResults(t *testing.T) {
+	repo := initRepo(t, map[string]string{
+		"CODEOWNERS": "# owners\n/x/ @a @b\n/y/ @c\n",
+		"x/a.go":     "package x\n",
+		"y/b.go":     "package y\n",
+	})
+	p := syncWritePolicy(t, `{
+	  "version": 1,
+	  "ops": [
+	    {"id":"x","op":"add_owner(/x/, @b)"},
+	    {"id":"y","op":"add_owner(/y/, @c)"}
+	  ]
+	}`)
+	before := syncReadFile(t, filepath.Join(repo, "CODEOWNERS"))
+
+	code, out, errOut := runCLI(t, "sync", "--repo", repo, "--policy", p, "--format", "json")
+	if code != cli.ExitOK {
+		t.Fatalf("already-correct repo: want exit 0, got %d\n%s", code, errOut)
+	}
+	rec := syncDecodeRecord(t, out)
+	if rec.Status != cli.StatusUnchanged {
+		t.Errorf("status = %q, want %q", rec.Status, cli.StatusUnchanged)
+	}
+	if len(rec.Ops) != 2 {
+		t.Fatalf("no-op run carried %d per-op results, want one per policy op (2): %+v — the no-op path must report as fully as the applying one", len(rec.Ops), rec.Ops)
+	}
+	for _, r := range rec.Ops {
+		if r.Status != "unchanged" {
+			t.Errorf("op %q: status %q, want unchanged", r.ID, r.Status)
+		}
+		if r.ID == "" {
+			t.Errorf("op result lost its policy id: %+v — results are keyed by id", r)
+		}
+		if r.Op == "" {
+			t.Errorf("op result lost its op text: %+v (D7: Op is the raw op string)", r)
+		}
+	}
+	if _, ok := syncOpResult(t, rec, "x"); !ok {
+		t.Errorf("no result for op `x`: %+v", rec.Ops)
+	}
+	if _, ok := syncOpResult(t, rec, "y"); !ok {
+		t.Errorf("no result for op `y`: %+v", rec.Ops)
+	}
+	if rec.OpsApplied != 0 {
+		t.Errorf("ops_applied = %d, want 0 — nothing was applied", rec.OpsApplied)
+	}
+	if rec.OpsSkipped != 0 {
+		t.Errorf("ops_skipped = %d, want 0 — `unchanged` is not `skipped`", rec.OpsSkipped)
+	}
+	if rec.PathsChanged != 0 {
+		t.Errorf("paths_changed = %d, want 0", rec.PathsChanged)
+	}
+	if got := syncReadFile(t, filepath.Join(repo, "CODEOWNERS")); got != before {
+		t.Errorf("an already-correct repo must not be rewritten: %q → %q", before, got)
+	}
+}
+
+// SPEC R-20 (D3): two ops sharing one `id` is exit 3.
+//
+// Results are KEYED by id — syncOpResult here, fleetOpResult in fleet_test.go,
+// opResultByID in the planner's tests, and every `jq` recipe an operator writes
+// over results.jsonl. Every one of them returns the FIRST match. So a policy
+// with a duplicated id does not fail: it silently reports the first op's
+// outcome as if it were the second's, across the whole fleet, and the operator
+// reading "tf: applied" cannot tell that the other `tf` refused. Nothing about
+// this depends on any repo, so it belongs in the class that halts at repo 0 —
+// and `check` must catch it before the first clone.
+func TestSync_DuplicateOpIDsExitThree(t *testing.T) {
+	repo := syncSmallRepo(t)
+	dup := syncWritePolicy(t, `{
+	  "version": 1,
+	  "ops": [
+	    {"id":"tf","op":"add_owner(/x/, @b)"},
+	    {"id":"tf","op":"add_owner(/x/, @c)"}
+	  ]
+	}`)
+	before := syncReadFile(t, filepath.Join(repo, "CODEOWNERS"))
+
+	code, out, errOut := runCLI(t, "sync", "--repo", repo, "--policy", dup, "--format", "json")
+	if code != cli.ExitInvalid {
+		t.Errorf("duplicate op id: want exit 3, got %d — a shadowed id makes every per-op result unreliable\nstderr: %s", code, errOut)
+	}
+	if !strings.Contains(errOut, "tf") {
+		t.Errorf("the error must quote the duplicated id, or nobody can find it in a 40-op policy:\n%s", errOut)
+	}
+	if strings.TrimSpace(out) != "" {
+		t.Errorf("exit 3 emits no record (D8), got: %q", out)
+	}
+	if got := syncReadFile(t, filepath.Join(repo, "CODEOWNERS")); got != before {
+		t.Errorf("a rejected policy writes nothing, file = %q", got)
+	}
+	// `check` is the first line of the fleet script; this must never get past it.
+	if code, _, _ := runCLI(t, "check", "--policy", dup); code != cli.ExitInvalid {
+		t.Errorf("check on a duplicate-id policy: want exit 3, got %d", code)
+	}
+}
+
+// SPEC R-24: `--repo` pointing at a directory that is not a git repository is a
+// RECORDED per-repo failure — exit 2, one record, status "error".
+//
+// This is the only producer of cli.StatusError, and it is a different animal
+// from "refused": refused means the tool understood this repo and declined to
+// touch it, error means it never got that far. Both need a human, so both are
+// exit 2 and both must appear in results.jsonl; grouping on .status is how an
+// operator separates "12 repos have awkward CODEOWNERS files" from "12 clones
+// failed and were never actually synced". It must NOT be exit 3: a failed or
+// half-finished clone is the most repo-specific fact there is, and halting the
+// whole rollout on it strands the other 99 — the same mistake revision 1 made
+// with zero-match scopes.
+func TestSync_NonRepoDirectoryIsAnErrorRecord(t *testing.T) {
+	dir := t.TempDir() // exists, is readable, has no .git
+	code, out, errOut := runCLI(t, "sync", "--repo", dir, "--op", "add_owner(/x/, @b)", "--format", "json")
+	if code != cli.ExitRefused {
+		t.Fatalf("--repo is not a git repo: exit %d, want 2 — exit 3 would halt the fleet for one bad clone\nstderr: %s", code, errOut)
+	}
+	rec := syncDecodeRecord(t, out)
+	if rec.Status != cli.StatusError {
+		t.Errorf("status = %q, want %q — %q would claim the tool read this repo and declined, which it did not",
+			rec.Status, cli.StatusError, cli.StatusRefused)
+	}
+	if strings.TrimSpace(rec.Error) == "" {
+		t.Error("an error record must carry the reason text, or the row says only that something went wrong")
+	}
+	if rec.Repo != dir {
+		t.Errorf("record .repo = %q, want the --repo argument %q verbatim (D6)", rec.Repo, dir)
+	}
+	if rec.Created {
+		t.Error("created must be false: nothing was written")
+	}
+	if entries, err := os.ReadDir(dir); err != nil || len(entries) != 0 {
+		t.Errorf("a repo that could not be read must not be written to: %v (err %v)", entries, err)
 	}
 }
 
@@ -747,6 +947,13 @@ func TestCheck_OpStringIsSyntaxChecked(t *testing.T) {
 func TestCheck_ReadsNoRepository(t *testing.T) {
 	p := syncWritePolicy(t, syncFleetPolicy)
 	notARepo := t.TempDir()
+	// t.Chdir mutates PROCESS-WIDE state. This test must never gain
+	// t.Parallel(), and neither may any test that reaches the filesystem
+	// through a relative path — fleet_test.go already runs t.Parallel()
+	// throughout, and it is only safe because every path it touches is
+	// absolute. Adding t.Parallel() here would move this chdir into that
+	// window and make those tests fail nondeterministically, in whichever
+	// order the scheduler happened to interleave them.
 	t.Chdir(notARepo)
 
 	code, _, errOut := runCLI(t, "check", "--policy", p)
@@ -775,6 +982,12 @@ func TestCheck_WritesNothing(t *testing.T) {
 		t.Fatal(err)
 	}
 	work := t.TempDir()
+	// Same rule as TestCheck_ReadsNoRepository: t.Chdir is process-wide, so
+	// this test must NOT become parallel. Here the chdir is load-bearing —
+	// the assertion below is "check wrote nothing into the current working
+	// directory" — so under t.Parallel() a concurrent test's write would be
+	// attributed to `check`, and worse, the parallel tests in fleet_test.go
+	// would be running against a cwd this test moved out from under them.
 	t.Chdir(work)
 
 	before := checkDirSnapshot(t, policyDir)

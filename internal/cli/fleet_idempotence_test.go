@@ -478,10 +478,20 @@ func TestR19_RemoveOwnerTwiceEachOnEmptyPolicy(t *testing.T) {
 	}
 }
 
-// SPEC R-19: rename_owner run twice is byte-identical. rename_owner derives
-// its scope from CURRENT ownership, so the second run sees an old name that
-// owns nothing — historically the churn case, where an empty scope produced an
-// edit anyway and the file was rewritten on every nightly pass.
+// SPEC R-19: rename_owner run twice is byte-identical.
+//
+// What a regression here costs: the nightly job opens a pull request against
+// every repository in the org, every night, forever — each one a rewrite of a
+// CODEOWNERS file whose content did not actually change. The reviewers are the
+// code owners the file names, so they are the people paged for it. They learn
+// within a week that anything from this job is a no-op, stop reading it, and
+// the night it proposes a real ownership change it is rubber-stamped along with
+// the noise. Nothing ever errors and no exit code is ever non-zero.
+//
+// rename_owner reaches that failure first, because it derives its scope from
+// CURRENT ownership: after pass 1 the old name owns nothing, so pass 2 runs
+// with an empty scope — and an empty scope that synthesizes an edit anyway
+// rewrites the file with byte-different, semantically identical content.
 func TestR19_RenameOwnerTwiceByteIdentical(t *testing.T) {
 	repo := initRepo(t, map[string]string{
 		"CODEOWNERS": "/x/ @old\n/y/ @old @other\n",
@@ -505,13 +515,23 @@ func TestR19_RenameOwnerTwiceByteIdentical(t *testing.T) {
 	}
 }
 
-// SPEC R-19: a rename whose old and new names are identical must never touch
-// the file. `rename_owner(@a, @a)` is the self-rename churn case: a
-// no-difference rewrite that a nightly job would apply, commit, and PR forever.
-// ops.Parse rejects it outright today, which under sync's contract is exit 3
-// (a broken policy fails identically on all 100 repos) — so either exit is
-// defensible, but the two runs must agree with each other and the bytes must
-// not move.
+// SPEC R-19/R-20: `rename_owner(@a, @a)` is exit 3, on every run, and writes
+// nothing.
+//
+// This exit is not a toss-up between 0 and 3. ops.Parse rejects a rename whose
+// old and new names are equal, and it reaches that verdict from the op string
+// alone — before --repo is opened, before the tree is listed, before a byte of
+// CODEOWNERS is read. A verdict that consults no repository is by construction
+// the same verdict on all 100 of them, and that is precisely sync's definition
+// of the exit-3 class: halt at repo 0 rather than grind out 100 identical
+// errors. Exit 0 would be wrong for the same reason — "nothing to do, carry on"
+// sends a scheduled job through every clone in the org to rediscover a fact the
+// first repo already proved, and hides a typo'd rename inside a green run.
+//
+// The self-rename is also the churn case it is named for: a no-difference
+// rewrite that a nightly job would otherwise apply, commit and PR forever. So
+// the bytes are checked on both runs as well. Per D8 an exit-3 run emits NO
+// record, which is why this reads the raw streams instead of decoding one.
 func TestR19_RenameOwnerSelfRenameNeverWrites(t *testing.T) {
 	repo := initRepo(t, map[string]string{
 		"CODEOWNERS": "/x/ @a\n",
@@ -519,16 +539,20 @@ func TestR19_RenameOwnerSelfRenameNeverWrites(t *testing.T) {
 	})
 	original := idemBytes(t, repo)
 
-	code1, _, _ := idemSyncRaw(t, repo, "--op", "rename_owner(@a, @a)")
-	idemSameBytes(t, "self-rename run 1", original, idemBytes(t, repo))
-	code2, _, _ := idemSyncRaw(t, repo, "--op", "rename_owner(@a, @a)")
-	idemSameBytes(t, "self-rename run 2", original, idemBytes(t, repo))
-
-	if code1 != code2 {
-		t.Errorf("self-rename exit codes differ between identical runs: %d then %d", code1, code2)
-	}
-	if code1 != cli.ExitOK && code1 != cli.ExitInvalid {
-		t.Errorf("self-rename: exit %d, want 0 (nothing to do) or 3 (rejected as a broken op); sync returns only 0, 2 and 3", code1)
+	for run := 1; run <= 2; run++ {
+		code, stdout, errOut := idemSyncRaw(t, repo, "--op", "rename_owner(@a, @a)")
+		if code != cli.ExitInvalid {
+			t.Errorf("self-rename run %d: exit %d, want 3 — ops.Parse rejects it without reading the repo, so it fails identically everywhere\nstderr: %s",
+				run, code, errOut)
+		}
+		if strings.TrimSpace(stdout) != "" {
+			t.Errorf("self-rename run %d: exit 3 must emit no record — a {\"status\":...} line reports a phantom repo to `jq -s`\ngot: %q",
+				run, stdout)
+		}
+		if strings.TrimSpace(errOut) == "" {
+			t.Errorf("self-rename run %d: exit 3 must explain itself on stderr, or the halted fleet run says nothing about why", run)
+		}
+		idemSameBytes(t, fmt.Sprintf("self-rename run %d", run), original, idemBytes(t, repo))
 	}
 }
 
