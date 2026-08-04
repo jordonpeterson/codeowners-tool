@@ -44,6 +44,48 @@ const (
 	ExitValidation   = 6
 )
 
+// ExitNotImplemented is a Phase-2 scaffolding sentinel. It is deliberately
+// NOT one of sync's real codes (0/2/3): a stub returning 3 would make a test
+// asserting "broken policy" pass vacuously against unimplemented code.
+// Phase 3 deletes this along with the stub commands below.
+const ExitNotImplemented = 99
+
+// SyncRecord is one `sync` run, rendered as one JSON object (R-24). One line
+// per repo is what lets `jq -s` aggregate a fleet without parsing stderr.
+type SyncRecord struct {
+	Repo         string          `json:"repo"`
+	Status       string          `json:"status"` // applied|unchanged|skipped|refused|error
+	Ops          []plan.OpResult `json:"ops,omitempty"`
+	OpsApplied   int             `json:"ops_applied"`
+	OpsSkipped   int             `json:"ops_skipped"`
+	PathsChanged int             `json:"paths_changed"`
+	Created      bool            `json:"created"`
+	Warnings     []string        `json:"warnings,omitempty"`
+	Changes      []plan.Change   `json:"changes,omitempty"`
+	Error        string          `json:"error,omitempty"`
+}
+
+// Sync statuses (R-24). "skipped" is distinct from "unchanged" so a policy
+// that matches nothing anywhere cannot read as "already correct" across a
+// whole fleet.
+const (
+	StatusApplied   = "applied"
+	StatusUnchanged = "unchanged"
+	StatusSkipped   = "skipped"
+	StatusRefused   = "refused"
+	StatusError     = "error"
+)
+
+func cmdSync(args []string, stdout, stderr io.Writer) int {
+	fmt.Fprintln(stderr, "sync: not implemented (Phase 3)")
+	return ExitNotImplemented
+}
+
+func cmdCheck(args []string, stdout, stderr io.Writer) int {
+	fmt.Fprintln(stderr, "check: not implemented (Phase 3)")
+	return ExitNotImplemented
+}
+
 // planFile is Plan plus the apply-time context the CLI adds.
 type planFile struct {
 	plan.Plan
@@ -59,6 +101,10 @@ func Run(argv []string, stdout, stderr io.Writer) int {
 		return ExitInvalid
 	}
 	switch argv[0] {
+	case "sync":
+		return cmdSync(argv[1:], stdout, stderr)
+	case "check":
+		return cmdCheck(argv[1:], stdout, stderr)
 	case "plan":
 		return cmdPlan(argv[1:], stdout, stderr)
 	case "apply":

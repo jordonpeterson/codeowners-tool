@@ -85,6 +85,17 @@ type Row struct {
 	After  []string `json:"owners_after"`
 }
 
+// OpResult is one op's outcome (R-24). Proven distinguishes an op checked
+// against real tracked files ("tree") from a declare op that matched none
+// and could only be proven structurally ("structural", INV-6).
+type OpResult struct {
+	ID     string `json:"id,omitempty"`
+	Op     string `json:"op"`
+	Status string `json:"status"`           // applied | skipped | unchanged
+	Proven string `json:"proven,omitempty"` // tree | structural
+	Reason string `json:"reason,omitempty"`
+}
+
 // Plan is the machine-readable output of `plan` and the sole input of
 // `apply` (R-16).
 type Plan struct {
@@ -97,6 +108,11 @@ type Plan struct {
 	Rows         []Row    `json:"ownership_rows"`
 	Diff         string   `json:"diff"`
 	AfterContent string   `json:"after_content"`
+
+	// Named op_results, not ops: Ops above already owns the "ops" tag as the
+	// raw op strings (R-16) and must keep it. The sync record renders these
+	// as "ops" in ITS document, where there is no collision.
+	OpResults []OpResult `json:"op_results,omitempty"`
 }
 
 // ResolveContent parses content and resolves the whole tree — the primitive
