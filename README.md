@@ -308,23 +308,42 @@ not a pattern) and `declare` is rejected on `remove_owner` (there is no rule to 
 
 ### JSON output
 
+Real output, abridged only in `changes`:
+
 ```json
 {
   "repo": "work/org/foo",
   "status": "applied",
   "ops": [
-    {"id": "api", "status": "applied", "proven": "tree"},
-    {"id": "tf",  "status": "skipped", "reason": "scope matched zero tracked files"},
-    {"id": "ci",  "status": "applied", "proven": "structural"}
+    {"op": "add_owner(/services/api/, @org/api-team)", "status": "applied", "proven": "tree"},
+    {"id": "tf", "op": "add_owner(**/*.tf, @org/infra)", "status": "skipped",
+     "reason": "scope \"**/*.tf\" matches zero tracked files and on_zero_match=skip (R-21)"},
+    {"id": "ci", "op": "add_owner(/.github/workflows/, @org/ci)", "status": "applied",
+     "proven": "structural"}
   ],
   "ops_applied": 2, "ops_skipped": 1, "paths_changed": 37,
-  "created": false, "warnings": [], "changes": [ /* ... */ ]
+  "created": false, "changes": [ ]
 }
 ```
 
 `status` is `applied`, `unchanged`, `skipped`, `refused`, or `error`. `proven` is
 `tree` when the result was checked against real files, `structural` when it wasn't —
 see [below](#what-declare-costs).
+
+Two things to know before you write `jq` against this. `id` appears only on ops your
+policy named, so key on it only where you set it. And **`ops_applied` + `ops_skipped`
+doesn't have to equal your op count** — an op that was already satisfied is
+`unchanged` and counted by neither. If you want "did this policy actually do anything
+anywhere", read `.status`; if you want "is this op reaching any repo at all", count it
+out of `.ops[]`:
+
+```sh
+jq -s '[.[].ops[]] | group_by(.op) | map({op: .[0].op, n: length,
+        applied: (map(select(.status=="applied")) | length)})' results.jsonl
+```
+
+`warnings` is omitted entirely when there are none, so use `.warnings // []` rather
+than `.warnings` if you pipe it to `length`.
 
 ## `plan` and `apply`
 

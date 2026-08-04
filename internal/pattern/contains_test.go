@@ -150,3 +150,123 @@ func TestContainsRejectsInvalid(t *testing.T) {
 		}
 	}
 }
+
+// containsGlobstarCorpus is the "**" family: every spelling that puts two
+// globstar segments next to each other, plus the well-formed globstar patterns
+// they are easily confused with. Adjacent globstars are the shapes the token
+// model got wrong — buildPatternRegex's needSlash bookkeeping makes them match
+// NOTHING, while a naive token model reads them as universal.
+var containsGlobstarCorpus = []string{
+	"**", "/**", "**/*", "*/**", "**/x", "x/**", "/**/x", "**/x/**", "x/**/y",
+	"**/", "/**/", "**/**", "/**/**", "**/**/", "**/**/x", "/**/**/y",
+	"**/**/**", "a/**/**", "/a/**/**/b", "**/**/*", "*/**/**", "**/*/**",
+}
+
+// Contains(`**/`, `*`) is the witness that broke soundness: `**/` normalizes to
+// the segments ["**", "**"], and buildPatternRegex compiles that to
+// `\A(?:.+/)?/.*\z` — the leading globstar consumes the separator, then the
+// trailing globstar re-emits one, so no repo-relative path can ever match it.
+// The token model read the same pattern as [many, any1, many] and called it
+// universal, so Contains claimed `**/` contained every pattern in the language.
+// That is the exact shape that would let the planner amend a dead rule in place
+// and hand its owner every file the inner rule will ever match.
+func TestContainsRejectsAdjacentGlobstars(t *testing.T) {
+	dead, err := pattern.Compile("**/")
+	if err != nil {
+		t.Fatalf(`Compile("**/"): %v`, err)
+	}
+	star, err := pattern.Compile("*")
+	if err != nil {
+		t.Fatalf(`Compile("*"): %v`, err)
+	}
+	// Premise: the witness path separates the two languages.
+	if dead.Match("a.go") {
+		t.Fatalf(`Compile("**/").Match("a.go") = true, want false — "**/" matches nothing`)
+	}
+	if !star.Match("a.go") {
+		t.Fatalf(`Compile("*").Match("a.go") = false, want true`)
+	}
+	// Conclusion: so "**/" cannot contain "*".
+	if pattern.Contains("**/", "*") {
+		t.Errorf(`Contains("**/", "*") = true, want false — "a.go" matches "*" and not "**/"`)
+	}
+	// The same reasoning for the rest of the family. Not every adjacent-globstar
+	// spelling is dead ("*/**/**" matches "x/y.go"), so emptiness is established
+	// against the matcher rather than assumed: a pattern that matches none of
+	// the probe paths contains only the empty language, and therefore cannot
+	// contain any pattern that matches one of them.
+	probes := []string{"a.go", "x/a.go", "docs/readme.md", "a/b/c/d.go", "x", "docs"}
+	live := []string{"*", "**", "x", "/x/y.go", "docs/"}
+	for _, outer := range containsGlobstarCorpus {
+		oc, err := pattern.Compile(outer)
+		if err != nil {
+			t.Fatalf("Compile(%q): %v", outer, err)
+		}
+		if matchesAny(oc, probes) {
+			continue
+		}
+		for _, inner := range live {
+			ic, err := pattern.Compile(inner)
+			if err != nil {
+				t.Fatalf("Compile(%q): %v", inner, err)
+			}
+			if !matchesAny(ic, probes) {
+				continue
+			}
+			if pattern.Contains(outer, inner) {
+				t.Errorf("Contains(%q, %q) = true, want false — %q matches nothing, %q does",
+					outer, inner, outer, inner)
+			}
+		}
+	}
+}
+
+// matchesAny reports whether the compiled pattern matches at least one path.
+func matchesAny(p *pattern.Pattern, paths []string) bool {
+	for _, s := range paths {
+		if p.Match(s) {
+			return true
+		}
+	}
+	return false
+}
+
+// The soundness rule TestContainsIsSound states, generalized over the "**"
+// family so the next member of it cannot slip through by simply not being
+// listed in containsCorpus. Whenever Contains(outer, inner) is true, NO
+// concrete path may match inner without also matching outer; a violation means
+// the planner would amend a rule in place and silently widen an owner's reach.
+func TestContainsIsSoundOverGlobstarFamily(t *testing.T) {
+	corpus := append(append([]string{}, containsCorpus...), containsGlobstarCorpus...)
+	paths := append(append([]string{}, containsPaths...), "a.go", "x/a.go", "a/b/c/d.go")
+
+	compiled := map[string]*pattern.Pattern{}
+	for _, p := range corpus {
+		c, err := pattern.Compile(p)
+		if err != nil {
+			t.Fatalf("Compile(%q): %v", p, err)
+		}
+		compiled[p] = c
+	}
+	unsound := 0
+	for _, outer := range corpus {
+		for _, inner := range corpus {
+			if !pattern.Contains(outer, inner) {
+				continue
+			}
+			for _, p := range paths {
+				if compiled[inner].Match(p) && !compiled[outer].Match(p) {
+					unsound++
+					if unsound <= 20 {
+						t.Errorf("Contains(%q, %q) = true, but %q matches %q and not %q",
+							outer, inner, p, inner, outer)
+					}
+					break
+				}
+			}
+		}
+	}
+	if unsound > 0 {
+		t.Errorf("%d unsound pair(s)", unsound)
+	}
+}

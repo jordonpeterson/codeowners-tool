@@ -6,6 +6,7 @@ import (
 
 	"github.com/jordonpeterson/codeowners-tool/internal/file"
 	"github.com/jordonpeterson/codeowners-tool/internal/ops"
+	"github.com/jordonpeterson/codeowners-tool/internal/pattern"
 	"github.com/jordonpeterson/codeowners-tool/internal/resolve"
 )
 
@@ -52,9 +53,9 @@ type declareCheck struct {
 // report "applied", the diff would look right in review, and the declaration
 // would never take effect. A declaration appends at EOF, where nothing can
 // recapture it.
-func synthDeclare(f *file.File, op ops.Op, checks *[]*declareCheck, pl *Plan) error {
+func synthDeclare(f *file.File, op ops.Op, batch []string, checks *[]*declareCheck, pl *Plan) error {
 	warnDuplicateDeclaredPatterns(f, op.Scope, pl)
-	rule, effective := lastRuleForScope(f, op.Scope)
+	rule, effective := lastRuleForScope(f, op.Scope, batch)
 
 	// A rule for this pattern is already here, but a later rule can capture the
 	// scope, so it does not grant what it appears to grant. Reporting a no-op
@@ -136,8 +137,12 @@ func declaredOwners(op ops.Op, base []string) []string {
 //
 // It also reports whether that rule is still EFFECTIVE: under last-match-wins a
 // rule any later rule can recapture does not grant what it appears to grant, so
-// a declaration sitting above a catch-all is not satisfied by it.
-func lastRuleForScope(f *file.File, scope string) (*file.Rule, bool) {
+// a declaration sitting above a catch-all is not satisfied by it. A PARTIAL
+// overlap with another scope this same policy declares does not make it
+// ineffective — see declareShadow; this must agree with proveDeclares or the
+// second pass of a converged fleet repo would refuse the file the first pass
+// wrote (R-19).
+func lastRuleForScope(f *file.File, scope string, batch []string) (*file.Rule, bool) {
 	rules := f.Rules()
 	idx := -1
 	for i, r := range rules {
@@ -149,7 +154,7 @@ func lastRuleForScope(f *file.File, scope string) (*file.Rule, bool) {
 		return nil, false
 	}
 	for _, later := range rules[idx+1:] {
-		if !patternsProvablyDisjoint(scope, later.PatternText) {
+		if kind, _ := classifyDeclareShadow(scope, later.PatternText, batch); kind == shadowFatal {
 			return rules[idx], false
 		}
 	}
@@ -168,8 +173,10 @@ func lastRuleForScope(f *file.File, scope string) (*file.Rule, bool) {
 //     path added later — the guarantee that replaces INV-1 here.
 //
 // Anything unproven is a refusal, never a warning: this is the only check the
-// line gets.
-func proveDeclares(after *file.File, checks []*declareCheck) error {
+// line gets. Obligation 3 has exactly one relaxation, and only for scopes THIS
+// SAME policy declares — see classifyDeclareShadow; a partial overlap there is
+// disclosed as a warning, total capture is still refused.
+func proveDeclares(after *file.File, checks []*declareCheck, batch []string, pl *Plan) error {
 	if len(checks) == 0 {
 		return nil
 	}
@@ -192,7 +199,20 @@ func proveDeclares(after *file.File, checks []*declareCheck) error {
 				c.scope, fmtOwners(rules[idx].Owners), fmtOwners(c.want))}
 		}
 		for _, later := range rules[idx+1:] {
-			if !patternsProvablyDisjoint(c.scope, later.PatternText) {
+			kind, witness := classifyDeclareShadow(c.scope, later.PatternText, batch)
+			switch kind {
+			case shadowNone:
+				// Provably disjoint: the later rule cannot touch the scope.
+			case shadowPartial:
+				pl.addWarning(declareOverlapWarning(rules[idx], later, c.scope, witness))
+			default:
+				if declaredByBatch(later.PatternText, batch) {
+					return &RefusalError{Msg: fmt.Sprintf(
+						"refusing: rule %q on line %d is declared by this same policy, comes after the rule declared for %q, "+
+							"and no path can be shown to be governed by %q that %q does not also capture — the declaration would be "+
+							"dead on arrival (INV-6); order the policy so the narrower scope is declared last",
+						later.PatternText, later.LineIndex+1, c.scope, c.scope, later.PatternText)}
+				}
 				return &RefusalError{Msg: fmt.Sprintf(
 					"refusing: rule %q on line %d comes after the rule declared for %q and cannot be shown disjoint from it; "+
 						"a later rule that can recapture the scope makes the declaration dead on arrival (INV-6)",
@@ -201,6 +221,210 @@ func proveDeclares(after *file.File, checks []*declareCheck) error {
 		}
 	}
 	return nil
+}
+
+// declareShadow classifies a rule that sits AFTER the rule written for a
+// declared scope — INV-6's third obligation.
+type declareShadow int
+
+const (
+	// shadowNone: provably disjoint languages, so the later rule can never
+	// govern a path the declared scope governs.
+	shadowNone declareShadow = iota
+	// shadowPartial: the later rule is another scope THIS SAME policy declares,
+	// and a concrete path exists that the declared scope governs and the later
+	// rule does not — so the declaration still wins somewhere.
+	shadowPartial
+	// shadowFatal: total capture, or an overlap that could not be shown partial,
+	// or a rule this policy did not write. The declaration is (or cannot be
+	// shown not to be) dead on arrival.
+	shadowFatal
+)
+
+// classifyDeclareShadow decides INV-6's third obligation for one (declared
+// scope, later rule) pair.
+//
+// The original rule was "not provably disjoint ⇒ refuse", which is logically
+// correct — CODEOWNERS gives a path exactly one owner set, so on
+// .github/workflows/deploy.tf either the workflows rule or the Terraform rule
+// wins, never both. But it made the canonical fleet baseline ("CI owns
+// workflows everywhere, infra owns Terraform where it exists") inexpressible in
+// EVERY repo, forever, and surfaced a policy-level conflict as an identical
+// per-repo exit 2 on all 100 repos — exactly the misclassification the exit-2 /
+// exit-3 split exists to prevent.
+//
+// So the obligation is relaxed in one direction only:
+//
+//   - TOTAL capture stays a refusal. A declared rule no path can ever reach is
+//     a dead line reported as applied — the defect this whole file exists to
+//     prevent.
+//   - PARTIAL overlap with a scope the SAME policy declares is allowed and
+//     disclosed. The author asked for both in one document; their order in it
+//     is the precedence, exactly as in a hand-written CODEOWNERS. This mirrors
+//     R-7, which reports shadowed duplicates rather than refusing.
+//   - PARTIAL overlap with a PRE-EXISTING later rule stays a refusal: R-1
+//     forbids reordering existing lines, so the planner has no move to make.
+//
+// "Partial" must be PROVEN, by exhibiting a path the declared scope governs and
+// the later rule does not. No witness means unproven, and unproven is fatal —
+// the incompleteness costs a refusal, never a dead write.
+//
+// The witness is returned alongside the verdict so the disclosure can name a
+// concrete path the declared rule still governs.
+func classifyDeclareShadow(scope, later string, batch []string) (declareShadow, string) {
+	if patternsProvablyDisjoint(scope, later) {
+		return shadowNone, ""
+	}
+	if !declaredByBatch(later, batch) {
+		return shadowFatal, ""
+	}
+	witness := pathOutside(scope, later)
+	if witness == "" {
+		return shadowFatal, ""
+	}
+	return shadowPartial, witness
+}
+
+// declaredByBatch reports whether a rule pattern is one of the scopes this
+// batch declares. Matching by pattern LANGUAGE, not by line identity, is what
+// makes the answer the same on the pass that writes the line and on every pass
+// after it — a line-identity test would refuse on pass 2 the file pass 1 wrote,
+// and a fleet job with no fixed point is worse than one that refuses (R-19).
+func declaredByBatch(pat string, batch []string) bool {
+	for _, s := range batch {
+		if samePatternLanguage(s, pat) {
+			return true
+		}
+	}
+	return false
+}
+
+// declareOverlapWarning is the disclosure that makes the relaxation above
+// honest: it names both scopes, says which one wins where they meet, and shows
+// a path the declared rule still governs.
+func declareOverlapWarning(declared, later *file.Rule, scope, witness string) string {
+	return fmt.Sprintf(
+		"line %d: declared scope %q overlaps scope %q, declared by the same policy on line %d; CODEOWNERS gives a path exactly "+
+			"one owner set, so %q wins on every path both match and %q governs only the rest (a path like %q still resolves to "+
+			"it) — the order the policy lists them in is the precedence, exactly as in a hand-written file (R-22/INV-6); a later "+
+			"scope capturing %q entirely would still be refused as dead on arrival",
+		declared.LineIndex+1, scope, later.PatternText, later.LineIndex+1,
+		later.PatternText, scope, witness, scope)
+}
+
+// pathOutside returns a concrete path the scope governs and the later pattern
+// does NOT, or "" when it cannot find one. A witness is a proof that the
+// overlap is partial: the declared rule is still the last word for that path,
+// so it is not dead on arrival.
+//
+// Candidates are generated by instantiating the scope's wildcards, then CHECKED
+// against the compiled patterns — the proof rests on pattern.Match, not on the
+// generator, so an over-eager instantiation costs a missed witness (a refusal),
+// never a false one.
+func pathOutside(scope, later string) string {
+	sp, err := pattern.Compile(scope)
+	if err != nil {
+		return ""
+	}
+	lp, err := pattern.Compile(later)
+	if err != nil {
+		return ""
+	}
+	for _, p := range declareWitnesses(scope) {
+		if sp.Match(p) && !lp.Match(p) {
+			return p
+		}
+	}
+	return ""
+}
+
+// Filler segments for witness paths. They are deliberately unlikely to be
+// spelled literally in a real rule: a filler that collided with a literal
+// segment of the later pattern would only lose a witness, but a stable, odd
+// name also keeps the warning text reproducible across runs and repos, which
+// the fleet record depends on.
+const (
+	witnessFillerA = "zzz-witness-a"
+	witnessFillerB = "zzz-witness-b"
+)
+
+// declareWitnesses enumerates concrete paths a scope pattern plausibly governs.
+// Deterministic and bounded: the same scope yields the same list in the same
+// order on every repo in the fleet, so a warning naming a witness reads the
+// same everywhere.
+func declareWitnesses(scope string) []string {
+	segs := strings.Split(strings.TrimPrefix(scope, "/"), "/")
+	variants := [][]string{{}}
+	for _, seg := range segs {
+		var next [][]string
+		for _, v := range variants {
+			for _, alt := range segmentInstances(seg) {
+				next = append(next, append(append([]string{}, v...), alt...))
+			}
+		}
+		if len(next) > 64 {
+			next = next[:64]
+		}
+		variants = next
+	}
+	// A directory scope governs its whole subtree, so probe below each variant
+	// too: a later rule may govern only direct children ("/x/*"), or only one
+	// extension, and the witness has to be able to dodge both.
+	tails := [][]string{nil, {witnessFillerA}, {witnessFillerA + ".zzz"}, {witnessFillerA, witnessFillerB}}
+	var out []string
+	seen := map[string]bool{}
+	for _, v := range variants {
+		for _, tail := range tails {
+			p := strings.Trim(strings.Join(append(append([]string{}, v...), tail...), "/"), "/")
+			if p == "" || seen[p] {
+				continue
+			}
+			seen[p] = true
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// segmentInstances instantiates ONE pattern segment into the path segments it
+// can stand for. "**" spans any number of segments, so it is tried at zero, one
+// and two — zero is what finds the root-level witness for "**/*.tf".
+func segmentInstances(seg string) [][]string {
+	switch seg {
+	case "":
+		return [][]string{nil}
+	case "**":
+		return [][]string{nil, {witnessFillerA}, {witnessFillerA, witnessFillerB}}
+	}
+	a, b := fillSegment(seg, witnessFillerA), fillSegment(seg, witnessFillerB)
+	if a == b {
+		return [][]string{{a}}
+	}
+	return [][]string{{a}, {b}}
+}
+
+// fillSegment substitutes a literal for each wildcard in one segment. Two
+// different fillers are tried by the caller so a witness can dodge a later
+// pattern that happens to spell one of them.
+func fillSegment(seg, filler string) string {
+	var b strings.Builder
+	escaped := false
+	for _, r := range seg {
+		switch {
+		case escaped:
+			b.WriteRune(r)
+			escaped = false
+		case r == '\\':
+			escaped = true
+		case r == '*':
+			b.WriteString(filler)
+		case r == '?':
+			b.WriteByte('z')
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
 }
 
 func recordDeclareCheck(checks *[]*declareCheck, scope string, want []string) {

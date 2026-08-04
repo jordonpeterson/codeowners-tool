@@ -1144,10 +1144,29 @@ An unsound answer here lets the planner amend a rule in place and silently
 hand an owner every future file that rule will ever match — the defect this
 whole mechanism exists to prevent.
 
+### `TestContainsIsSoundOverGlobstarFamily`
+
+The soundness rule TestContainsIsSound states, generalized over the "**"
+family so the next member of it cannot slip through by simply not being
+listed in containsCorpus. Whenever Contains(outer, inner) is true, NO
+concrete path may match inner without also matching outer; a violation means
+the planner would amend a rule in place and silently widen an owner's reach.
+
 ### `TestContainsKnownPairs`
 
 The containments the planner relies on to amend a rule in place, and the
 near-miss shapes it must NOT accept.
+
+### `TestContainsRejectsAdjacentGlobstars`
+
+Contains(`**/`, `*`) is the witness that broke soundness: `**/` normalizes to
+the segments ["**", "**"], and buildPatternRegex compiles that to
+`\A(?:.+/)?/.*\z` — the leading globstar consumes the separator, then the
+trailing globstar re-emits one, so no repo-relative path can ever match it.
+The token model read the same pattern as [many, any1, many] and called it
+universal, so Contains claimed `**/` contained every pattern in the language.
+That is the exact shape that would let the planner amend a dead rule in place
+and hand its owner every file the inner rule will ever match.
 
 ### `TestContainsRejectsInvalid`
 
@@ -1265,6 +1284,36 @@ move even one tracked path, the fleet rollout would be silently
 reassigning ownership in 100 repositories under cover of "declaring" paths
 that do not exist.
 
+### `TestINV6_PartialOverlapBetweenSameBatchDeclaresIsAllowedAndDisclosed`
+
+SPEC INV-6 (third obligation): a scope this same policy declares LATER may
+overlap an earlier declared scope PARTIALLY — allowed, and disclosed.
+
+The canonical fleet baseline is "CI owns workflows everywhere, infra owns
+Terraform where it exists". Those scopes meet on .github/workflows/deploy.tf,
+and CODEOWNERS gives a path exactly one owner set, so one of them must lose
+there. Refusing the pair made that baseline inexpressible in EVERY repo,
+forever, and reported a policy-level conflict as an identical per-repo exit 2
+on all 100 repos — the misclassification the exit-2/exit-3 split exists to
+prevent. The author wrote both in one document; its order is the precedence,
+exactly as in a hand-written file. R-7 sets the precedent: disclose the
+shadowing, do not refuse it.
+
+The plan suite never covered this before — TestR22_MultipleDeclaresStackAtEOF
+InPolicyOrder and TestR22_CommutingDeclareBatchIsAccepted both stack
+anchored, wildcard-free scopes, which are provably disjoint — so the
+overlapping-but-satisfiable case stayed invisible until the CLI wired it up.
+
+### `TestINV6_PartialOverlapWithAPreexistingLaterRuleIsStillRefused`
+
+SPEC INV-6 / R-1: a partial overlap with a PRE-EXISTING later rule is still a
+refusal. Same geometry as the allowed case above — "/.github/workflows/"
+against a later "**/*.tf" — and the opposite answer, because the difference is
+authority, not shape: R-1 forbids reordering lines this run did not write, so
+unlike a same-policy overlap there is no order the planner is entitled to
+choose. Accepting it would let the tool silently ratify whatever precedence
+the existing file happens to encode.
+
 ### `TestINV6_ProvenIsStructuralOnlyForZeroMatchDeclares`
 
 TRAP 3 — SPEC INV-6: `proven` distinguishes an op checked against real
@@ -1291,6 +1340,28 @@ tracked match this is caught today (TestGate_ProvesSerializedBytesNotModel).
 With zero matches nothing looks, and the tool would hand @a every `docs`
 directory in the repo while reporting that it declared ownership of a path
 with a space in it. Must refuse (exit 2).
+
+### `TestINV6_TotalShadowingBetweenSameBatchDeclaresIsRefused`
+
+SPEC INV-6 (third obligation): TOTAL capture by a same-batch declare is still
+a refusal. The relaxation above is only for overlaps that leave the declared
+rule the last word SOMEWHERE. A rule no path can ever reach is dead on
+arrival: the tool would report it applied with proven=structural, the diff
+would look right in review, and the declaration would never take effect —
+which is the entire failure mode this file exists to prevent.
+
+### `TestINV6_TrailingStarStarIsNotADirectoryPrefix`
+
+SPEC INV-6 / R-8 (regression, adversarial audit of Wave 1): the disjointness
+proof must not treat "/src**" as the directory "/src/".
+
+anchoredDirPrefix stripped the trailing "**" BEFORE testing for wildcards, so
+"/src**" normalized to "/src/" and patternsProvablyDisjoint("/src**",
+"/srcx/") answered TRUE. It is false: "/src**" compiles to
+`\Asrc[^/]*[^/]*(?:/.*)?\z` and matches srcx/a.go, which "/srcx/" matches too.
+A false disjointness proof is the one failure mode this package is built to
+exclude — it is a WRONG WRITE, not a missed one, and both reproducers below
+were accepted at exit 0 before the fix.
 
 ### `TestR2_ContainmentIsSemanticNotTextual`
 
@@ -2328,4 +2399,4 @@ DIFFERENT states; transitioning between them is a real ownership change.
 
 ---
 
-281 documented test cases across 12 packages.
+287 documented test cases across 12 packages.

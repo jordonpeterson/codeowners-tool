@@ -297,6 +297,18 @@ func Build(content []byte, tree []string, opList []ops.Op, opts Options) (*Plan,
 	// the SAME evolving file, which is what lets two declares on one scope
 	// merge into a single rule instead of stacking two lines where the second
 	// shadows the first.
+	//
+	// The scopes this batch declares are collected UP FRONT: INV-6's third
+	// obligation is relaxed for overlaps between them (see
+	// classifyDeclareShadow), and an op must be able to see a scope declared
+	// later in the policy than itself, on the pass that writes the lines and on
+	// every pass after it.
+	var batchDeclares []string
+	for i, op := range opList {
+		if declared[i] {
+			batchDeclares = append(batchDeclares, op.Scope)
+		}
+	}
 	var declares []*declareCheck
 	for i, op := range opList {
 		mark := len(pl.Changes)
@@ -306,7 +318,7 @@ func Build(content []byte, tree []string, opList []ops.Op, opts Options) (*Plan,
 			// R-21: a skipped op changes nothing and does not stop the rest of
 			// the batch from applying.
 		case declared[i]:
-			err = synthDeclare(f, op, &declares, pl)
+			err = synthDeclare(f, op, batchDeclares, &declares, pl)
 		default:
 			switch op.Kind {
 			case ops.AddOwner:
@@ -361,7 +373,7 @@ func Build(content []byte, tree []string, opList []ops.Op, opts Options) (*Plan,
 	// nothing, so INV-1 came out true without a single statement having been
 	// made about the line just written — precisely the case a reviewer most
 	// needs told. Prove it structurally instead, or refuse.
-	if err := proveDeclares(file.Parse(afterBytes), declares); err != nil {
+	if err := proveDeclares(file.Parse(afterBytes), declares, batchDeclares, pl); err != nil {
 		return nil, err
 	}
 
@@ -1118,19 +1130,39 @@ func ruleDirPrefix(pat string) (string, bool) {
 	return "/" + body + "/", true
 }
 
-// anchoredDirPrefix normalizes "/x/", "/x/**", "/x" to the prefix "/x/".
+// anchoredDirPrefix normalizes an anchored, WILDCARD-FREE directory scope
+// ("/x/", "/x/**", "/x") to the prefix "/x/", and rejects everything else. The
+// rejection is what keeps patternsProvablyDisjoint honest: the prefix is used
+// as a stand-in for the pattern's whole language, which is only true when the
+// pattern has no wildcard to spill outside that prefix.
+//
+// The wildcard check therefore runs on the ORIGINAL spelling, BEFORE any suffix
+// is trimmed, and "**" is stripped only where a "/" precedes it. Trimming first
+// normalized "/src**" to "/src/", so patternsProvablyDisjoint("/src**",
+// "/srcx/") answered true — but "/src**" compiles to
+// `\Asrc[^/]*[^/]*(?:/.*)?\z`, which matches srcx/a.go, and so does "/srcx/".
+// That is a WRONG WRITE, not a missed proof: it let a declare be amended under
+// a later rule capturing its entire scope (reported applied, dead on arrival)
+// and let R-8 wave through an order-dependent declare batch whose result
+// depended on op order (adversarial audit of Wave 1).
 func anchoredDirPrefix(scope string) (string, bool) {
 	if !strings.HasPrefix(scope, "/") {
 		return "", false
 	}
-	s := strings.TrimSuffix(scope, "**")
-	if !strings.HasSuffix(s, "/") {
-		s += "/"
+	if strings.ContainsAny(scope, "*?[]\\") {
+		// "/x/**" is the one wildcard spelling that is still exactly a directory
+		// subtree, and only with the slash intact: in "/src**" the "**" binds to
+		// the "src" segment and reaches siblings like srcx/.
+		body, ok := strings.CutSuffix(scope, "/**")
+		if !ok || strings.ContainsAny(body, "*?[]\\") {
+			return "", false
+		}
+		scope = body
 	}
-	if strings.ContainsAny(s, "*?[]\\") {
-		return "", false
+	if !strings.HasSuffix(scope, "/") {
+		scope += "/"
 	}
-	return s, true
+	return scope, true
 }
 
 // warnShadowedDuplicates reports duplicate patterns intersecting the scope

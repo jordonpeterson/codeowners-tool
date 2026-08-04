@@ -760,3 +760,186 @@ func TestR22_DeclareRespectsTheSizeCap(t *testing.T) {
 		t.Fatalf("a declare pushing the file over the size cap must be refused (exit 2), got %v", err)
 	}
 }
+
+// SPEC INV-6 / R-8 (regression, adversarial audit of Wave 1): the disjointness
+// proof must not treat "/src**" as the directory "/src/".
+//
+// anchoredDirPrefix stripped the trailing "**" BEFORE testing for wildcards, so
+// "/src**" normalized to "/src/" and patternsProvablyDisjoint("/src**",
+// "/srcx/") answered TRUE. It is false: "/src**" compiles to
+// `\Asrc[^/]*[^/]*(?:/.*)?\z` and matches srcx/a.go, which "/srcx/" matches too.
+// A false disjointness proof is the one failure mode this package is built to
+// exclude — it is a WRONG WRITE, not a missed one, and both reproducers below
+// were accepted at exit 0 before the fix.
+func TestINV6_TrailingStarStarIsNotADirectoryPrefix(t *testing.T) {
+	// Reproducer (a): the declaration is amended into a rule that a later
+	// "/src**" recaptures entirely, so a future srcx/a.go resolves to
+	// @org/legacy — while the tool reports the op applied and proven=structural.
+	t.Run("amend under a later /src** is refused", func(t *testing.T) {
+		content := "/srcx/  @org/old\n/src**  @org/legacy\n"
+		tree := []string{"src/main.go"}
+		p, err := buildZM(t, content, tree, plan.Options{},
+			declareOp("add_owner(/srcx/, @org/new)"))
+		var ref *plan.RefusalError
+		if !errors.As(err, &ref) {
+			after := "<no plan>"
+			if p != nil {
+				after = p.AfterContent
+			}
+			t.Fatalf("declaring /srcx/ under a later /src** must be refused (exit 2): "+
+				"/src** captures the whole declared scope, so future srcx/a.go resolves to @org/legacy. got err=%v, after=%q",
+				err, after)
+		}
+	})
+
+	// Reproducer (b): R-8's zero-match guard skipped the pair as "provably
+	// disjoint", so BOTH orderings were accepted and a future srcx/a.go resolved
+	// to whichever declare was listed second.
+	t.Run("order-dependent declare batch is refused in both orders", func(t *testing.T) {
+		srcx := declareOp("set_owners(/srcx/, [@org/a])")
+		starstar := declareOp("set_owners(/src**, [@org/b])")
+		for _, c := range []struct {
+			name string
+			in   []zmOp
+		}{
+			{"/srcx/ first", []zmOp{srcx, starstar}},
+			{"/src** first", []zmOp{starstar, srcx}},
+		} {
+			t.Run(c.name, func(t *testing.T) {
+				p, err := buildZM(t, "# empty\n", []string{"README.md"}, plan.Options{}, c.in...)
+				var inv *plan.InvalidError
+				if !errors.As(err, &inv) {
+					after := "<no plan>"
+					if p != nil {
+						after = p.AfterContent
+					}
+					t.Fatalf("both declares can govern srcx/a.go and set_owners does not commute — "+
+						"the batch is order-dependent and must be refused (R-8). got err=%v, after=%q", err, after)
+				}
+				if !strings.Contains(err.Error(), "R-8") {
+					t.Errorf("refusal must cite R-8 (order dependence), got %q", err.Error())
+				}
+			})
+		}
+	})
+}
+
+// SPEC INV-6 (third obligation): a scope this same policy declares LATER may
+// overlap an earlier declared scope PARTIALLY — allowed, and disclosed.
+//
+// The canonical fleet baseline is "CI owns workflows everywhere, infra owns
+// Terraform where it exists". Those scopes meet on .github/workflows/deploy.tf,
+// and CODEOWNERS gives a path exactly one owner set, so one of them must lose
+// there. Refusing the pair made that baseline inexpressible in EVERY repo,
+// forever, and reported a policy-level conflict as an identical per-repo exit 2
+// on all 100 repos — the misclassification the exit-2/exit-3 split exists to
+// prevent. The author wrote both in one document; its order is the precedence,
+// exactly as in a hand-written file. R-7 sets the precedent: disclose the
+// shadowing, do not refuse it.
+//
+// The plan suite never covered this before — TestR22_MultipleDeclaresStackAtEOF
+// InPolicyOrder and TestR22_CommutingDeclareBatchIsAccepted both stack
+// anchored, wildcard-free scopes, which are provably disjoint — so the
+// overlapping-but-satisfiable case stayed invisible until the CLI wired it up.
+func TestINV6_PartialOverlapBetweenSameBatchDeclaresIsAllowedAndDisclosed(t *testing.T) {
+	tree := []string{"README.md"}
+	p, err := buildZM(t, "* @org/base\n", tree, plan.Options{},
+		declareOp("add_owner(/.github/workflows/, @org/ci)"),
+		declareOp("add_owner(**/*.tf, @org/infra)"),
+		declareOp("add_owner(/charts/, @org/k8s)"))
+	if err != nil {
+		t.Fatalf("partially overlapping declares from one policy must be accepted: %v", err)
+	}
+
+	want := "* @org/base\n/.github/workflows/ @org/ci\n**/*.tf @org/infra\n/charts/ @org/k8s\n"
+	if p.AfterContent != want {
+		t.Fatalf("after = %q, want %q — declares stack at EOF in policy order", p.AfterContent, want)
+	}
+
+	// Every scope still governs something: none of these declarations is dead.
+	for _, c := range []struct {
+		path string
+		want []string
+	}{
+		{".github/workflows/ci.yml", []string{"@org/ci"}},
+		{"src/main.tf", []string{"@org/infra"}},
+		{"charts/values.yaml", []string{"@org/k8s"}},
+		// The intersections, decided by policy order: the later rule wins.
+		{".github/workflows/deploy.tf", []string{"@org/infra"}},
+		{"charts/main.tf", []string{"@org/k8s"}},
+	} {
+		if got := futureResolution(p.AfterContent, tree, c.path).Owners; !reflect.DeepEqual(got, c.want) {
+			t.Errorf("future %s = %v, want %v", c.path, got, c.want)
+		}
+	}
+
+	// The disclosure is the whole price of the relaxation: silently writing an
+	// overlap a reviewer cannot see in the diff is what R-7 refuses to do.
+	found := ""
+	for _, w := range p.Warnings {
+		if strings.Contains(w, `"/.github/workflows/"`) && strings.Contains(w, `"**/*.tf"`) {
+			found = w
+		}
+	}
+	if found == "" {
+		t.Fatalf("overlapping declares must warn, naming both scopes; warnings = %#v", p.Warnings)
+	}
+	if !strings.Contains(found, "wins on every path both match") {
+		t.Errorf("the warning must say which scope wins on the intersection, got %q", found)
+	}
+	if !strings.Contains(found, "INV-6") {
+		t.Errorf("the warning must cite the rule it relaxes (INV-6), got %q", found)
+	}
+}
+
+// SPEC INV-6 (third obligation): TOTAL capture by a same-batch declare is still
+// a refusal. The relaxation above is only for overlaps that leave the declared
+// rule the last word SOMEWHERE. A rule no path can ever reach is dead on
+// arrival: the tool would report it applied with proven=structural, the diff
+// would look right in review, and the declaration would never take effect —
+// which is the entire failure mode this file exists to prevent.
+func TestINV6_TotalShadowingBetweenSameBatchDeclaresIsRefused(t *testing.T) {
+	p, err := buildZM(t, "* @org/base\n", []string{"README.md"}, plan.Options{},
+		declareOp("add_owner(/src/api/, @org/api)"),
+		declareOp("add_owner(/src/, @org/app)"))
+	var ref *plan.RefusalError
+	if !errors.As(err, &ref) {
+		after := "<no plan>"
+		if p != nil {
+			after = p.AfterContent
+		}
+		t.Fatalf("/src/ captures /src/api/ entirely, so the /src/api/ declaration can never win for any path "+
+			"and must be refused (INV-6). got err=%v, after=%q", err, after)
+	}
+	if !strings.Contains(err.Error(), "INV-6") {
+		t.Errorf("refusal must cite INV-6, got %q", err.Error())
+	}
+	if !strings.Contains(err.Error(), "/src/api/") || !strings.Contains(err.Error(), "/src/") {
+		t.Errorf("refusal must name both scopes so the author can reorder the policy, got %q", err.Error())
+	}
+}
+
+// SPEC INV-6 / R-1: a partial overlap with a PRE-EXISTING later rule is still a
+// refusal. Same geometry as the allowed case above — "/.github/workflows/"
+// against a later "**/*.tf" — and the opposite answer, because the difference is
+// authority, not shape: R-1 forbids reordering lines this run did not write, so
+// unlike a same-policy overlap there is no order the planner is entitled to
+// choose. Accepting it would let the tool silently ratify whatever precedence
+// the existing file happens to encode.
+func TestINV6_PartialOverlapWithAPreexistingLaterRuleIsStillRefused(t *testing.T) {
+	content := "/.github/workflows/ @org/ci\n**/*.tf @org/legacy\n"
+	p, err := buildZM(t, content, []string{"README.md"}, plan.Options{},
+		declareOp("add_owner(/.github/workflows/, @org/ci2)"))
+	var ref *plan.RefusalError
+	if !errors.As(err, &ref) {
+		after := "<no plan>"
+		if p != nil {
+			after = p.AfterContent
+		}
+		t.Fatalf("the overlapping **/*.tf is not this policy's line to reorder (R-1), so the declare must be refused: "+
+			"got err=%v, after=%q", err, after)
+	}
+	if !strings.Contains(err.Error(), "/.github/workflows/") {
+		t.Errorf("refusal must name the declared scope, got %q", err.Error())
+	}
+}

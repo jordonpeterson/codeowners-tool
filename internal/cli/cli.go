@@ -1,5 +1,5 @@
-// Package cli wires the four commands and owns the exit-code contract
-// (R-17). Distinct, documented, scriptable:
+// Package cli wires the commands and owns the exit-code contract (R-17).
+// Distinct, documented, scriptable:
 //
 //	0  success — applied, or audit found nothing
 //	1  no-op — nothing to change
@@ -8,6 +8,10 @@
 //	4  audit findings present
 //	5  inconclusive — API unavailable, token insufficient, rate limited (R-12)
 //	6  validation failed post-write; rolled back
+//
+// `sync` and `check` run under a coarser three-code contract of their own
+// (R-19: only 0, 2 and 3), because their question is "did this repo converge?"
+// rather than "what exactly happened?". See sync.go.
 package cli
 
 import (
@@ -44,12 +48,6 @@ const (
 	ExitValidation   = 6
 )
 
-// ExitNotImplemented is a Phase-2 scaffolding sentinel. It is deliberately
-// NOT one of sync's real codes (0/2/3): a stub returning 3 would make a test
-// asserting "broken policy" pass vacuously against unimplemented code.
-// Phase 3 deletes this along with the stub commands below.
-const ExitNotImplemented = 99
-
 // SyncRecord is one `sync` run, rendered as one JSON object (R-24). One line
 // per repo is what lets `jq -s` aggregate a fleet without parsing stderr.
 type SyncRecord struct {
@@ -75,16 +73,6 @@ const (
 	StatusRefused   = "refused"
 	StatusError     = "error"
 )
-
-func cmdSync(args []string, stdout, stderr io.Writer) int {
-	fmt.Fprintln(stderr, "sync: not implemented (Phase 3)")
-	return ExitNotImplemented
-}
-
-func cmdCheck(args []string, stdout, stderr io.Writer) int {
-	fmt.Fprintln(stderr, "check: not implemented (Phase 3)")
-	return ExitNotImplemented
-}
 
 // planFile is Plan plus the apply-time context the CLI adds.
 type planFile struct {
@@ -128,6 +116,10 @@ func Run(argv []string, stdout, stderr io.Writer) int {
 func usage(w io.Writer) {
 	fmt.Fprint(w, `codeowners-tool — safe, intent-level, verifiable CODEOWNERS changes
 
+  sync     (--op 'OP' ... | --policy FILE) [--on-empty error|inherit|unowned]
+           [--repo DIR] [--branch REF] [--file PATH] [--create] [--dry-run]
+           [--format text|json] [--out FILE] [--summary-out FILE]
+  check    (--op 'OP' ... | --policy FILE) [--format text|json]
   plan     --op 'add_owner(/services/api, @org/team-1)' [--op ...] [--on-empty error|inherit|unowned]
            [--repo DIR] [--branch REF] [--file PATH] [--out plan.json]
   apply    --plan plan.json [--repo DIR]
@@ -139,6 +131,8 @@ func usage(w io.Writer) {
 
 Exit codes: 0 ok · 1 no-op · 2 refused (invariant/size) · 3 invalid input
             4 audit findings · 5 inconclusive (fail-closed) · 6 rolled back
+sync/check use a coarser contract and return only:
+            0 converged · 2 this repo needs a human · 3 the policy is broken
 `)
 }
 
@@ -197,6 +191,12 @@ func cmdPlan(args []string, stdout, stderr io.Writer) int {
 	maxSize := fs.Int("max-size", 3_000_000, "hard size cap in bytes (S-4)")
 	warnSize := fs.Int("warn-size", 2_500_000, "warn threshold in bytes (R-9)")
 	if err := fs.Parse(args); err != nil {
+		// `--help` is a request, not a broken invocation: returning ExitInvalid
+		// here made `plan -h` exit 3, which under the fleet contract reads as
+		// "the policy is broken, halt the run".
+		if errors.Is(err, flag.ErrHelp) {
+			return ExitOK
+		}
 		return ExitInvalid
 	}
 	if len(opSpecs) == 0 {
@@ -244,6 +244,12 @@ func cmdApply(args []string, stdout, stderr io.Writer) int {
 	planPath := fs.String("plan", "", "plan JSON produced by `plan`")
 	repo := fs.String("repo", "", "path to local git repository (default: plan's repo)")
 	if err := fs.Parse(args); err != nil {
+		// `--help` is a request, not a broken invocation: returning ExitInvalid
+		// here made `plan -h` exit 3, which under the fleet contract reads as
+		// "the policy is broken, halt the run".
+		if errors.Is(err, flag.ErrHelp) {
+			return ExitOK
+		}
 		return ExitInvalid
 	}
 	if *planPath == "" {
@@ -278,6 +284,12 @@ func cmdSnapshot(args []string, stdout, stderr io.Writer) int {
 	filePath := fs.String("file", "", "CODEOWNERS path override")
 	out := fs.String("out", "", "write snapshot JSON here (default stdout)")
 	if err := fs.Parse(args); err != nil {
+		// `--help` is a request, not a broken invocation: returning ExitInvalid
+		// here made `plan -h` exit 3, which under the fleet contract reads as
+		// "the policy is broken, halt the run".
+		if errors.Is(err, flag.ErrHelp) {
+			return ExitOK
+		}
 		return ExitInvalid
 	}
 	tree, coPath, _, err := locate(*repo, *branch, *filePath)
@@ -315,6 +327,12 @@ func cmdVerify(args []string, stdout, stderr io.Writer) int {
 	var scopes multiFlag
 	fs.Var(&scopes, "scope", "pattern where change is allowed (repeatable; none = assert no change)")
 	if err := fs.Parse(args); err != nil {
+		// `--help` is a request, not a broken invocation: returning ExitInvalid
+		// here made `plan -h` exit 3, which under the fleet contract reads as
+		// "the policy is broken, halt the run".
+		if errors.Is(err, flag.ErrHelp) {
+			return ExitOK
+		}
 		return ExitInvalid
 	}
 	if *beforePath == "" || *afterPath == "" {
@@ -361,6 +379,12 @@ func cmdAudit(args []string, stdout, stderr io.Writer) int {
 	cacheDir := fs.String("cache-dir", "", "disk cache directory (R-15); empty = memory only")
 	cacheTTL := fs.Duration("cache-ttl", 24*time.Hour, "disk cache TTL")
 	if err := fs.Parse(args); err != nil {
+		// `--help` is a request, not a broken invocation: returning ExitInvalid
+		// here made `plan -h` exit 3, which under the fleet contract reads as
+		// "the policy is broken, halt the run".
+		if errors.Is(err, flag.ErrHelp) {
+			return ExitOK
+		}
 		return ExitInvalid
 	}
 
