@@ -5,6 +5,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -445,10 +446,37 @@ func TestSync_CreateHonorsFileAndRejectsNonHeadBranch(t *testing.T) {
 		t.Error("--file was given: the default location must not also be written")
 	}
 
+	// A GENUINELY non-HEAD branch. initRepo runs `git init -b main`, so the
+	// earlier revision of this test passed "main" — the branch the repo is
+	// already standing on — and therefore asserted that naming your own
+	// checked-out branch is an error. That is an ordinary fleet invocation
+	// (`--branch main` in a script), and rejecting it halted the whole rollout
+	// at repo 0. The intent below was always right; the fixture did not
+	// exercise it. Refusal is exit 2, not 3: whether a ref is the one checked
+	// out is a fact about this repo, not about the arguments.
 	repo2 := initRepo(t, map[string]string{"svc/api/main.go": "package main\n"})
+	syncGit(t, repo2, "branch", "other")
+	syncGit(t, repo2, "commit", "-q", "--allow-empty", "-m", "move main ahead of other")
 	if code, _, _ := runCLI(t, "sync", "--repo", repo2,
-		"--op", "add_owner(/svc/api/, @org/api)", "--create", "--branch", "main"); code != cli.ExitInvalid {
-		t.Error("--create with a non-HEAD --branch: want exit 3")
+		"--op", "add_owner(/svc/api/, @org/api)", "--create", "--branch", "other"); code != cli.ExitRefused {
+		t.Errorf("--create with a genuinely non-HEAD --branch: want exit 2, got %d", code)
+	}
+	// Naming the checked-out branch explicitly must still work.
+	repo3 := initRepo(t, map[string]string{"svc/api/main.go": "package main\n"})
+	if code, _, errOut := runCLI(t, "sync", "--repo", repo3,
+		"--op", "add_owner(/svc/api/, @org/api)", "--create", "--branch", "main"); code != cli.ExitOK {
+		t.Errorf("--branch main on a repo standing on main: want exit 0, got %d\n%s", code, errOut)
+	}
+}
+
+// syncGit runs a git command in dir, for tests that need a second branch.
+func syncGit(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+	cmd.Env = append(os.Environ(),
+		"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t", "GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git %v: %v\n%s", args, err, out)
 	}
 }
 

@@ -48,6 +48,19 @@ const (
 	ExitValidation   = 6
 )
 
+// flagParseCode maps a flag-parsing failure to an exit code.
+//
+// `--help` is a request, not a broken invocation. Returning ExitInvalid for it
+// made every `<verb> -h` exit 3, which under the fleet contract in sync.go reads
+// as "the policy is broken, halt the run" — so all verbs answer it here rather
+// than each deciding for itself.
+func flagParseCode(err error) int {
+	if errors.Is(err, flag.ErrHelp) {
+		return ExitOK
+	}
+	return ExitInvalid
+}
+
 // SyncRecord is one `sync` run, rendered as one JSON object (R-24). One line
 // per repo is what lets `jq -s` aggregate a fleet without parsing stderr.
 type SyncRecord struct {
@@ -58,9 +71,15 @@ type SyncRecord struct {
 	OpsSkipped   int             `json:"ops_skipped"`
 	PathsChanged int             `json:"paths_changed"`
 	Created      bool            `json:"created"`
-	Warnings     []string        `json:"warnings,omitempty"`
-	Changes      []plan.Change   `json:"changes,omitempty"`
-	Error        string          `json:"error,omitempty"`
+	// DryRun marks a record produced under --dry-run. Without it a preview row
+	// and a row from a real rollout are byte-identical, so an operator holding
+	// results.jsonl cannot tell whether the fleet was changed or only modelled —
+	// and neither can the script that reads it. omitempty keeps the common case
+	// (a real run) at the same six unconditional keys as before.
+	DryRun   bool          `json:"dry_run,omitempty"`
+	Warnings []string      `json:"warnings,omitempty"`
+	Changes  []plan.Change `json:"changes,omitempty"`
+	Error    string        `json:"error,omitempty"`
 }
 
 // Sync statuses (R-24). "skipped" is distinct from "unchanged" so a policy
@@ -165,12 +184,52 @@ func locate(repoDir, ref, filePath string) (tree []string, path string, all []st
 	}
 	all = gittree.FindCodeownersPaths(tree)
 	if filePath != "" {
+		// Same containment guard as `sync` (see containedRelPath): --file is
+		// documented as repo-relative and is joined onto --repo everywhere, so a
+		// path that is absolute or climbs out with .. names a file this
+		// repository does not own. These verbs only ever READ through this path,
+		// so today the escape merely fails late and obscurely; the guard makes it
+		// fail at the argument, in the same exit-3 class it already lands in.
+		if err := containedRelPath(filePath); err != nil {
+			return nil, "", nil, &plan.InvalidError{Msg: err.Error()}
+		}
 		return tree, filePath, all, nil
 	}
 	if len(all) == 0 {
 		return nil, "", nil, &plan.InvalidError{Msg: "no CODEOWNERS file found in .github/, root, or docs/ at " + ref + " (use --file to specify one)"}
 	}
 	return tree, all[0], all, nil
+}
+
+// containedRelPath rejects a --file that names anything outside --repo.
+//
+// Every caller joins --file onto --repo, so the flag is only meaningful as a
+// repo-relative path. Two spellings break that, and both used to be accepted
+// silently:
+//
+//   - `--file ../ESCAPED/CODEOWNERS` addresses a sibling of the clone. Under
+//     `sync --create` that is not a read that fails but a WRITE: os.MkdirAll
+//     builds the tree and a CODEOWNERS lands outside the repository, reported as
+//     applied at exit 0. A fleet loop pointed at 100 clones writes 100 files
+//     into whatever happens to sit next to them.
+//   - `--file /tmp/x/ABS.txt` is not rejected but REINTERPRETED: filepath.Join
+//     makes it repo/tmp/x/ABS.txt, so the operator who typed an absolute path
+//     gets a lookalike tree inside the clone and a success record.
+//
+// Both are decidable from the argument alone — no repository is opened to know
+// them — so they belong to the exit-3 class in sync.go's terms.
+func containedRelPath(p string) error {
+	if p == "" {
+		return nil
+	}
+	if filepath.IsAbs(p) || strings.HasPrefix(p, "/") || filepath.VolumeName(p) != "" {
+		return fmt.Errorf("--file %q must be repo-relative: an absolute path is not silently reinterpreted, because joining it onto --repo would build a lookalike tree inside the repository and report success", p)
+	}
+	clean := filepath.Clean(filepath.FromSlash(p))
+	if clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
+		return fmt.Errorf("--file %q escapes the repository: it resolves to %q, outside --repo — with --create the tool would create the directories and write a CODEOWNERS there", p, filepath.ToSlash(clean))
+	}
+	return nil
 }
 
 type multiFlag []string
@@ -191,13 +250,7 @@ func cmdPlan(args []string, stdout, stderr io.Writer) int {
 	maxSize := fs.Int("max-size", 3_000_000, "hard size cap in bytes (S-4)")
 	warnSize := fs.Int("warn-size", 2_500_000, "warn threshold in bytes (R-9)")
 	if err := fs.Parse(args); err != nil {
-		// `--help` is a request, not a broken invocation: returning ExitInvalid
-		// here made `plan -h` exit 3, which under the fleet contract reads as
-		// "the policy is broken, halt the run".
-		if errors.Is(err, flag.ErrHelp) {
-			return ExitOK
-		}
-		return ExitInvalid
+		return flagParseCode(err)
 	}
 	if len(opSpecs) == 0 {
 		fmt.Fprintln(stderr, "error: at least one --op is required")
@@ -244,13 +297,7 @@ func cmdApply(args []string, stdout, stderr io.Writer) int {
 	planPath := fs.String("plan", "", "plan JSON produced by `plan`")
 	repo := fs.String("repo", "", "path to local git repository (default: plan's repo)")
 	if err := fs.Parse(args); err != nil {
-		// `--help` is a request, not a broken invocation: returning ExitInvalid
-		// here made `plan -h` exit 3, which under the fleet contract reads as
-		// "the policy is broken, halt the run".
-		if errors.Is(err, flag.ErrHelp) {
-			return ExitOK
-		}
-		return ExitInvalid
+		return flagParseCode(err)
 	}
 	if *planPath == "" {
 		fmt.Fprintln(stderr, "error: --plan is required")
@@ -284,13 +331,7 @@ func cmdSnapshot(args []string, stdout, stderr io.Writer) int {
 	filePath := fs.String("file", "", "CODEOWNERS path override")
 	out := fs.String("out", "", "write snapshot JSON here (default stdout)")
 	if err := fs.Parse(args); err != nil {
-		// `--help` is a request, not a broken invocation: returning ExitInvalid
-		// here made `plan -h` exit 3, which under the fleet contract reads as
-		// "the policy is broken, halt the run".
-		if errors.Is(err, flag.ErrHelp) {
-			return ExitOK
-		}
-		return ExitInvalid
+		return flagParseCode(err)
 	}
 	tree, coPath, _, err := locate(*repo, *branch, *filePath)
 	if err != nil {
@@ -327,13 +368,7 @@ func cmdVerify(args []string, stdout, stderr io.Writer) int {
 	var scopes multiFlag
 	fs.Var(&scopes, "scope", "pattern where change is allowed (repeatable; none = assert no change)")
 	if err := fs.Parse(args); err != nil {
-		// `--help` is a request, not a broken invocation: returning ExitInvalid
-		// here made `plan -h` exit 3, which under the fleet contract reads as
-		// "the policy is broken, halt the run".
-		if errors.Is(err, flag.ErrHelp) {
-			return ExitOK
-		}
-		return ExitInvalid
+		return flagParseCode(err)
 	}
 	if *beforePath == "" || *afterPath == "" {
 		fmt.Fprintln(stderr, "error: --before and --after are required")
@@ -379,13 +414,7 @@ func cmdAudit(args []string, stdout, stderr io.Writer) int {
 	cacheDir := fs.String("cache-dir", "", "disk cache directory (R-15); empty = memory only")
 	cacheTTL := fs.Duration("cache-ttl", 24*time.Hour, "disk cache TTL")
 	if err := fs.Parse(args); err != nil {
-		// `--help` is a request, not a broken invocation: returning ExitInvalid
-		// here made `plan -h` exit 3, which under the fleet contract reads as
-		// "the policy is broken, halt the run".
-		if errors.Is(err, flag.ErrHelp) {
-			return ExitOK
-		}
-		return ExitInvalid
+		return flagParseCode(err)
 	}
 
 	tree, coPath, all, err := locate(*repo, *branch, *filePath)

@@ -391,6 +391,97 @@ DEFAULT on_zero_match=require is exit 2, not 3. Whether a path exists is the
 most repo-specific fact there is; revision 1 mapped it to 3 and a policy
 naming /services/api/ killed the fleet on the first repo that lacked it.
 
+### `TestHardening_DryRunRecordSaysSoAndSummaryAgrees`
+
+Review finding: a --dry-run record was byte-identical to a record from a real
+rollout, and the markdown summary contradicted itself.
+
+Nothing in results.jsonl said "this was a preview", so an operator (or a
+script) holding a file of records could not tell a modelled fleet from a
+changed one — and the two are collected by the same `>> results.jsonl` line.
+The PR body was worse than ambiguous: it claimed "a new CODEOWNERS file was
+written" and then, three lines down, "nothing was written".
+
+### `TestHardening_FileArgumentIsContainedByTheRepo`
+
+Review finding (F2, security): `--file` was not contained by `--repo`, so
+`sync --create` wrote a CODEOWNERS OUTSIDE the repository.
+
+`--file ../ESCAPED/CODEOWNERS --create` exited 0 having created the
+directories and the file next to the clone; an absolute `--file /tmp/x/ABS`
+was not rejected but reinterpreted as repo-relative, building a garbage tree
+inside the clone and reporting success. Both hurt the operator running the
+fleet loop over 100 checkouts: one typo writes 100 files into whatever sits
+beside them (or 100 junk trees inside them), each one reported applied. The
+verdict depends on nothing but the argument, so it is exit 3 — the class that
+halts at repo 0 rather than working through the fleet.
+
+### `TestHardening_NonHeadBranchMayNotWrite`
+
+Review finding (F4): `--branch REF` proved the change against REF's tree and
+then wrote the working tree of whatever was checked out.
+
+On a clone standing on main, `sync --branch old` resolved every scope against
+old's tree, proved INV-2 there, and wrote main's file — exit 0, "applied",
+carrying a rule that is dead where it landed and justified by a tree nobody
+wrote to. sync.go already refused --create for exactly this reason; the
+argument never depended on the file being new. Writing is refused (exit 2)
+rather than silently downgraded to a dry run: an implied dry run would exit 0
+having written nothing, which under this contract reads as "converged", and a
+fleet of 100 silently unchanged repos with 100 green rows is worse than the
+bug. --dry-run still previews, and `plan` still targets another ref.
+
+### `TestHardening_RefusedWriteRecordCountsNothing`
+
+Review finding (F5): a refused WRITE left an applied-looking record.
+
+When the write itself failed, sync.go set status/error and cleared `created`
+but left ops, ops_applied, paths_changed and the changes array exactly as the
+planner produced them. The row then said a repo whose CODEOWNERS is
+byte-for-byte unchanged had applied N ops and changed M paths, so the
+README's `jq '[.[].ops_applied] | add'` overcounted the rollout by precisely
+the repos where nothing was written — the operator reads a total that
+includes the failures and believes more of the fleet moved than did.
+
+### `TestHardening_RepoMustBeTheRepositoryRoot`
+
+Review finding (F3): `--repo` pointing BELOW a repository root wrote a
+CODEOWNERS that git will never read, and called it applied.
+
+gittree.ListTracked runs `git -C <repo>`, and git walks UP to the enclosing
+repository rather than refusing: pointed at rK/sub it answers with rK's tree
+minus the `sub/` prefix. Nothing then looks wrong from inside — the scopes
+match, the plan is proven, the write succeeds — and the run reports
+created:true, status "applied", exit 0. What it produced is
+rK/sub/.github/CODEOWNERS, and GitHub loads only the CODEOWNERS at the
+repository ROOT (or its .github/ or docs/), so the file governs nothing;
+worse, the rules inside it are anchored at that root, where `/services/api/`
+names a directory that does not exist. The repository's real CODEOWNERS, if
+it has one, is never even read, because discovery looked below it.
+
+A fleet whose clone layout carries one extra directory level
+(…/clones/<repo>/checkout is a common one) writes 100 dead files and reports
+100 successes: the exact "reported applied, dead on arrival" outcome this
+verb exists to prevent. Repo-specific, so exit 2 — recorded, and the loop
+moves on to the next clone.
+
+### `TestHardening_SinkFailureNeverReportsAConvergedRepoAsFailed`
+
+Review finding (F1): a CODEOWNERS write that LANDED was reported as a failed
+repo, with no record emitted at all.
+
+--out was written before stdout and the first sink error became the exit
+code, so `--out` pointing into a directory that does not exist turned a
+converged repo into exit 2 with an empty stdout. The fleet script's
+`>> results.jsonl` collected nothing for that repo — so the row an operator
+would use to see the change is missing precisely where a change happened —
+and the `2)` arm filed an already-correct repo under `needs-human`. At 100
+repos with a mistyped `--out` directory that is 100 real edits reported as
+100 failures, with no record of any of them.
+
+The record on stdout is the durable trace and goes first, unconditionally; a
+sink that cannot be written is a warning on stderr and nothing more.
+
 ### `TestR19_AddOwnerTwiceByteIdentical`
 
 SPEC R-19 (INV-4): add_owner run twice is byte-identical. A second append of
@@ -2399,4 +2490,4 @@ DIFFERENT states; transitioning between them is a real ownership change.
 
 ---
 
-287 documented test cases across 12 packages.
+293 documented test cases across 12 packages.

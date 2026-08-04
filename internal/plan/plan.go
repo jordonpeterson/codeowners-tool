@@ -309,6 +309,7 @@ func Build(content []byte, tree []string, opList []ops.Op, opts Options) (*Plan,
 			batchDeclares = append(batchDeclares, op.Scope)
 		}
 	}
+	batch := newDeclareBatch(batchDeclares)
 	var declares []*declareCheck
 	for i, op := range opList {
 		mark := len(pl.Changes)
@@ -318,7 +319,7 @@ func Build(content []byte, tree []string, opList []ops.Op, opts Options) (*Plan,
 			// R-21: a skipped op changes nothing and does not stop the rest of
 			// the batch from applying.
 		case declared[i]:
-			err = synthDeclare(f, op, batchDeclares, &declares, pl)
+			err = synthDeclare(f, op, batch, &declares, pl)
 		default:
 			switch op.Kind {
 			case ops.AddOwner:
@@ -373,7 +374,7 @@ func Build(content []byte, tree []string, opList []ops.Op, opts Options) (*Plan,
 	// nothing, so INV-1 came out true without a single statement having been
 	// made about the line just written — precisely the case a reviewer most
 	// needs told. Prove it structurally instead, or refuse.
-	if err := proveDeclares(file.Parse(afterBytes), declares, batchDeclares, pl); err != nil {
+	if err := proveDeclares(file.Parse(afterBytes), declares, batch, pl); err != nil {
 		return nil, err
 	}
 

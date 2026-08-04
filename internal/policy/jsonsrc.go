@@ -54,7 +54,6 @@ type jsonValue struct {
 	raw  string // exact source text of the value, for echoing it back verbatim
 	str  string // kString
 	num  json.Number
-	b    bool
 	// members is in source order. Duplicates are rejected before anything reads
 	// this, so first-wins here is never observable.
 	members []*member
@@ -192,7 +191,10 @@ func (s *scanner) value() (*jsonValue, error) {
 	case json.Number:
 		v.kind, v.num = kNumber, t
 	case bool:
-		v.kind, v.b = kBool, t
+		// The value itself is never read: describe echoes booleans from raw,
+		// and no policy field is a boolean, so the kind alone carries the
+		// rejection.
+		v.kind = kBool
 	case nil:
 		v.kind = kNull
 	}

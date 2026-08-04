@@ -1,12 +1,14 @@
 package cli
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -33,12 +35,6 @@ import (
 // Without this line, the operator whose fleet run halted at repo 0 has no reason
 // not to retry the same policy against the other 99 clones.
 const policyGuidance = "this is a policy error — it will fail identically on every repo; fix the policy, do not retry"
-
-// syncCodeownersLocations is S-8's search order, used for the WORKING-TREE
-// fallback (D5). gittree owns the same list for the tracked tree; it is repeated
-// rather than exported because the two lookups answer different questions —
-// "what governs at this ref" versus "what is on disk right now".
-var syncCodeownersLocations = []string{".github/CODEOWNERS", "CODEOWNERS", "docs/CODEOWNERS"}
 
 // exit3 reports a member of the exit-3 class and returns its code.
 func exit3(stderr io.Writer, err error) int {
@@ -85,16 +81,6 @@ func opSource(opSpecs, policyPaths []string) (*policy.Policy, []ops.Op, error) {
 	}
 }
 
-// opLabel is D2: an op with no policy id is referred to by POSITION. `ops[N]` is
-// a display label computed here, never a value stored in Op.ID — storing it would
-// make an unnamed op indistinguishable from one deliberately named "ops[0]".
-func opLabel(op ops.Op, i int) string {
-	if op.ID != "" {
-		return op.ID
-	}
-	return fmt.Sprintf("ops[%d]", i)
-}
-
 // validateScopes rejects a scope the matcher cannot compile — a property of the op
 // string alone, so it belongs to the exit-3 class and is settled before any repo
 // is opened. Draining it here is what lets everything plan.Build can still call
@@ -107,7 +93,7 @@ func validateScopes(list []ops.Op) error {
 			continue
 		}
 		if _, err := pattern.Compile(op.Scope); err != nil {
-			return fmt.Errorf("%s: invalid scope %q: %v", opLabel(op, i), op.Scope, err)
+			return fmt.Errorf("%s: invalid scope %q: %v", policy.OpLabel(op.ID, i), op.Scope, err)
 		}
 	}
 	return nil
@@ -141,12 +127,7 @@ func cmdSync(args []string, stdout, stderr io.Writer) int {
 	out := fs.String("out", "", "write the JSON record here (always JSON, whatever --format says)")
 	summaryOut := fs.String("summary-out", "", "write a markdown PR body here")
 	if err := fs.Parse(args); err != nil {
-		// A help request is not a broken policy. Without this arm `sync --help`
-		// exits 3, which under the documented fleet script means "halt the run".
-		if errors.Is(err, flag.ErrHelp) {
-			return ExitOK
-		}
-		return ExitInvalid
+		return flagParseCode(err)
 	}
 
 	if *format != "text" && *format != "json" {
@@ -158,8 +139,18 @@ func cmdSync(args []string, stdout, stderr io.Writer) int {
 	if *onEmpty != "" && len(policyPaths) > 0 {
 		return exit3(stderr, errors.New("--on-empty is not allowed with --policy: set \"on_empty\" in the policy file instead, or the artifact in git is not the policy that ran (R-20)"))
 	}
-	if *create && *branch != "HEAD" {
-		return exit3(stderr, fmt.Errorf("--create cannot be combined with --branch %q: there is nothing to create a file \"at\" on a ref you are not standing on, and writing it into the working tree instead would be the wrong file in the wrong place (R-23)", *branch))
+	// A non-HEAD --branch may not write — checkBranchIsWritable enforces that
+	// for creates and edits alike, by comparing RESOLVED COMMITS rather than
+	// the literal string "HEAD". Comparing strings rejected `--branch main` on
+	// a clone already standing on main: a completely ordinary fleet
+	// invocation, and being argument-shaped it exited 3, halting the whole
+	// rollout at repo 0 over an argument that was never wrong (R-23).
+	// --file is joined onto --repo by everything below, so it is only meaningful
+	// as a repo-relative path. Argument-only, repo-independent, hence exit 3 —
+	// and it is checked BEFORE the repository is opened, because with --create
+	// the write happens outside the repository the moment we get that far.
+	if err := containedRelPath(*filePath); err != nil {
+		return exit3(stderr, err)
 	}
 	pol, opList, err := opSource(opSpecs, policyPaths)
 	if err != nil {
@@ -190,10 +181,7 @@ func cmdSync(args []string, stdout, stderr io.Writer) int {
 	for _, w := range rec.Warnings {
 		fmt.Fprintln(stderr, "warning:", w)
 	}
-	if err := emitRecord(rec, run, *format, *out, *summaryOut, stdout); err != nil {
-		fmt.Fprintln(stderr, "error:", err)
-		return ExitRefused
-	}
+	emitRecord(rec, run, *format, *out, *summaryOut, stdout, stderr)
 	return code
 }
 
@@ -201,7 +189,7 @@ func cmdSync(args []string, stdout, stderr io.Writer) int {
 // 0 and 2 — every remaining failure is a fact about THIS repo, and a fleet script
 // records it and steps to the next clone.
 func (r *syncRun) execute() (SyncRecord, int) {
-	rec := SyncRecord{Repo: r.repoArg}
+	rec := SyncRecord{Repo: r.repoArg, DryRun: r.dryRun}
 
 	tree, err := gittree.ListTracked(r.repoArg, r.branch)
 	if err != nil {
@@ -210,6 +198,22 @@ func (r *syncRun) execute() (SyncRecord, int) {
 		// operator separates "12 awkward CODEOWNERS files" from "12 clones that
 		// failed and were never synced".
 		rec.Status = StatusError
+		rec.Error = err.Error()
+		return rec, ExitRefused
+	}
+
+	// Both guards below are refusals, not errors: the repository was read
+	// successfully and the tool is declining to write into it. Both are also
+	// facts about THIS clone — the next one may be laid out differently, or be
+	// checked out on the ref that was asked for — so both are exit 2, and a
+	// fleet loop records them and steps to the next repo.
+	if err := r.checkRepoRoot(); err != nil {
+		rec.Status = StatusRefused
+		rec.Error = err.Error()
+		return rec, ExitRefused
+	}
+	if err := r.checkBranchIsWritable(); err != nil {
+		rec.Status = StatusRefused
 		rec.Error = err.Error()
 		return rec, ExitRefused
 	}
@@ -266,6 +270,24 @@ func (r *syncRun) execute() (SyncRecord, int) {
 			rec.Status = StatusRefused
 			rec.Error = err.Error()
 			rec.Created = false
+			// Nothing reached disk, so the record must not read like a run that
+			// changed something. Leaving ops_applied, paths_changed and the
+			// changes array populated made `jq '[.[].ops_applied] | add'`
+			// overcount the fleet by exactly the repos where the write FAILED —
+			// the rollout summary would claim ownership moved on repos whose
+			// CODEOWNERS is byte-for-byte what it was. Ops are rewritten the same
+			// way the already-converged path rewrites them (plan.Build), so the
+			// per-op array and the counts still agree with each other: an op that
+			// was skipped at planning time is still reported skipped, and no op is
+			// left claiming an edit that does not exist.
+			for i := range rec.Ops {
+				if rec.Ops[i].Status == "applied" {
+					rec.Ops[i].Status = "unchanged"
+				}
+			}
+			rec.OpsApplied = 0
+			rec.PathsChanged = 0
+			rec.Changes = nil
 			return rec, ExitRefused
 		}
 	}
@@ -274,6 +296,122 @@ func (r *syncRun) execute() (SyncRecord, int) {
 	// even with --create.
 	rec.Created = creating && !converged
 	return rec, ExitOK
+}
+
+// checkRepoRoot refuses a --repo that points BELOW a repository's root.
+//
+// gittree.ListTracked runs `git -C <repo>`, and git walks UP to the enclosing
+// repository rather than refusing: pointed at rK/sub it answers with rK's tree
+// minus the `sub/` prefix. Nothing looks wrong from inside — the scopes match
+// that tree, the plan is proven against it, the write succeeds — and the run
+// reports "applied", exit 0. What it produced is rK/sub/.github/CODEOWNERS, and
+// GitHub loads only the CODEOWNERS at the repository ROOT, so the file governs
+// nothing; the rules in it are anchored at that root, where the paths they name
+// do not exist; and rK's real CODEOWNERS was never read, because discovery
+// looked below it. A fleet whose clone layout carries one extra directory level
+// (…/clones/<repo>/checkout is a common one) writes 100 dead files and reports
+// 100 successes. That is precisely the "reported applied, dead on arrival"
+// outcome this whole verb exists to prevent, so it is refused.
+//
+// The comparison resolves symlinks on BOTH sides and never touches
+// SyncRecord.Repo: on macOS `t.TempDir()` hands out /var/folders/... while git
+// reports /private/var/folders/..., one directory under two names. Comparing
+// the raw strings would refuse every repo on a developer laptop while CI on
+// Linux stayed green; deriving .repo from the resolved path instead would break
+// every fleet lookup that keys on the argument (D6).
+func (r *syncRun) checkRepoRoot() error {
+	root, err := gitLine(r.repoArg, "rev-parse", "--show-toplevel")
+	if err != nil {
+		return err
+	}
+	same, err := sameDir(r.repoArg, root)
+	if err != nil {
+		return err
+	}
+	if !same {
+		return fmt.Errorf("--repo %s is inside the repository rooted at %s, not that root: git resolves the tracked tree against the root, so the CODEOWNERS this run would write is at a path GitHub never reads, while the file that does govern (%s) stays untouched; re-run with --repo %s",
+			r.repoArg, root, filepath.ToSlash(filepath.Join(root, gittree.CodeownersLocations[0])), root)
+	}
+	return nil
+}
+
+// checkBranchIsWritable refuses to WRITE while proving against another ref.
+//
+// --branch names the ref whose tracked tree governs resolution (S-7), and every
+// invariant this tool proves is proven against that tree. The bytes, though,
+// come from the working tree, and the working tree is whatever is checked out —
+// so `sync --branch old` on a clone standing on main proved INV-2 against old's
+// tree and then wrote main's file, exit 0, "applied": a rule that is dead where
+// it landed, justified by a tree nobody wrote to.
+//
+// Refusing is chosen over implying --dry-run. An implied dry-run exits 0 having
+// written nothing, which under the fleet contract in this file reads as "this
+// repo converged" — 100 repos silently unchanged and 100 green rows is a worse
+// failure than the one being fixed, and it is invisible until someone opens a
+// PR that is not there. --dry-run remains fully available; it just has to be
+// asked for. `plan` is unaffected: it emits an artifact and writes no
+// CODEOWNERS, so proving against another ref is exactly its job.
+//
+// Refs are compared by resolved commit, not by name, so the ordinary fleet
+// invocation `--branch main` on a clone checked out at main writes as it always
+// did — as does a tag or a second branch pointing at the same commit, where the
+// tree is the same tree.
+func (r *syncRun) checkBranchIsWritable() error {
+	if r.branch == "HEAD" || r.dryRun {
+		return nil
+	}
+	head, err := gitLine(r.repoArg, "rev-parse", "--verify", "HEAD^{commit}")
+	if err != nil {
+		return err
+	}
+	want, err := gitLine(r.repoArg, "rev-parse", "--verify", r.branch+"^{commit}")
+	if err != nil {
+		return err
+	}
+	if head != want {
+		return fmt.Errorf("--branch %s is not what this clone has checked out (HEAD is %s): sync proves the change against %s's tree but writes the working tree, so the rule would be justified by one tree and land in another; re-run with --dry-run to preview it, check out %s first, or use `plan` to produce an artifact for that ref (S-7)",
+			r.branch, head[:min(len(head), 12)], r.branch, r.branch)
+	}
+	return nil
+}
+
+// gitLine runs a git command that answers with a single line.
+func gitLine(repoDir string, args ...string) (string, error) {
+	cmd := exec.Command("git", append([]string{"-C", repoDir}, args...)...)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("git %s: %v: %s", strings.Join(args, " "), err, strings.TrimSpace(stderr.String()))
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+// sameDir reports whether two paths name one directory, symlinks resolved.
+func sameDir(a, b string) (bool, error) {
+	ra, err := resolveDir(a)
+	if err != nil {
+		return false, err
+	}
+	rb, err := resolveDir(b)
+	if err != nil {
+		return false, err
+	}
+	return ra == rb, nil
+}
+
+func resolveDir(p string) (string, error) {
+	abs, err := filepath.Abs(p)
+	if err != nil {
+		return "", err
+	}
+	// EvalSymlinks failing is not fatal here: the absolutized path is still a
+	// usable answer, and the only cost is a refusal that reads as a mismatch
+	// rather than as an I/O error.
+	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
+		return filepath.Clean(resolved), nil
+	}
+	return filepath.Clean(abs), nil
 }
 
 // statusForReadFailure separates the two ways reading a repo can fail. A missing
@@ -315,7 +453,7 @@ func (r *syncRun) governing(tree []string) (rel string, content []byte, creating
 		} else if onDisk := r.findOnDisk(); onDisk != "" {
 			rel = onDisk
 		} else {
-			rel = syncCodeownersLocations[0]
+			rel = gittree.CodeownersLocations[0]
 		}
 	}
 
@@ -335,7 +473,7 @@ func (r *syncRun) governing(tree []string) (rel string, content []byte, creating
 }
 
 func (r *syncRun) findOnDisk() string {
-	for _, cand := range syncCodeownersLocations {
+	for _, cand := range gittree.CodeownersLocations {
 		if _, err := os.Stat(filepath.Join(r.repoArg, filepath.FromSlash(cand))); err == nil {
 			return cand
 		}
@@ -396,28 +534,57 @@ func (r *syncRun) write(rel string, p *plan.Plan, creating bool) error {
 // default text format would leave a directory of prose, and the aggregation over
 // it fails on the first file, after the rollout has already written every
 // CODEOWNERS.
-func emitRecord(rec SyncRecord, r *syncRun, format, outPath, summaryPath string, stdout io.Writer) error {
+//
+// STDOUT GOES FIRST, AND UNCONDITIONALLY. The fleet script's `>> results.jsonl`
+// is fed from stdout and is the only durable trace of what happened to a repo;
+// it must not be lost because some other sink was unwritable. Writing the file
+// sinks first, returning on the first error and mapping that to ExitRefused,
+// cost exactly that: `--out /nonexistent-dir/rec.json` on a repo whose
+// CODEOWNERS had ALREADY been rewritten produced exit 2 and an empty stdout, so
+// the script filed a converged repo under `needs-human` and left no record of
+// the change it had just made. That is a reporting failure being reported as a
+// repository failure, which is the one lie this record exists to prevent.
+//
+// A sink failure is therefore a warning and never an exit code. The verdict
+// belongs to the repository: once the file on disk has converged, no unwritable
+// --out path makes that false, and inventing a refusal sends a human to inspect
+// a repo that is already correct. The warning goes to stderr immediately and
+// into rec.Warnings, so the sinks still downstream (the summary) carry it too.
+func emitRecord(rec SyncRecord, r *syncRun, format, outPath, summaryPath string, stdout, stderr io.Writer) {
 	b, err := json.Marshal(rec)
 	if err != nil {
-		return err
+		// Unreachable in practice; degrade to the human render rather than
+		// emitting nothing at all.
+		fmt.Fprintln(stderr, "warning: could not render the JSON record:", err)
 	}
 	line := append(b, '\n')
+
+	switch {
+	case err != nil && format == "json":
+		// Nothing valid to write; the warning above is the whole report.
+	case format == "json":
+		if _, werr := stdout.Write(line); werr != nil {
+			fmt.Fprintln(stderr, "warning: could not write the record to stdout:", werr)
+		}
+	default:
+		renderRecordText(stdout, rec)
+	}
+	if err != nil {
+		return
+	}
+
 	if outPath != "" {
-		if err := os.WriteFile(outPath, line, 0o644); err != nil {
-			return fmt.Errorf("write --out %s: %w", outPath, err)
+		if werr := os.WriteFile(outPath, line, 0o644); werr != nil {
+			w := fmt.Sprintf("write --out %s: %v (the record above is on stdout; this repo's outcome is unaffected)", outPath, werr)
+			fmt.Fprintln(stderr, "warning:", w)
+			rec.Warnings = append(rec.Warnings, w)
 		}
 	}
 	if summaryPath != "" {
-		if err := os.WriteFile(summaryPath, []byte(renderSummary(rec, r)), 0o644); err != nil {
-			return fmt.Errorf("write --summary-out %s: %w", summaryPath, err)
+		if werr := os.WriteFile(summaryPath, []byte(renderSummary(rec, r)), 0o644); werr != nil {
+			fmt.Fprintf(stderr, "warning: write --summary-out %s: %v (this repo's outcome is unaffected)\n", summaryPath, werr)
 		}
 	}
-	if format == "json" {
-		_, err = stdout.Write(line)
-		return err
-	}
-	renderRecordText(stdout, rec)
-	return nil
 }
 
 // renderRecordText is the human render. It is stdout's content under --format text and
@@ -427,10 +594,7 @@ func renderRecordText(w io.Writer, rec SyncRecord) {
 	fmt.Fprintf(w, "%s: %d op(s) applied, %d skipped; %d line change(s), %d path(s) change owners\n",
 		rec.Status, rec.OpsApplied, rec.OpsSkipped, len(rec.Changes), rec.PathsChanged)
 	for i, o := range rec.Ops {
-		label := o.ID
-		if label == "" {
-			label = fmt.Sprintf("ops[%d]", i)
-		}
+		label := policy.OpLabel(o.ID, i)
 		switch {
 		case o.Reason != "":
 			fmt.Fprintf(w, "  %s  %s: %s\n", label, o.Status, o.Reason)
@@ -465,8 +629,15 @@ func renderSummary(rec SyncRecord, r *syncRun) string {
 	fmt.Fprintf(&b, "- status: `%s`\n", rec.Status)
 	fmt.Fprintf(&b, "- ops applied: %d, skipped: %d\n", rec.OpsApplied, rec.OpsSkipped)
 	fmt.Fprintf(&b, "- paths whose owners change: %d\n", rec.PathsChanged)
-	if rec.Created {
+	// Under --dry-run `created` reports what the run WOULD do, so the past tense
+	// here contradicted the --dry-run bullet three lines below in the same PR
+	// body ("a new CODEOWNERS file was written" … "nothing was written"). A
+	// reviewer reading a preview cannot be left to guess which sentence is true.
+	if rec.Created && !r.dryRun {
 		fmt.Fprintf(&b, "- a new CODEOWNERS file was written (`--create`)\n")
+	}
+	if rec.Created && r.dryRun {
+		fmt.Fprintf(&b, "- a new CODEOWNERS file WOULD be created (`--create`)\n")
 	}
 	if r.dryRun {
 		fmt.Fprintf(&b, "- `--dry-run`: nothing was written; this is what the run would do\n")
@@ -478,10 +649,7 @@ func renderSummary(rec SyncRecord, r *syncRun) string {
 	if len(rec.Ops) > 0 {
 		b.WriteString("\n## Ops\n\n| id | op | status | proven | note |\n|---|---|---|---|---|\n")
 		for i, o := range rec.Ops {
-			id := o.ID
-			if id == "" {
-				id = fmt.Sprintf("ops[%d]", i)
-			}
+			id := policy.OpLabel(o.ID, i)
 			note := ""
 			if r.policy != nil {
 				note = r.policy.Notes[id]
@@ -497,11 +665,7 @@ func renderSummary(rec SyncRecord, r *syncRun) string {
 	var structural []string
 	for i, o := range rec.Ops {
 		if o.Proven == "structural" {
-			id := o.ID
-			if id == "" {
-				id = fmt.Sprintf("ops[%d]", i)
-			}
-			structural = append(structural, fmt.Sprintf("- `%s` — `%s`", id, o.Op))
+			structural = append(structural, fmt.Sprintf("- `%s` — `%s`", policy.OpLabel(o.ID, i), o.Op))
 		}
 	}
 	if len(structural) > 0 {
@@ -525,10 +689,7 @@ func cmdCheck(args []string, stdout, stderr io.Writer) int {
 	// reads no repository, and the shape of the verb is what enforces that (R-22).
 	// An unknown flag is a parse error, which is exit 3 below.
 	if err := fs.Parse(args); err != nil {
-		if errors.Is(err, flag.ErrHelp) {
-			return ExitOK
-		}
-		return ExitInvalid
+		return flagParseCode(err)
 	}
 	if *format != "text" && *format != "json" {
 		return exit3(stderr, fmt.Errorf("unknown --format %q; want text or json", *format))

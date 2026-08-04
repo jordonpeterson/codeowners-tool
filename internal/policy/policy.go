@@ -407,14 +407,9 @@ func (v *validator) op(p *Policy, i int, e *jsonValue) opInfo {
 		if p.Notes == nil {
 			p.Notes = make(map[string]string)
 		}
-		// Notes are keyed by id because that is how per-op results are keyed.
-		// An unnamed op falls back to the same `ops[N]` label the renderer uses,
-		// so a note never goes missing just because nobody named its op.
-		key := info.id
-		if key == "" {
-			key = fmt.Sprintf("ops[%d]", i)
-		}
-		p.Notes[key] = note
+		// Notes are keyed by the same label the renderer computes, so a note
+		// never goes missing just because nobody named its op.
+		p.Notes[OpLabel(info.id, i)] = note
 	}
 	return info
 }
@@ -531,6 +526,23 @@ func zeroMatchHint(bad string) string {
 		return fmt.Sprintf(" (revision 1 spelled this %q; it is now %q)", bad, to)
 	}
 	return hint(bad, zeroMatchValues)
+}
+
+// OpLabel is the name one op is filed and displayed under: its policy id, or
+// its POSITION when it has none (D2). `ops[N]` is a computed label and never a
+// value stored in Op.ID — storing it would make an unnamed op indistinguishable
+// from one deliberately named "ops[0]", keyed by a name that shifts the moment
+// somebody inserts an op above it.
+//
+// Both sides of the note lookup go through here. Notes are recorded under this
+// label at parse time and read back under it when the PR body is rendered, so a
+// second spelling of "ops[N]" anywhere would make notes silently stop appearing
+// while every test on either side still passed.
+func OpLabel(id string, index int) string {
+	if id != "" {
+		return id
+	}
+	return fmt.Sprintf("ops[%d]", index)
 }
 
 func contains(set []string, s string) bool {

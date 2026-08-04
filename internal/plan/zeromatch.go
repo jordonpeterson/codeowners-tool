@@ -53,7 +53,7 @@ type declareCheck struct {
 // report "applied", the diff would look right in review, and the declaration
 // would never take effect. A declaration appends at EOF, where nothing can
 // recapture it.
-func synthDeclare(f *file.File, op ops.Op, batch []string, checks *[]*declareCheck, pl *Plan) error {
+func synthDeclare(f *file.File, op ops.Op, batch *declareBatch, checks *[]*declareCheck, pl *Plan) error {
 	warnDuplicateDeclaredPatterns(f, op.Scope, pl)
 	rule, effective := lastRuleForScope(f, op.Scope, batch)
 
@@ -142,14 +142,9 @@ func declaredOwners(op ops.Op, base []string) []string {
 // ineffective — see declareShadow; this must agree with proveDeclares or the
 // second pass of a converged fleet repo would refuse the file the first pass
 // wrote (R-19).
-func lastRuleForScope(f *file.File, scope string, batch []string) (*file.Rule, bool) {
+func lastRuleForScope(f *file.File, scope string, batch *declareBatch) (*file.Rule, bool) {
 	rules := f.Rules()
-	idx := -1
-	for i, r := range rules {
-		if samePatternLanguage(scope, r.PatternText) {
-			idx = i
-		}
-	}
+	idx := lastRuleIndexForScope(rules, scope)
 	if idx < 0 {
 		return nil, false
 	}
@@ -159,6 +154,22 @@ func lastRuleForScope(f *file.File, scope string, batch []string) (*file.Rule, b
 		}
 	}
 	return rules[idx], true
+}
+
+// lastRuleIndexForScope is the LAST rule whose pattern is the same language as
+// scope, or -1. Last, not first: under last-match-wins that is the only rule
+// that governs the scope, so it is the one a declaration lands on and the one
+// INV-6 must prove. synthDeclare and proveDeclares must agree on it exactly, or
+// the pass that writes a line and the pass that proves it are talking about
+// different rules.
+func lastRuleIndexForScope(rules []*file.Rule, scope string) int {
+	idx := -1
+	for i, r := range rules {
+		if samePatternLanguage(scope, r.PatternText) {
+			idx = i
+		}
+	}
+	return idx
 }
 
 // proveDeclares is INV-6's structural proof, run over the RE-PARSED bytes for
@@ -176,18 +187,13 @@ func lastRuleForScope(f *file.File, scope string, batch []string) (*file.Rule, b
 // line gets. Obligation 3 has exactly one relaxation, and only for scopes THIS
 // SAME policy declares — see classifyDeclareShadow; a partial overlap there is
 // disclosed as a warning, total capture is still refused.
-func proveDeclares(after *file.File, checks []*declareCheck, batch []string, pl *Plan) error {
+func proveDeclares(after *file.File, checks []*declareCheck, batch *declareBatch, pl *Plan) error {
 	if len(checks) == 0 {
 		return nil
 	}
 	rules := after.Rules()
 	for _, c := range checks {
-		idx := -1
-		for i, r := range rules {
-			if samePatternLanguage(c.scope, r.PatternText) {
-				idx = i
-			}
-		}
+		idx := lastRuleIndexForScope(rules, c.scope)
 		if idx < 0 {
 			return &RefusalError{Msg: fmt.Sprintf(
 				"refusing: the line written for scope %q does not read back as a rule for that pattern — "+
@@ -206,7 +212,7 @@ func proveDeclares(after *file.File, checks []*declareCheck, batch []string, pl 
 			case shadowPartial:
 				pl.addWarning(declareOverlapWarning(rules[idx], later, c.scope, witness))
 			default:
-				if declaredByBatch(later.PatternText, batch) {
+				if batch.declares(later.PatternText) {
 					return &RefusalError{Msg: fmt.Sprintf(
 						"refusing: rule %q on line %d is declared by this same policy, comes after the rule declared for %q, "+
 							"and no path can be shown to be governed by %q that %q does not also capture — the declaration would be "+
@@ -271,11 +277,11 @@ const (
 //
 // The witness is returned alongside the verdict so the disclosure can name a
 // concrete path the declared rule still governs.
-func classifyDeclareShadow(scope, later string, batch []string) (declareShadow, string) {
+func classifyDeclareShadow(scope, later string, batch *declareBatch) (declareShadow, string) {
 	if patternsProvablyDisjoint(scope, later) {
 		return shadowNone, ""
 	}
-	if !declaredByBatch(later, batch) {
+	if !batch.declares(later) {
 		return shadowFatal, ""
 	}
 	witness := pathOutside(scope, later)
@@ -285,18 +291,42 @@ func classifyDeclareShadow(scope, later string, batch []string) (declareShadow, 
 	return shadowPartial, witness
 }
 
-// declaredByBatch reports whether a rule pattern is one of the scopes this
-// batch declares. Matching by pattern LANGUAGE, not by line identity, is what
-// makes the answer the same on the pass that writes the line and on every pass
-// after it — a line-identity test would refuse on pass 2 the file pass 1 wrote,
-// and a fleet job with no fixed point is worse than one that refuses (R-19).
-func declaredByBatch(pat string, batch []string) bool {
-	for _, s := range batch {
+// declareBatch is the set of scopes one policy declares, with a memo over the
+// rule patterns it has been asked about.
+//
+// INV-6's third obligation asks "did this same policy declare that later rule?"
+// once per (declared scope, later rule) pair, and the answer does not depend on
+// which scope is asking. Each answer costs two pattern.Contains walks — tens of
+// microseconds — so recomputing it per scope makes the check quadratic in the
+// number of declares and linear in the size of the CODEOWNERS on top of that,
+// which a 40-declare policy over a large file feels directly.
+type declareBatch struct {
+	scopes []string
+	memo   map[string]bool
+}
+
+func newDeclareBatch(scopes []string) *declareBatch {
+	return &declareBatch{scopes: scopes, memo: make(map[string]bool, len(scopes))}
+}
+
+// declares reports whether a rule pattern is one of the scopes this batch
+// declares. Matching by pattern LANGUAGE, not by line identity, is what makes
+// the answer the same on the pass that writes the line and on every pass after
+// it — a line-identity test would refuse on pass 2 the file pass 1 wrote, and a
+// fleet job with no fixed point is worse than one that refuses (R-19).
+func (b *declareBatch) declares(pat string) bool {
+	if v, done := b.memo[pat]; done {
+		return v
+	}
+	v := false
+	for _, s := range b.scopes {
 		if samePatternLanguage(s, pat) {
-			return true
+			v = true
+			break
 		}
 	}
-	return false
+	b.memo[pat] = v
+	return v
 }
 
 // declareOverlapWarning is the disclosure that makes the relaxation above
@@ -518,18 +548,11 @@ func warnDuplicateDeclaredPatterns(f *file.File, scope string, pl *Plan) {
 			hits = append(hits, r)
 		}
 	}
-	for _, shadowed := range hits[:max0(len(hits)-1)] {
+	for _, shadowed := range hits[:max(len(hits)-1, 0)] {
 		pl.addWarning(fmt.Sprintf(
 			"line %d: rule %q is shadowed by line %d, which governs the same paths; declared scope %q was written to the effective rule only (R-7) — run `audit` to clean up duplicates",
 			shadowed.LineIndex+1, shadowed.PatternText, hits[len(hits)-1].LineIndex+1, scope))
 	}
-}
-
-func max0(n int) int {
-	if n < 0 {
-		return 0
-	}
-	return n
 }
 
 // opResultFor is R-24's per-op record. The fleet record is the only artifact of
