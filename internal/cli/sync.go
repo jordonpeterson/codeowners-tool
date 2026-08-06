@@ -124,8 +124,25 @@ func cmdSync(args []string, stdout, stderr io.Writer) int {
 	create := fs.Bool("create", false, "write .github/CODEOWNERS when the repo has none; never overwrites (R-23)")
 	dryRun := fs.Bool("dry-run", false, "change no CODEOWNERS; --out and --summary-out still emit")
 	format := fs.String("format", "text", "text|json — governs stdout only")
-	out := fs.String("out", "", "write the JSON record here (always JSON, whatever --format says)")
-	summaryOut := fs.String("summary-out", "", "write a markdown PR body here")
+	// --out and --summary-out are TRUSTED OPERATOR INPUT, and deliberately not
+	// contained to --repo the way --file and the discovered CODEOWNERS path are.
+	//
+	// The distinction is who chooses the path. --file is joined onto --repo and the
+	// governing path is discovered from the repository itself, so a committed
+	// symlink or a crafted argument lets someone with push access to any one clone
+	// steer a central fleet runner's WRITE — that is the threat containedRelPath
+	// and containedWritePath exist for. These two are typed by the person running
+	// the command, alongside the shell redirection they are equivalent to; a
+	// `--out` that could escape --repo is no more authority than the `>` already
+	// available on the same command line.
+	//
+	// Containing them would also break their only real uses, which are all outside
+	// the clone on purpose: a fleet loop collecting `--out records/$repo.json` into
+	// one directory, and `--summary-out "$GITHUB_STEP_SUMMARY"`. O_EXCL is rejected
+	// for the same reason — a fleet loop re-run against the same repos must
+	// overwrite last run's records, not fail on every one of them.
+	out := fs.String("out", "", "write the JSON record here (always JSON, whatever --format says); trusted operator path — overwritten, and not contained to --repo")
+	summaryOut := fs.String("summary-out", "", "write a markdown PR body here; trusted operator path — overwritten, and not contained to --repo")
 	if err := fs.Parse(args); err != nil {
 		return flagParseCode(err)
 	}
@@ -150,6 +167,12 @@ func cmdSync(args []string, stdout, stderr io.Writer) int {
 	// and it is checked BEFORE the repository is opened, because with --create
 	// the write happens outside the repository the moment we get that far.
 	if err := containedRelPath(*filePath); err != nil {
+		return exit3(stderr, err)
+	}
+	// Also argument-only, also repo-independent, hence also exit 3 — and checked
+	// here rather than left to gittree so a fleet run halts on the policy error it
+	// is, at repo 0, instead of recording an identical exit-2 refusal 100 times.
+	if err := gittree.ValidateRef(*branch); err != nil {
 		return exit3(stderr, err)
 	}
 	pol, opList, err := opSource(opSpecs, policyPaths)
@@ -221,6 +244,18 @@ func (r *syncRun) execute() (SyncRecord, int) {
 	rel, content, creating, err := r.governing(tree)
 	if err != nil {
 		rec.Status = statusForReadFailure(err)
+		rec.Error = err.Error()
+		return rec, ExitRefused
+	}
+
+	// Where the write would actually land, decided before anything is planned.
+	// The path came out of the repository itself — discovery reads the tracked
+	// tree — so a committed symlink chooses it, and containedWritePath is what
+	// keeps that choice inside the clone. Refusal, not error: the repo was read
+	// fine and the tool is declining to write into it, and it is a fact about
+	// THIS clone, so exit 2 and the fleet loop steps to the next one.
+	if err := containedWritePath(r.repoArg, filepath.Join(r.repoArg, filepath.FromSlash(rel))); err != nil {
+		rec.Status = StatusRefused
 		rec.Error = err.Error()
 		return rec, ExitRefused
 	}
@@ -360,11 +395,15 @@ func (r *syncRun) checkBranchIsWritable() error {
 	if r.branch == "HEAD" || r.dryRun {
 		return nil
 	}
-	head, err := gitLine(r.repoArg, "rev-parse", "--verify", "HEAD^{commit}")
+	// --end-of-options here, not just the ValidateRef guard in cmdSync: r.branch is
+	// concatenated with ^{commit} and handed to rev-parse positionally, and unlike
+	// ls-tree (see gittree.ValidateRef) rev-parse has no trailing `--` for
+	// --end-of-options to swallow, so it costs nothing to state it at the exec.
+	head, err := gitLine(r.repoArg, "rev-parse", "--verify", "--end-of-options", "HEAD^{commit}")
 	if err != nil {
 		return err
 	}
-	want, err := gitLine(r.repoArg, "rev-parse", "--verify", r.branch+"^{commit}")
+	want, err := gitLine(r.repoArg, "rev-parse", "--verify", "--end-of-options", r.branch+"^{commit}")
 	if err != nil {
 		return err
 	}
