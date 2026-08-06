@@ -150,27 +150,16 @@ func (c *Client) key(k string) string { return c.scope + ":" + k }
 
 // pathSeg encodes one value as exactly one URL path segment.
 //
-// Every path in this package is assembled from values that came out of a
-// CODEOWNERS file or off the command line, and concatenating them raw produced
-// wrong ANSWERS rather than a compromise — the client never writes and the token
-// is the caller's own. Wrong answers are the expensive kind here, because "the
-// audit said it was fine" is the product.
+// Paths here are assembled from CODEOWNERS tokens and command-line values. The
+// cost of concatenating them raw is wrong ANSWERS, not compromise — but "the
+// audit said it was fine" is the product. The owner grammar permits a dot, so
+// `@org/..` is a legal owner reaching TeamExists as the slug "..", and
+// GET /orgs/org/teams/.. normalizes — in Go's own ServeMux, in any proxy — to
+// GET /orgs/org, which answers 200 and reports a nonexistent team as valid.
 //
-// Two failures, both reachable:
-//
-//   - The owner grammar permits a dot, so `@org/..` is a legal owner and reaches
-//     TeamExists as the slug "..". GET /orgs/org/teams/.. is normalized — by Go's
-//     own ServeMux, by nginx, by any proxy in front of GHES — to GET /orgs/org,
-//     which answers 200 for any visible org. The client concludes the team exists
-//     and A-1 blesses an owner that can never be granted review.
-//   - A slug or login containing a slash silently becomes two segments, asking a
-//     different question of a different endpoint.
-//
-// url.PathEscape closes the second (it escapes / ? # and spaces) but not the
-// first: "." and ".." are legal path characters and it leaves them alone. A
-// segment made only of dots is therefore encoded by hand, which turns the
-// traversal into a plain 404 — the definitive negative that is the correct
-// answer for a team that does not exist.
+// url.PathEscape handles / ? # and spaces but leaves "." and ".." alone, so a
+// dot-only segment is encoded by hand. The traversal becomes a plain 404: the
+// correct definitive negative for a team that does not exist.
 func pathSeg(s string) string {
 	e := url.PathEscape(s)
 	if e != "" && strings.Trim(e, ".") == "" {
@@ -404,12 +393,10 @@ func (c *Client) TeamHasWrite(org, slug, owner, repo string) (bool, error) {
 func (c *Client) CodeownersErrors(owner, repo, ref string) ([]RemoteError, error) {
 	p := "/repos/" + pathSeg(owner) + "/" + pathSeg(repo) + "/codeowners/errors"
 	if ref != "" {
-		// ref is an operator-supplied --branch pasted straight into the query
-		// before this. A ref containing `&` or `=` — both legal in a refname —
-		// therefore appended PARAMETERS the caller never wrote to an endpoint
-		// whose parameters decide what comes back, and an ordinary ref containing
-		// a space failed to parse as a URL at all, so the lookup came back
-		// inconclusive for a branch that exists.
+		// Pasted raw before this: a ref containing `&` appended parameters nobody
+		// wrote to an endpoint whose parameters decide what comes back, and one
+		// containing a space failed to parse as a URL at all — an inconclusive
+		// result for a branch that exists.
 		p += "?" + url.Values{"ref": {ref}}.Encode()
 	}
 	status, body, err := c.get(p, "")

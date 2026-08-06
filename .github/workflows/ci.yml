@@ -58,21 +58,16 @@ jobs:
           git diff --exit-code docs/BEHAVIOR.md \
             || (echo "docs/BEHAVIOR.md is stale: run 'make docs' and commit the result" && exit 1)
 
-  # The differential fuzz against the vendored, unmodified hmarr/codeowners
-  # oracle is the strongest correctness evidence in the repository: the matcher
-  # is a port of that implementation, and this is what catches porting drift
-  # byte-for-byte. It was reachable only as `make diff-test` on someone's laptop,
-  # which means in practice it ran when somebody remembered.
+  # The strongest correctness evidence in the repository — the matcher is a port
+  # of hmarr/codeowners and this catches porting drift byte-for-byte — and until
+  # now it ran only when somebody remembered to type `make diff-test`.
   #
-  # It gets its own job rather than a step in `test` so it runs in parallel and
-  # adds nothing to the critical path: 500k cases take about 35 seconds, so there
-  # was no reason to run a reduced count.
-  #
-  # The seed is fixed deliberately. A gate that draws different inputs each run
-  # fails on PRs that changed nothing relevant, and a gate people re-run until it
-  # goes green is not a gate. The cost is that this covers one fixed region of the
-  # input space forever — `go run ./tools/difftest 500000 <seed>` is how you look
-  # elsewhere, and touching the matcher is when that is worth doing.
+  # Its own job, so it runs in parallel: 500k cases take ~35s, so there was no
+  # reason to run a reduced count. The seed is fixed because a gate that draws new
+  # inputs each run fails on PRs that changed nothing, and a gate people re-run
+  # until it goes green is not a gate. The cost is one fixed region of the input
+  # space forever; `go run ./tools/difftest 500000 <seed>` is how you look
+  # elsewhere, which is worth doing when touching the matcher.
   difftest:
     name: differential fuzz vs hmarr oracle
     runs-on: ubuntu-latest

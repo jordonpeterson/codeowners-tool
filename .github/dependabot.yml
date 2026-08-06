@@ -1,15 +1,11 @@
 version: 2
 
 updates:
-  # GitHub Actions only, and that is the point of this file.
-  #
-  # Every `uses:` in this repository is pinned to a 40-character commit SHA, and
-  # a test (tools/supplychain) fails the build if one is not. That closes the
-  # moved-tag problem and opens a staleness one: a SHA pin never picks up an
-  # upstream security fix on its own, and nothing else in the repository is
-  # watching for one. Dependabot understands SHA pins and raises a PR that moves
-  # the SHA and updates the trailing `# v4` comment with it, which is exactly the
-  # review this needs — a human reading a diff of one hash.
+  # Every `uses:` here is SHA-pinned, enforced by a test in tools/supplychain.
+  # That closes the moved-tag problem and opens a staleness one: a pin never picks
+  # up an upstream fix on its own. Dependabot understands SHA pins and raises a PR
+  # moving the hash and its trailing `# v4` comment — a diff of one hash, which is
+  # exactly the review this needs.
   - package-ecosystem: github-actions
     directory: /
     schedule:
@@ -20,10 +16,7 @@ updates:
       - dependencies
       - supply-chain
 
-  # There is deliberately NO gomod entry. This module has zero dependencies and
-  # no go.sum, which is a hard constraint rather than a coincidence: it is what
-  # makes the supply chain of the binary equal to the supply chain of the Go
-  # toolchain. Dependabot has nothing to update here, and an entry that can only
-  # ever act by touching go.mod is a standing invitation to land the first
-  # dependency without anyone deciding to. Adding one is a choice to make in a PR
-  # with a reason attached, not a default.
+  # NO gomod entry, deliberately. Zero dependencies and no go.sum is a hard
+  # constraint, not a coincidence — it makes the binary's supply chain equal to the
+  # Go toolchain's. An entry whose only possible action is touching go.mod is a
+  # standing invitation to land the first dependency without anyone deciding to.

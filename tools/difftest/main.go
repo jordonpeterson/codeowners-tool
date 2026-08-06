@@ -9,8 +9,7 @@
 // Usage: go run ./tools/difftest [iterations] [seed]
 //
 // The seed defaults to 1 so a given iteration count is reproducible. CI runs the
-// default on every PR; pass another when you are working on the matcher and want
-// input outside the region that gate already covers.
+// default on every PR; pass another to reach input outside that region.
 package main
 
 import (
@@ -65,16 +64,11 @@ func main() {
 			iters = n
 		}
 	}
-	// The seed defaults to 1, so `difftest N` is byte-for-byte reproducible and
-	// the PR gate either fails for everyone or for no one.
-	//
-	// It is settable because a fixed seed makes "more iterations" mean only a
-	// longer PREFIX of one sequence. Raising the count re-derives everything the
-	// gate already proved and adds cases from the same region; changing the seed
-	// is the only way to reach input the gate structurally cannot. That matters
-	// when someone edits the matcher, which is the point at which the fixed 500k
-	// stops being evidence about the parts of the space it never visits. The seed
-	// is printed with the result so any failure can be replayed exactly.
+	// Fixed by default so the PR gate fails for everyone or for no one. Settable
+	// because raising the case count alone only extends the same sequence —
+	// changing the seed is the only way to reach input that gate never visits,
+	// which is what matters when editing the matcher. Printed with the result so a
+	// failure replays exactly.
 	seed := int64(1)
 	if len(os.Args) > 2 {
 		if n, err := strconv.ParseInt(os.Args[2], 10, 64); err == nil {

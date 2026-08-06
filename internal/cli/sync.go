@@ -124,23 +124,17 @@ func cmdSync(args []string, stdout, stderr io.Writer) int {
 	create := fs.Bool("create", false, "write .github/CODEOWNERS when the repo has none; never overwrites (R-23)")
 	dryRun := fs.Bool("dry-run", false, "change no CODEOWNERS; --out and --summary-out still emit")
 	format := fs.String("format", "text", "text|json — governs stdout only")
-	// --out and --summary-out are TRUSTED OPERATOR INPUT, and deliberately not
-	// contained to --repo the way --file and the discovered CODEOWNERS path are.
+	// TRUSTED OPERATOR INPUT, deliberately not contained to --repo.
 	//
-	// The distinction is who chooses the path. --file is joined onto --repo and the
-	// governing path is discovered from the repository itself, so a committed
-	// symlink or a crafted argument lets someone with push access to any one clone
-	// steer a central fleet runner's WRITE — that is the threat containedRelPath
-	// and containedWritePath exist for. These two are typed by the person running
-	// the command, alongside the shell redirection they are equivalent to; a
-	// `--out` that could escape --repo is no more authority than the `>` already
-	// available on the same command line.
+	// What matters is who chooses the path. --file and the discovered CODEOWNERS
+	// path come from the REPOSITORY, so a committed symlink lets anyone with push
+	// access steer a fleet runner's write — that is what containedWritePath is for.
+	// These two are typed on the command line next to the `>` they replace.
 	//
-	// Containing them would also break their only real uses, which are all outside
-	// the clone on purpose: a fleet loop collecting `--out records/$repo.json` into
-	// one directory, and `--summary-out "$GITHUB_STEP_SUMMARY"`. O_EXCL is rejected
-	// for the same reason — a fleet loop re-run against the same repos must
-	// overwrite last run's records, not fail on every one of them.
+	// Containing them would also break their only real uses, all outside the clone
+	// on purpose: `--out records/$repo.json` and `--summary-out
+	// "$GITHUB_STEP_SUMMARY"`. No O_EXCL for the same reason — a re-run must
+	// overwrite last run's records, not fail on every repo.
 	out := fs.String("out", "", "write the JSON record here (always JSON, whatever --format says); trusted operator path — overwritten, and not contained to --repo")
 	summaryOut := fs.String("summary-out", "", "write a markdown PR body here; trusted operator path — overwritten, and not contained to --repo")
 	if err := fs.Parse(args); err != nil {
@@ -169,9 +163,9 @@ func cmdSync(args []string, stdout, stderr io.Writer) int {
 	if err := containedRelPath(*filePath); err != nil {
 		return exit3(stderr, err)
 	}
-	// Also argument-only, also repo-independent, hence also exit 3 — and checked
-	// here rather than left to gittree so a fleet run halts on the policy error it
-	// is, at repo 0, instead of recording an identical exit-2 refusal 100 times.
+	// Argument-only and repo-independent, hence exit 3 — checked here rather than
+	// left to gittree so a fleet run halts at repo 0 instead of recording the same
+	// exit-2 refusal 100 times.
 	if err := gittree.ValidateRef(*branch); err != nil {
 		return exit3(stderr, err)
 	}
@@ -395,10 +389,8 @@ func (r *syncRun) checkBranchIsWritable() error {
 	if r.branch == "HEAD" || r.dryRun {
 		return nil
 	}
-	// --end-of-options here, not just the ValidateRef guard in cmdSync: r.branch is
-	// concatenated with ^{commit} and handed to rev-parse positionally, and unlike
-	// ls-tree (see gittree.ValidateRef) rev-parse has no trailing `--` for
-	// --end-of-options to swallow, so it costs nothing to state it at the exec.
+	// --end-of-options on top of cmdSync's guard: rev-parse has no trailing `--`
+	// for it to swallow (unlike ls-tree — see gittree.ValidateRef), so it is free.
 	head, err := gitLine(r.repoArg, "rev-parse", "--verify", "--end-of-options", "HEAD^{commit}")
 	if err != nil {
 		return err

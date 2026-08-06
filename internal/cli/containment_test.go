@@ -156,14 +156,10 @@ func TestContainment_ApplyNeverWritesThroughASymlinkLeavingTheRepo(t *testing.T)
 	}
 }
 
-// `plan` writes no CODEOWNERS, so reading through an escaping symlink is not an
-// escape. It is still a lie in an artifact: the plan's `codeowners_path` names a
-// file outside the repository — one GitHub never reads, because it does not
-// follow a symlinked CODEOWNERS — and the plan is the thing a human reviews and
-// approves. Every downstream refusal (sync's, apply's) fires AFTER that review.
-//
-// Containment belongs at plan time for the same reason the tool refuses rather
-// than warns everywhere else: the artifact should never exist to be approved.
+// `plan` writes nothing, so reading through an escaping symlink is not an escape
+// — but the artifact it emits names a file outside the repository that GitHub
+// never reads, and a human approves that artifact before any downstream refusal
+// fires. It should never exist to be approved.
 func TestContainment_PlanRefusesToPlanThroughASymlinkLeavingTheRepo(t *testing.T) {
 	sym := symlinkRepo(t, ".github/CODEOWNERS", "../../VICTIM.txt", map[string]string{
 		"svc/a.go": "package svc\n",
@@ -186,12 +182,10 @@ func TestContainment_PlanRefusesToPlanThroughASymlinkLeavingTheRepo(t *testing.T
 	}
 }
 
-// With plan refusing, the plan→apply chain above stops early — so apply's own
-// containment needs a test that does not depend on plan producing the escape.
-//
-// This is the realistic shape anyway. A plan is reviewed in one place and applied
-// somewhere else entirely, possibly against a different clone via --repo, so the
-// bytes that reach `apply` are not necessarily the bytes `plan` emitted.
+// With plan refusing, the chain above stops early, so apply's containment needs a
+// test that does not depend on plan producing the escape. That is the realistic
+// shape anyway: a plan is reviewed in one place and applied in another, so the
+// bytes reaching `apply` are not necessarily the ones `plan` emitted.
 func TestContainment_ApplyRefusesAPlanWhosePathEscapesTheRepo(t *testing.T) {
 	repo := symlinkRepoless(t, map[string]string{
 		".github/CODEOWNERS": "/svc/ @org/old\n",
@@ -205,8 +199,7 @@ func TestContainment_ApplyRefusesAPlanWhosePathEscapesTheRepo(t *testing.T) {
 		t.Fatalf("building the baseline plan failed: exit %d: %s", code, errOut)
 	}
 
-	// Repoint the artifact at a file outside the clone, exactly as a tampered or
-	// hand-edited plan would.
+	// Repoint the artifact outside the clone, as a tampered plan would.
 	b, err := os.ReadFile(planPath)
 	if err != nil {
 		t.Fatal(err)

@@ -12,31 +12,16 @@ import (
 
 // ValidateRef rejects a ref that git would parse as one of its own options.
 //
-// Every ref this package receives is an operator-supplied --branch that reaches
-// git as a POSITIONAL argument, and git's parsers do not distinguish "the third
-// word on the command line" from "an option". It is reachable:
-// `--branch '--format=%(path)'` answers
-//
-//	fatal: --format can't be combined with other format-altering options
-//
-// which is ls-tree's OPTION parser talking, not its revision parser. Nothing here
-// is demonstrably exploitable — ls-tree's options reshape output, they do not
-// write files or open connections the way --upload-pack does on the commands that
-// take it — but the boundary as it stands is "whatever options the installed git
-// happens to have", which is not a boundary anyone can reason about, and it moves
-// with a version bump nobody reviewed.
-//
-// Rejecting a leading dash costs nothing a user could legitimately mean:
+// --branch reaches git as a POSITIONAL argument, so `--branch '--format=%(path)'`
+// lands in ls-tree's option parser ("--format can't be combined with other
+// format-altering options"). Refusing it costs nothing legitimate:
 // git-check-ref-format forbids a refname beginning with a dash, and no revision
-// expression (HEAD, main, @~2, v1.2.3, a SHA) starts with one either.
+// expression starts with one either.
 //
-// The alternative — `--end-of-options` — does not fit every call site here. On
-// ls-tree it is actively worse: `ls-tree ... --end-of-options <ref> --` makes the
-// trailing `--` a PATHSPEC rather than a separator, matching nothing, so the tree
-// comes back EMPTY and every scope silently resolves against a repository that
-// appears to have no files in it. A silent wrong answer is the one failure this
-// tool must not have, so ls-tree keeps its `--` and relies on this guard, and
-// --end-of-options is used only where the grammar leaves the separator alone.
+// --end-of-options is the general fix but NOT on ls-tree, where it makes the
+// trailing `--` a PATHSPEC rather than a separator: the tree then comes back
+// EMPTY and every scope resolves against a repository that appears to have no
+// files. ls-tree keeps its `--` and relies on this guard instead.
 func ValidateRef(ref string) error {
 	if ref == "" {
 		return fmt.Errorf("empty ref: pass a branch, tag, or commit (default HEAD)")
@@ -67,10 +52,8 @@ func ListTracked(repoDir, ref string) ([]string, error) {
 }
 
 // ReadFileAtRef reads a file's content from a ref without touching the
-// working tree.
-// cat-file's grammar has no rev/path separator to lose, so --end-of-options can
-// be used here as well as the guard — the ref is concatenated with the path, so
-// a dash-leading ref makes the whole argument dash-leading.
+// working tree. cat-file has no rev/path separator to lose, so --end-of-options
+// is safe here on top of the guard.
 func ReadFileAtRef(repoDir, ref, path string) ([]byte, error) {
 	if err := ValidateRef(ref); err != nil {
 		return nil, err

@@ -1,16 +1,8 @@
-# Ownership for codeowners-tool itself.
+# Ownership for codeowners-tool itself. Without this file the repo fails the
+# tool's own A-11 check ("the CODEOWNERS file itself has no owner").
 #
-# A CODEOWNERS tool whose own repository has no CODEOWNERS fails its own A-11
-# check ("the CODEOWNERS file itself has no owner — anyone with write access can
-# change ownership rules unreviewed"), which is a fair thing for a reviewer to
-# notice before trusting the tool's judgement about anyone else's repo.
-#
-# One rule, deliberately. This repository has a single maintainer, so narrower
-# rules would name the same owner and buy nothing — and every rule that matches
-# no tracked file is an A-4 finding, while every rule fully covered by a later
-# one is an A-6 finding. `*` matches every path including this file, which is
-# what A-11 asks for. Add narrower rules when there is a second owner to name.
-#
-# Verify with the tool itself:
-#     codeowners-tool audit
+# One rule, deliberately: a single maintainer means narrower rules would name the
+# same owner, and each would risk an A-4 (matches no file) or A-6 (fully shadowed)
+# finding. `*` covers every path including this one. Verify with `codeowners-tool
+# audit`; add narrower rules when there is a second owner to name.
 *   @jordonpeterson

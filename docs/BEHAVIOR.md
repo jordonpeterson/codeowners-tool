@@ -339,12 +339,10 @@ applied somewhere else entirely.
 
 ### `TestContainment_ApplyRefusesAPlanWhosePathEscapesTheRepo`
 
-With plan refusing, the plan→apply chain above stops early — so apply's own
-containment needs a test that does not depend on plan producing the escape.
-
-This is the realistic shape anyway. A plan is reviewed in one place and applied
-somewhere else entirely, possibly against a different clone via --repo, so the
-bytes that reach `apply` are not necessarily the bytes `plan` emitted.
+With plan refusing, the chain above stops early, so apply's containment needs a
+test that does not depend on plan producing the escape. That is the realistic
+shape anyway: a plan is reviewed in one place and applied in another, so the
+bytes reaching `apply` are not necessarily the ones `plan` emitted.
 
 ### `TestContainment_CreateNeverFollowsADanglingSymlinkOutOfTheRepo`
 
@@ -354,14 +352,10 @@ resolves to nothing, so O_EXCL succeeds, and the new file lands outside.
 
 ### `TestContainment_PlanRefusesToPlanThroughASymlinkLeavingTheRepo`
 
-`plan` writes no CODEOWNERS, so reading through an escaping symlink is not an
-escape. It is still a lie in an artifact: the plan's `codeowners_path` names a
-file outside the repository — one GitHub never reads, because it does not
-follow a symlinked CODEOWNERS — and the plan is the thing a human reviews and
-approves. Every downstream refusal (sync's, apply's) fires AFTER that review.
-
-Containment belongs at plan time for the same reason the tool refuses rather
-than warns everywhere else: the artifact should never exist to be approved.
+`plan` writes nothing, so reading through an escaping symlink is not an escape
+— but the artifact it emits names a file outside the repository that GitHub
+never reads, and a human approves that artifact before any downstream refusal
+fires. It should never exist to be approved.
 
 ### `TestContainment_SyncNeverWritesThroughASymlinkLeavingTheRepo`
 
@@ -1206,10 +1200,9 @@ A slug or login containing a slash must stay one segment, not become two.
 
 ### `TestURLEscaping_RefIsEscapedIntoTheQuery`
 
---branch/ref is interpolated straight into the query string, so a ref
-containing & or = does not describe a ref — it appends parameters the caller
-never wrote, against an endpoint whose other parameters govern what is
-returned.
+A ref interpolated straight into the query does not describe a ref: `&` appends
+parameters the caller never wrote, against an endpoint whose parameters govern
+what comes back.
 
 ### `TestTeamHasWrite`
 
@@ -1232,18 +1225,17 @@ A 404 on /users/{login} with a working token is a definitive negative.
 
 ### `TestRefGuard_ListTrackedRejectsARefThatGitWouldParseAsAnOption`
 
-A dash-leading ref must be refused by us, with our words, rather than handed to
-git's option parser to fail (or succeed) in whatever way that version happens to.
+Refused by us, with our words, rather than handed to git's option parser.
 
 ### `TestRefGuard_OrdinaryRefsStillResolve`
 
-The guard must not cost anything a user could legitimately want. Refs, tags,
-SHAs and revision expressions all still resolve.
+The guard must cost nothing legitimate: refs, tags, SHAs and revision
+expressions all still resolve.
 
 ### `TestRefGuard_ReadFileAtRefRejectsADashLeadingRef`
 
-The same guard on the blob read: `cat-file blob <ref>:<path>` concatenates the
-ref, so a dash-leading ref produces a dash-leading argument there too.
+Same guard on the blob read: `cat-file blob <ref>:<path>` concatenates the ref,
+so a dash-leading ref makes the whole argument dash-leading.
 
 ### `TestS7_BadRefErrors`
 

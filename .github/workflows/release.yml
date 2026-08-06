@@ -167,22 +167,18 @@ jobs:
     needs: release
     if: needs.release.outputs.published == 'true'
     runs-on: ubuntu-latest
-    # Everything this job does to THIS repository is read tools/gen-formula.sh.
-    # It writes only to the tap, and only with its own PAT. Without this block it
-    # would inherit the workflow-level contents: write — a job-level block
-    # REPLACES the workflow-level one rather than adding to it, so declaring one
-    # is the only way to give a permission back. That inherited token is standing
-    # blast radius: any step here, including the formula generator, would be able
-    # to rewrite releases in this repository.
+    # All this job does to THIS repository is read tools/gen-formula.sh; it writes
+    # only to the tap, with its own PAT. Without this block it inherits the
+    # workflow-level contents: write — a job-level block REPLACES the
+    # workflow-level one — and any step here could rewrite releases.
     permissions:
       contents: read # read tools/gen-formula.sh; the tap is written with TAP_TOKEN
     steps:
       - name: Checkout (for tools/gen-formula.sh)
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          # Leave no Actions token in .git/config: this job runs a shell script and
-          # a second git remote, and neither needs credentials for this repository
-          # sitting in a config file beside them.
+          # No Actions token in .git/config: this job runs a shell script and a
+          # second git remote, and neither needs credentials for this repository.
           persist-credentials: false
 
       - name: Update tap formula
@@ -197,13 +193,10 @@ jobs:
           fi
           curl -fsSL "https://github.com/jordonpeterson/codeowners-tool/releases/download/${TAG}/checksums.txt" -o checksums.txt
           # The token goes to gh's credential helper, never into a URL. Cloning
-          # from https://x-access-token:${TAP_TOKEN}@github.com/... wrote the PAT
-          # in cleartext into tap/.git/config, where it stayed for the rest of the
-          # job, and put it into the text of any git error that echoes the remote
-          # ("could not read from remote repository: https://x-access-token:ghp_…").
-          # Actions masks secrets in its own log lines, but this value has already
-          # been through a shell, and neither the runner's git config nor a
-          # third-party log shipper is masked at all.
+          # from https://x-access-token:TOKEN@github.com/... wrote the PAT in
+          # cleartext into tap/.git/config and into any git error echoing the
+          # remote. Actions masks secrets in its own log lines, but this value has
+          # been through a shell, and git's config is not masked at all.
           echo "${TAP_TOKEN}" | gh auth login --with-token
           gh auth setup-git
           git clone --depth 1 "https://github.com/jordonpeterson/homebrew-tap.git" tap

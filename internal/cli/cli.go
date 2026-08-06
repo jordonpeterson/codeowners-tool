@@ -373,10 +373,7 @@ func cmdPlan(args []string, stdout, stderr io.Writer) int {
 	branch := fs.String("branch", "HEAD", "ref whose tracked tree governs resolution (S-7)")
 	filePath := fs.String("file", "", "CODEOWNERS path override (repo-relative)")
 	onEmpty := fs.String("on-empty", "", "policy when remove_owner empties a set: error|inherit|unowned (R-6, no default)")
-	// Same class as sync's --out (see the note there): an artifact sink the
-	// operator names on the command line, equivalent to a shell redirect, and
-	// deliberately not contained to --repo — unlike --file and the discovered
-	// CODEOWNERS path, which the repository gets to choose.
+	// Same class as sync's --out; see the note there.
 	out := fs.String("out", "", "write plan JSON here (default stdout); trusted operator path — overwritten, and not contained to --repo")
 	maxSize := fs.Int("max-size", 3_000_000, "hard size cap in bytes (S-4)")
 	warnSize := fs.Int("warn-size", 2_500_000, "warn threshold in bytes (R-9)")
@@ -395,17 +392,11 @@ func cmdPlan(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		return errExit(err, stderr)
 	}
-	// `plan` writes no CODEOWNERS, so reading through an escaping symlink is not
-	// itself an escape — and the containment check here is not defending the write,
-	// which sync and apply each refuse on their own.
-	//
-	// What it defends is the ARTIFACT. A plan is the thing a human reads and
-	// approves, and a plan whose codeowners_path resolves outside the clone
-	// describes an edit to a file GitHub never reads: GitHub does not follow a
-	// symlinked CODEOWNERS, so the rules under review govern nothing. Every
-	// downstream refusal fires after that review has already happened. Deciding
-	// here means the approvable artifact never exists, and the operator learns at
-	// the verb they ran rather than at the one someone else runs later.
+	// Not defending the write — sync and apply each refuse on their own. This
+	// defends the ARTIFACT: a plan whose codeowners_path resolves outside the clone
+	// describes an edit to a file GitHub never reads (it does not follow a symlinked
+	// CODEOWNERS), and every downstream refusal fires after a human has already
+	// reviewed and approved it. Deciding here means it never exists to approve.
 	if err := containedWritePath(*repo, filepath.Join(*repo, filepath.FromSlash(coPath))); err != nil {
 		return errExit(err, stderr)
 	}

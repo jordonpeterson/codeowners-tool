@@ -43,16 +43,12 @@ ships Linux, macOS, and Windows builds for both amd64 and arm64.
 
 ### Verifying a download
 
-Two different questions, and only one of them is about the checksum.
+`checksums.txt` answers *"did these bytes arrive intact?"* — it ships on the same
+release from the same host, so it detects corruption, not tampering.
 
-`checksums.txt` answers **"did these bytes arrive intact?"** It ships on the same
-release as the archive and is fetched from the same host, so anyone who could rewrite
-the archive could rewrite the checksum in the same step — it detects corruption, not
-tampering.
-
-The **build-provenance attestation** answers **"was this built by this repository's
-release workflow?"** It is signed with a short-lived OIDC identity that only that
-workflow can obtain, so it survives a compromise of the release itself:
+The build-provenance attestation answers *"was this built by this repository's release
+workflow?"* It is signed with a short-lived OIDC identity only that workflow can
+obtain, so it survives a compromise of the release itself:
 
 ```sh
 gh attestation verify codeowners-tool_vX.Y.Z_darwin_arm64.tar.gz \
@@ -60,24 +56,22 @@ gh attestation verify codeowners-tool_vX.Y.Z_darwin_arm64.tar.gz \
   --signer-workflow jordonpeterson/codeowners-tool/.github/workflows/release.yml
 ```
 
-`install.sh` runs exactly that check when the [GitHub CLI](https://cli.github.com) is
-installed and signed in. **`gh` is not a prerequisite** — the whole point of
-`curl | sh` is a machine with nothing on it, and a hard requirement would just push
-people to hand-downloaded tarballs that get verified less. So the script warns loudly
-instead. Environments that can insist should:
+`install.sh` runs that check when the [GitHub CLI](https://cli.github.com) is
+installed and signed in. **`gh` is not a prerequisite** — the point of `curl | sh` is
+a machine with nothing on it, and requiring it would just push people to
+hand-downloaded tarballs that get verified less. Set `PROVENANCE=`:
 
-| `PROVENANCE=` | behavior |
+| | |
 |---|---|
-| `auto` (default) | verify when `gh` is available and signed in; warn loudly when it is not |
-| `require` | no verification, no install — use this in CI and on managed fleets |
+| `auto` (default) | verify when `gh` can; warn loudly when it cannot |
+| `require` | no verification, no install — for CI and managed fleets |
 | `skip` | do not attempt it |
 
-A provenance check that runs and *fails* always aborts the install, whatever the
-setting. Only the inability to run one degrades to a warning.
+A check that runs and *fails* aborts the install in every mode; only the inability to
+run one degrades to a warning.
 
-> Homebrew's `sha256` values are derived from `checksums.txt`, so `brew install`
-> inherits the weaker of the two guarantees. Verify the attestation directly if that
-> matters to you.
+> Homebrew derives its `sha256` from `checksums.txt`, so `brew install` inherits the
+> weaker guarantee. Verify the attestation directly if that matters to you.
 
 > **macOS note:** the binaries are not notarized, so a build downloaded through a
 > browser is quarantined by Gatekeeper. Clear it with

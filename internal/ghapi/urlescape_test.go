@@ -9,23 +9,20 @@ import (
 	"github.com/jordonpeterson/codeowners-tool/internal/ghapi"
 )
 
-// Every request path in this package is built by string concatenation from
-// values that came out of a CODEOWNERS file or off the command line.
+// Request paths here are built by concatenation from CODEOWNERS tokens and
+// command-line values.
 //
-// The owner token grammar permits a dot, so `@org/..` is a LEGAL owner as far as
-// the parser is concerned, and it reaches TeamExists as the slug "..". The
-// request then reads GET /orgs/org/teams/.. — and a path with a dot-dot segment
-// is normalized, by Go's own ServeMux, by nginx, by any proxy in front of GHES,
-// to GET /orgs/org. That endpoint answers 200 for any org the token can see, so
-// the client concludes the team EXISTS and A-1 raises nothing: a CODEOWNERS line
-// naming an owner that cannot possibly be granted review gets a clean audit.
+// The owner grammar permits a dot, so `@org/..` is a LEGAL owner reaching
+// TeamExists as the slug "..". GET /orgs/org/teams/.. is then normalized — by
+// Go's own ServeMux, by any proxy in front of GHES — to GET /orgs/org, which
+// answers 200 for any visible org. The client concludes the team EXISTS and A-1
+// blesses an owner that can never be granted review.
 //
-// This is a wrong answer, not a compromise — the client never writes, and the
-// token is the caller's own. But "the audit said it was fine" is the entire
-// product, so a silently wrong definitive answer is the expensive kind of bug.
+// A wrong answer, not a compromise: the client never writes and the token is the
+// caller's own. But "the audit said it was fine" is the product.
 //
-// recordingServer captures the exact request line the client emits, without a
-// ServeMux in the way: a mux would normalize the very thing under test.
+// recordingServer captures the exact request line, with no ServeMux in the way —
+// a mux would normalize the very thing under test.
 func recordingServer(t *testing.T, code int, body string) (*httptest.Server, *[]string) {
 	t.Helper()
 	var seen []string
@@ -59,7 +56,7 @@ func TestURLEscaping_PathSegmentsCannotTraverse(t *testing.T) {
 			for _, uri := range *seen {
 				for _, seg := range strings.Split(strings.SplitN(uri, "?", 2)[0], "/") {
 					if seg == ".." || seg == "." {
-						t.Errorf("request %q contains the traversable segment %q.\nAny normalizing proxy — or Go's own ServeMux — rewrites this to a shorter, EXISTING endpoint, which answers 200, and the client reports the owner as valid. Percent-encode path segments (url.PathEscape, plus the dot-only cases it leaves alone).", uri, seg)
+						t.Errorf("request %q contains the traversable segment %q.\nAny normalizing proxy rewrites this to a shorter, EXISTING endpoint, which answers 200, and the client reports the owner as valid.", uri, seg)
 					}
 				}
 			}
@@ -81,10 +78,9 @@ func TestURLEscaping_PathSegmentsCannotAddSegments(t *testing.T) {
 	}
 }
 
-// --branch/ref is interpolated straight into the query string, so a ref
-// containing & or = does not describe a ref — it appends parameters the caller
-// never wrote, against an endpoint whose other parameters govern what is
-// returned.
+// A ref interpolated straight into the query does not describe a ref: `&` appends
+// parameters the caller never wrote, against an endpoint whose parameters govern
+// what comes back.
 func TestURLEscaping_RefIsEscapedIntoTheQuery(t *testing.T) {
 	s, seen := recordingServer(t, 200, `{"errors":[]}`)
 	c := ghapi.New(s.URL, "tok", ghapi.NewMemCache())
@@ -103,8 +99,7 @@ func TestURLEscaping_RefIsEscapedIntoTheQuery(t *testing.T) {
 	if strings.Contains(q, " ") {
 		t.Errorf("request %q: an unescaped space in the query", got)
 	}
-	// And the ref must still arrive intact, or the escaping has simply broken the
-	// feature it was protecting.
+	// And it must still arrive intact, or the escaping broke what it protects.
 	r, err := http.NewRequest("GET", s.URL+got, nil)
 	if err != nil {
 		t.Fatalf("the client emitted a request line that will not parse: %q: %v", got, err)
