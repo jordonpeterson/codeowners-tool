@@ -41,6 +41,19 @@ var (
 	shaRe  = regexp.MustCompile(`^[0-9a-f]{40}$`)
 )
 
+// releaseWorkflow returns release.yml, failing clearly if it is not there.
+// Otherwise a rename fails every gate below with a message about the missing
+// property rather than the missing file.
+func releaseWorkflow(t *testing.T) string {
+	t.Helper()
+	files := workflowFiles(t)
+	body, ok := files["release.yml"]
+	if !ok {
+		t.Fatalf("release.yml not found; workflows present: %v", keys(files))
+	}
+	return body
+}
+
 func workflowFiles(t *testing.T) map[string]string {
 	t.Helper()
 	entries, err := os.ReadDir(workflowsDir)
@@ -95,11 +108,7 @@ func TestSupplyChain_ActionsArePinnedToACommitSHA(t *testing.T) {
 // of what it happened to upload. Any of build-provenance attestation, cosign, or a
 // detached signature over the checksums satisfies this.
 func TestSupplyChain_ReleaseIsSignedOrAttested(t *testing.T) {
-	files := workflowFiles(t)
-	body, ok := files["release.yml"]
-	if !ok {
-		t.Fatalf("release.yml not found; workflows present: %v", keys(files))
-	}
+	body := releaseWorkflow(t)
 	markers := []string{
 		"attest-build-provenance",
 		"attest-sbom",
@@ -131,7 +140,7 @@ The provenance action also needs id-token: write on the job.`, strings.Join(mark
 // the failure mode without it is a red release rather than a silent downgrade —
 // so it is worth asserting separately from the step itself.
 func TestSupplyChain_ReleaseJobCanMintAnOIDCToken(t *testing.T) {
-	body := workflowFiles(t)["release.yml"]
+	body := releaseWorkflow(t)
 	if !strings.Contains(body, "id-token") {
 		t.Errorf("release.yml declares no `id-token: write` permission, so keyless signing and build-provenance attestation cannot run")
 	}
@@ -141,7 +150,7 @@ func TestSupplyChain_ReleaseJobCanMintAnOIDCToken(t *testing.T) {
 // and no -X, and the CLI has no `version` verb, so a fleet cannot be asked which
 // build it is running — which makes both rollback and CVE response guesswork.
 func TestSupplyChain_ReleaseStampsAVersionIntoTheBinary(t *testing.T) {
-	body := workflowFiles(t)["release.yml"]
+	body := releaseWorkflow(t)
 	if !strings.Contains(body, "-X ") && !strings.Contains(body, "-X\t") {
 		t.Errorf("release.yml builds with -ldflags but never stamps a version via -X.\nWithout it `codeowners-tool version` cannot report the build, and an operator holding a binary cannot tell whether it is the one with a given fix.")
 	}
