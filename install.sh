@@ -6,17 +6,53 @@
 # Environment overrides:
 #   VERSION=v0.0.1   install a specific release (default: latest)
 #   BINDIR=~/.local/bin   install location (default: /usr/local/bin)
+#   PROVENANCE=auto|require|skip   build-provenance check (default: auto)
 #
 # Downloads the prebuilt binary for your OS/arch, verifies its SHA-256 against
-# the release checksums.txt, and installs it. Downloads via curl are not
-# quarantined by macOS Gatekeeper, so no notarization prompt.
+# the release checksums.txt AND its build provenance against the attestation
+# signed by this repository's release workflow, and installs it. Downloads via
+# curl are not quarantined by macOS Gatekeeper, so no notarization prompt.
 set -eu
 
 REPO="jordonpeterson/codeowners-tool"
 BIN="codeowners-tool"
+WORKFLOW=".github/workflows/release.yml"
 
 err() { echo "install.sh: $*" >&2; exit 1; }
 have() { command -v "$1" >/dev/null 2>&1; }
+
+# verify_provenance answers "was this archive built by THIS workflow in THIS
+# repository", which is the question no hash on the release can answer.
+#
+# A verification that RUNS and FAILS is always fatal, and is kept strictly apart
+# from the inability to run one at all (handled by the caller). Reading intent
+# out of gh's exit code is not possible — it exits nonzero for a forged
+# attestation, a missing one, and a flag it does not recognize alike — so the
+# only branch taken on the error text is the one for a gh too old to know
+# --signer-workflow. That is a missing FEATURE in the client, not a statement
+# about the artifact, and it degrades to the weaker check that still pins the
+# repository rather than to no check at all.
+verify_provenance() {
+  echo "Verifying build provenance..."
+  if out=$(gh attestation verify "$1" --repo "$REPO" \
+      --signer-workflow "$REPO/$WORKFLOW" 2>&1); then
+    echo "Provenance OK: built by $REPO's release workflow."
+    return 0
+  fi
+  case "$out" in
+  *"unknown flag"* | *"unknown shorthand"*)
+    if out=$(gh attestation verify "$1" --repo "$REPO" 2>&1); then
+      echo "Provenance OK: built in $REPO."
+      echo "Note: this gh is too old for --signer-workflow, so the archive is" >&2
+      echo "      pinned to the repository but not to the release workflow." >&2
+      echo "      Upgrade gh to check that too." >&2
+      return 0
+    fi
+    ;;
+  esac
+  printf '%s\n' "$out" >&2
+  err "BUILD PROVENANCE VERIFICATION FAILED for $2 — this archive does not carry a valid attestation from $REPO. Do not install it."
+}
 
 # --- detect platform ---
 os=$(uname -s | tr '[:upper:]' '[:lower:]')
@@ -66,6 +102,67 @@ else
 fi
 [ "$want" = "$got" ] || err "checksum mismatch for $asset (expected $want, got $got)"
 echo "Checksum OK."
+
+# --- verify build provenance ---
+# The checksum above proves the archive arrived intact. It proves nothing about
+# ORIGIN: checksums.txt is published on the same release, fetched from the same
+# host over the same channel, so whoever can write the release rewrites the
+# archive and its checksum in one step and "Checksum OK." still prints.
+#
+# The build-provenance attestation is the one thing on a release that a rewrite
+# cannot forge, because it is signed with a short-lived OIDC identity belonging
+# to this repository's release workflow — not with anything an attacker holding
+# a release-write token has.
+#
+# gh is deliberately NOT a prerequisite. The reason this script exists is
+# `curl | sh` on a machine with nothing on it — CI images, minimal containers, a
+# fresh laptop — and gh is absent on most of them. Requiring it would not make
+# those installs verified; it would make them fail, and the realistic answer to
+# a failing install is a hand-downloaded tarball, which is verified less than
+# what we have today. So the default verifies whenever it can and is loud when
+# it cannot, and the environments that can insist (CI, managed fleets) say so:
+#
+#   PROVENANCE=auto     verify when gh can; warn loudly when it cannot (default)
+#   PROVENANCE=require  no verification, no install
+#   PROVENANCE=skip     do not attempt it
+provenance="${PROVENANCE:-auto}"
+case "$provenance" in
+auto | require | skip) ;;
+*) err "PROVENANCE must be auto, require or skip (got '$provenance')" ;;
+esac
+
+if [ "$provenance" = skip ]; then
+  echo "Provenance check skipped (PROVENANCE=skip): the origin of this build is unverified." >&2
+else
+  # Why gh's availability is established BEFORE running it, rather than inferred
+  # from a failure afterwards: "no attestation exists for these bytes" and "this
+  # machine cannot check" must never collapse into one outcome. The first has to
+  # abort the install; the second must not.
+  cannot=""
+  if ! have gh; then
+    cannot="the GitHub CLI (gh) is not installed"
+  elif ! gh auth status >/dev/null 2>&1; then
+    cannot="gh is installed but not signed in (run: gh auth login)"
+  fi
+  if [ -n "$cannot" ]; then
+    if [ "$provenance" = require ]; then
+      err "PROVENANCE=require, but provenance cannot be checked: $cannot"
+    fi
+    cat >&2 <<EOF
+
+WARNING: build provenance was NOT verified — $cannot.
+  The checksum proves this archive arrived intact; it does NOT prove where it
+  came from, because checksums.txt ships on the same release from the same host.
+  To check origin, install the GitHub CLI and re-run, or verify by hand:
+      gh attestation verify <archive> --repo $REPO \\
+        --signer-workflow $REPO/$WORKFLOW
+  Set PROVENANCE=require to make this a hard failure instead.
+
+EOF
+  else
+    verify_provenance "$tmp/$asset" "$asset"
+  fi
+fi
 
 # --- extract & install ---
 tar -xzf "$tmp/$asset" -C "$tmp"

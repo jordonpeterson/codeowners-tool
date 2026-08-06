@@ -27,7 +27,7 @@ brew install jordonpeterson/tap/codeowners-tool
 ```
 
 **Install script** (macOS/Linux) — downloads the right prebuilt binary, verifies its
-checksum, and installs it:
+checksum *and its build provenance*, and installs it:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/jordonpeterson/codeowners-tool/main/install.sh | sh
@@ -38,8 +38,46 @@ location.
 
 **Direct download**: grab the archive for your platform from the
 [latest release](https://github.com/jordonpeterson/codeowners-tool/releases/latest),
-verify it against `checksums.txt`, extract, and put `codeowners-tool` on your `PATH`.
-Every release ships Linux, macOS, and Windows builds for both amd64 and arm64.
+verify it (below), extract, and put `codeowners-tool` on your `PATH`. Every release
+ships Linux, macOS, and Windows builds for both amd64 and arm64.
+
+### Verifying a download
+
+Two different questions, and only one of them is about the checksum.
+
+`checksums.txt` answers **"did these bytes arrive intact?"** It ships on the same
+release as the archive and is fetched from the same host, so anyone who could rewrite
+the archive could rewrite the checksum in the same step — it detects corruption, not
+tampering.
+
+The **build-provenance attestation** answers **"was this built by this repository's
+release workflow?"** It is signed with a short-lived OIDC identity that only that
+workflow can obtain, so it survives a compromise of the release itself:
+
+```sh
+gh attestation verify codeowners-tool_vX.Y.Z_darwin_arm64.tar.gz \
+  --repo jordonpeterson/codeowners-tool \
+  --signer-workflow jordonpeterson/codeowners-tool/.github/workflows/release.yml
+```
+
+`install.sh` runs exactly that check when the [GitHub CLI](https://cli.github.com) is
+installed and signed in. **`gh` is not a prerequisite** — the whole point of
+`curl | sh` is a machine with nothing on it, and a hard requirement would just push
+people to hand-downloaded tarballs that get verified less. So the script warns loudly
+instead. Environments that can insist should:
+
+| `PROVENANCE=` | behavior |
+|---|---|
+| `auto` (default) | verify when `gh` is available and signed in; warn loudly when it is not |
+| `require` | no verification, no install — use this in CI and on managed fleets |
+| `skip` | do not attempt it |
+
+A provenance check that runs and *fails* always aborts the install, whatever the
+setting. Only the inability to run one degrades to a warning.
+
+> Homebrew's `sha256` values are derived from `checksums.txt`, so `brew install`
+> inherits the weaker of the two guarantees. Verify the attestation directly if that
+> matters to you.
 
 > **macOS note:** the binaries are not notarized, so a build downloaded through a
 > browser is quarantined by Gatekeeper. Clear it with
