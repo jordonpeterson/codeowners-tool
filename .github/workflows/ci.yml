@@ -17,10 +17,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version-file: go.mod
           cache: true
@@ -39,10 +39,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version-file: go.mod
           cache: true
@@ -58,18 +58,49 @@ jobs:
           git diff --exit-code docs/BEHAVIOR.md \
             || (echo "docs/BEHAVIOR.md is stale: run 'make docs' and commit the result" && exit 1)
 
+  # The differential fuzz against the vendored, unmodified hmarr/codeowners
+  # oracle is the strongest correctness evidence in the repository: the matcher
+  # is a port of that implementation, and this is what catches porting drift
+  # byte-for-byte. It was reachable only as `make diff-test` on someone's laptop,
+  # which means in practice it ran when somebody remembered.
+  #
+  # It gets its own job rather than a step in `test` so it runs in parallel and
+  # adds nothing to the critical path: 500k cases take about 35 seconds, so there
+  # was no reason to run a reduced count.
+  #
+  # The seed is fixed deliberately. A gate that draws different inputs each run
+  # fails on PRs that changed nothing relevant, and a gate people re-run until it
+  # goes green is not a gate. The cost is that this covers one fixed region of the
+  # input space forever — `go run ./tools/difftest 500000 <seed>` is how you look
+  # elsewhere, and touching the matcher is when that is worth doing.
+  difftest:
+    name: differential fuzz vs hmarr oracle
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Differential fuzz (500k cases, fixed seed)
+        run: go run ./tools/difftest 500000
+
   lint:
     name: lint
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: ShellCheck scripts
         run: shellcheck install.sh tools/gen-formula.sh
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version-file: go.mod
 

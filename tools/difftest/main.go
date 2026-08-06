@@ -6,7 +6,11 @@
 // Known deliberate divergences (skipped): our Compile rejects "!" negation
 // and empty patterns.
 //
-// Usage: go run ./tools/difftest [iterations]
+// Usage: go run ./tools/difftest [iterations] [seed]
+//
+// The seed defaults to 1 so a given iteration count is reproducible. CI runs the
+// default on every PR; pass another when you are working on the matcher and want
+// input outside the region that gate already covers.
 package main
 
 import (
@@ -61,7 +65,23 @@ func main() {
 			iters = n
 		}
 	}
-	r := rand.New(rand.NewSource(1))
+	// The seed defaults to 1, so `difftest N` is byte-for-byte reproducible and
+	// the PR gate either fails for everyone or for no one.
+	//
+	// It is settable because a fixed seed makes "more iterations" mean only a
+	// longer PREFIX of one sequence. Raising the count re-derives everything the
+	// gate already proved and adds cases from the same region; changing the seed
+	// is the only way to reach input the gate structurally cannot. That matters
+	// when someone edits the matcher, which is the point at which the fixed 500k
+	// stops being evidence about the parts of the space it never visits. The seed
+	// is printed with the result so any failure can be replayed exactly.
+	seed := int64(1)
+	if len(os.Args) > 2 {
+		if n, err := strconv.ParseInt(os.Args[2], 10, 64); err == nil {
+			seed = n
+		}
+	}
+	r := rand.New(rand.NewSource(seed))
 	compared, skipped, mismatches := 0, 0, 0
 	for i := 0; i < iters; i++ {
 		pat := genPattern(r)
@@ -91,8 +111,8 @@ func main() {
 			}
 		}
 	}
-	fmt.Printf("differential fuzz vs hmarr/codeowners oracle: %d compared, %d skipped (compile-reject), %d mismatches\n",
-		compared, skipped, mismatches)
+	fmt.Printf("differential fuzz vs hmarr/codeowners oracle (seed %d): %d compared, %d skipped (compile-reject), %d mismatches\n",
+		seed, compared, skipped, mismatches)
 	if mismatches > 0 {
 		os.Exit(1)
 	}
