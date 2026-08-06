@@ -10,18 +10,13 @@ import (
 	"strings"
 )
 
-// ValidateRef rejects a ref that git would parse as one of its own options.
+// ValidateRef rejects a ref git would parse as one of its own options: --branch
+// arrives positionally, so `--branch '--format=…'` lands in ls-tree's option
+// parser. A refname cannot begin with a dash anyway.
 //
-// --branch reaches git as a POSITIONAL argument, so `--branch '--format=%(path)'`
-// lands in ls-tree's option parser ("--format can't be combined with other
-// format-altering options"). Refusing it costs nothing legitimate:
-// git-check-ref-format forbids a refname beginning with a dash, and no revision
-// expression starts with one either.
-//
-// --end-of-options is the general fix but NOT on ls-tree, where it makes the
-// trailing `--` a PATHSPEC rather than a separator: the tree then comes back
-// EMPTY and every scope resolves against a repository that appears to have no
-// files. ls-tree keeps its `--` and relies on this guard instead.
+// --end-of-options is NOT usable on ls-tree — it turns the trailing `--` into a
+// pathspec, so the tree comes back EMPTY and every scope resolves against a repo
+// that appears to have no files.
 func ValidateRef(ref string) error {
 	if ref == "" {
 		return fmt.Errorf("empty ref: pass a branch, tag, or commit (default HEAD)")
@@ -51,9 +46,8 @@ func ListTracked(repoDir, ref string) ([]string, error) {
 	return paths, nil
 }
 
-// ReadFileAtRef reads a file's content from a ref without touching the
-// working tree. cat-file has no rev/path separator to lose, so --end-of-options
-// is safe here on top of the guard.
+// ReadFileAtRef reads a file's content from a ref without touching the working
+// tree. cat-file has no separator to lose, so --end-of-options is safe here.
 func ReadFileAtRef(repoDir, ref, path string) ([]byte, error) {
 	if err := ValidateRef(ref); err != nil {
 		return nil, err

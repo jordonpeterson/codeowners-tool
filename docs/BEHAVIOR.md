@@ -339,10 +339,9 @@ applied somewhere else entirely.
 
 ### `TestContainment_ApplyRefusesAPlanWhosePathEscapesTheRepo`
 
-With plan refusing, the chain above stops early, so apply's containment needs a
-test that does not depend on plan producing the escape. That is the realistic
-shape anyway: a plan is reviewed in one place and applied in another, so the
-bytes reaching `apply` are not necessarily the ones `plan` emitted.
+With plan refusing, the chain above stops early — and a plan is reviewed in one
+place and applied in another, so the bytes reaching `apply` are not necessarily
+the ones `plan` emitted.
 
 ### `TestContainment_CreateNeverFollowsADanglingSymlinkOutOfTheRepo`
 
@@ -352,10 +351,8 @@ resolves to nothing, so O_EXCL succeeds, and the new file lands outside.
 
 ### `TestContainment_PlanRefusesToPlanThroughASymlinkLeavingTheRepo`
 
-`plan` writes nothing, so reading through an escaping symlink is not an escape
-— but the artifact it emits names a file outside the repository that GitHub
-never reads, and a human approves that artifact before any downstream refusal
-fires. It should never exist to be approved.
+`plan` writes nothing, so this is not an escape — but a human approves the
+artifact, and every downstream refusal fires after that.
 
 ### `TestContainment_SyncNeverWritesThroughASymlinkLeavingTheRepo`
 
@@ -1225,17 +1222,15 @@ A 404 on /users/{login} with a working token is a definitive negative.
 
 ### `TestRefGuard_ListTrackedRejectsARefThatGitWouldParseAsAnOption`
 
-Refused by us, with our words, rather than handed to git's option parser.
+Refused by us, rather than handed to git's option parser.
 
 ### `TestRefGuard_OrdinaryRefsStillResolve`
 
-The guard must cost nothing legitimate: refs, tags, SHAs and revision
-expressions all still resolve.
+The guard must cost nothing legitimate.
 
 ### `TestRefGuard_ReadFileAtRefRejectsADashLeadingRef`
 
-Same guard on the blob read: `cat-file blob <ref>:<path>` concatenates the ref,
-so a dash-leading ref makes the whole argument dash-leading.
+Same guard on the blob read, where the ref is concatenated with the path.
 
 ### `TestS7_BadRefErrors`
 

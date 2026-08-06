@@ -150,16 +150,10 @@ func (c *Client) key(k string) string { return c.scope + ":" + k }
 
 // pathSeg encodes one value as exactly one URL path segment.
 //
-// Paths here are assembled from CODEOWNERS tokens and command-line values. The
-// cost of concatenating them raw is wrong ANSWERS, not compromise — but "the
-// audit said it was fine" is the product. The owner grammar permits a dot, so
-// `@org/..` is a legal owner reaching TeamExists as the slug "..", and
-// GET /orgs/org/teams/.. normalizes — in Go's own ServeMux, in any proxy — to
-// GET /orgs/org, which answers 200 and reports a nonexistent team as valid.
-//
-// url.PathEscape handles / ? # and spaces but leaves "." and ".." alone, so a
-// dot-only segment is encoded by hand. The traversal becomes a plain 404: the
-// correct definitive negative for a team that does not exist.
+// `@org/..` is a legal owner, so TeamExists gets the slug ".." and
+// GET /orgs/org/teams/.. normalizes to GET /orgs/org — 200, and a nonexistent
+// team reads as valid. url.PathEscape leaves "." and ".." alone, hence the
+// dot-only case below.
 func pathSeg(s string) string {
 	e := url.PathEscape(s)
 	if e != "" && strings.Trim(e, ".") == "" {
@@ -393,10 +387,8 @@ func (c *Client) TeamHasWrite(org, slug, owner, repo string) (bool, error) {
 func (c *Client) CodeownersErrors(owner, repo, ref string) ([]RemoteError, error) {
 	p := "/repos/" + pathSeg(owner) + "/" + pathSeg(repo) + "/codeowners/errors"
 	if ref != "" {
-		// Pasted raw before this: a ref containing `&` appended parameters nobody
-		// wrote to an endpoint whose parameters decide what comes back, and one
-		// containing a space failed to parse as a URL at all — an inconclusive
-		// result for a branch that exists.
+		// Raw interpolation let a ref containing `&` append parameters nobody wrote,
+		// and one containing a space fail to parse as a URL at all.
 		p += "?" + url.Values{"ref": {ref}}.Encode()
 	}
 	status, body, err := c.get(p, "")

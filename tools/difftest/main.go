@@ -8,8 +8,8 @@
 //
 // Usage: go run ./tools/difftest [iterations] [seed]
 //
-// The seed defaults to 1 so a given iteration count is reproducible. CI runs the
-// default on every PR; pass another to reach input outside that region.
+// The seed defaults to 1, which is what CI runs; pass another to reach input
+// outside that region.
 package main
 
 import (
@@ -64,11 +64,9 @@ func main() {
 			iters = n
 		}
 	}
-	// Fixed by default so the PR gate fails for everyone or for no one. Settable
-	// because raising the case count alone only extends the same sequence —
-	// changing the seed is the only way to reach input that gate never visits,
-	// which is what matters when editing the matcher. Printed with the result so a
-	// failure replays exactly.
+	// Fixed by default so the PR gate fails for everyone or for no one. Raising the
+	// case count alone only extends the same sequence; a new seed is the only way
+	// to reach input that gate never visits.
 	seed := int64(1)
 	if len(os.Args) > 2 {
 		if n, err := strconv.ParseInt(os.Args[2], 10, 64); err == nil {

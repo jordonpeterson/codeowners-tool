@@ -156,10 +156,8 @@ func TestContainment_ApplyNeverWritesThroughASymlinkLeavingTheRepo(t *testing.T)
 	}
 }
 
-// `plan` writes nothing, so reading through an escaping symlink is not an escape
-// — but the artifact it emits names a file outside the repository that GitHub
-// never reads, and a human approves that artifact before any downstream refusal
-// fires. It should never exist to be approved.
+// `plan` writes nothing, so this is not an escape — but a human approves the
+// artifact, and every downstream refusal fires after that.
 func TestContainment_PlanRefusesToPlanThroughASymlinkLeavingTheRepo(t *testing.T) {
 	sym := symlinkRepo(t, ".github/CODEOWNERS", "../../VICTIM.txt", map[string]string{
 		"svc/a.go": "package svc\n",
@@ -182,10 +180,9 @@ func TestContainment_PlanRefusesToPlanThroughASymlinkLeavingTheRepo(t *testing.T
 	}
 }
 
-// With plan refusing, the chain above stops early, so apply's containment needs a
-// test that does not depend on plan producing the escape. That is the realistic
-// shape anyway: a plan is reviewed in one place and applied in another, so the
-// bytes reaching `apply` are not necessarily the ones `plan` emitted.
+// With plan refusing, the chain above stops early — and a plan is reviewed in one
+// place and applied in another, so the bytes reaching `apply` are not necessarily
+// the ones `plan` emitted.
 func TestContainment_ApplyRefusesAPlanWhosePathEscapesTheRepo(t *testing.T) {
 	repo := symlinkRepoless(t, map[string]string{
 		".github/CODEOWNERS": "/svc/ @org/old\n",
@@ -231,7 +228,7 @@ func TestContainment_ApplyRefusesAPlanWhosePathEscapesTheRepo(t *testing.T) {
 	}
 }
 
-// symlinkRepoless is symlinkRepo without the symlink: an ordinary committed repo.
+// symlinkRepoless is symlinkRepo without the symlink.
 func symlinkRepoless(t *testing.T, files map[string]string) string {
 	t.Helper()
 	dir := t.TempDir()

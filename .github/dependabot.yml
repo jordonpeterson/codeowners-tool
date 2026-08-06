@@ -1,11 +1,9 @@
 version: 2
 
 updates:
-  # Every `uses:` here is SHA-pinned, enforced by a test in tools/supplychain.
-  # That closes the moved-tag problem and opens a staleness one: a pin never picks
-  # up an upstream fix on its own. Dependabot understands SHA pins and raises a PR
-  # moving the hash and its trailing `# v4` comment — a diff of one hash, which is
-  # exactly the review this needs.
+  # Every `uses:` here is SHA-pinned (enforced in tools/supplychain), so nothing
+  # picks up an upstream fix on its own. Dependabot moves the pinned hash and its
+  # trailing `# v4` comment together.
   - package-ecosystem: github-actions
     directory: /
     schedule:
@@ -16,7 +14,5 @@ updates:
       - dependencies
       - supply-chain
 
-  # NO gomod entry, deliberately. Zero dependencies and no go.sum is a hard
-  # constraint, not a coincidence — it makes the binary's supply chain equal to the
-  # Go toolchain's. An entry whose only possible action is touching go.mod is a
-  # standing invitation to land the first dependency without anyone deciding to.
+  # No gomod entry, deliberately: this module has zero dependencies by policy, and
+  # an entry whose only possible action is touching go.mod invites the first one.

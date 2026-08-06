@@ -392,11 +392,9 @@ func cmdPlan(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		return errExit(err, stderr)
 	}
-	// Not defending the write — sync and apply each refuse on their own. This
-	// defends the ARTIFACT: a plan whose codeowners_path resolves outside the clone
-	// describes an edit to a file GitHub never reads (it does not follow a symlinked
-	// CODEOWNERS), and every downstream refusal fires after a human has already
-	// reviewed and approved it. Deciding here means it never exists to approve.
+	// Not the write (sync and apply refuse on their own) but the ARTIFACT: a plan
+	// pointing outside the clone describes an edit to a file GitHub never reads,
+	// and a human approves it before any downstream refusal fires.
 	if err := containedWritePath(*repo, filepath.Join(*repo, filepath.FromSlash(coPath))); err != nil {
 		return errExit(err, stderr)
 	}

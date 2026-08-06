@@ -6,12 +6,9 @@ import (
 	"testing"
 )
 
-// The blast radius of the release workflow.
-//
-// release.yml's workflow-level `permissions:` is contents: write, because the
-// release job creates tags and releases. A job-level block REPLACES that rather
-// than adding to it, so a job declaring none silently inherits the write token —
-// including the Homebrew job, which pushes elsewhere with a separate PAT.
+// release.yml's workflow-level `permissions:` is contents: write, and a job-level
+// block REPLACES it rather than adding to it — so a job declaring none silently
+// inherits the write token.
 
 var (
 	// Job headers sit at two spaces under `jobs:`; keys inside a job at four.
@@ -21,9 +18,8 @@ var (
 	topLevelKeyR = regexp.MustCompile(`^[A-Za-z0-9_-]+:`)
 )
 
-// splitJobs maps each job name to its block. A line scan rather than a YAML
-// parse: go.mod is dependency-free by policy, and a YAML library is not worth
-// importing to read two files whose indentation this repository controls.
+// splitJobs maps each job name to its block. A line scan, not a YAML parse:
+// go.mod is dependency-free by policy.
 func splitJobs(t *testing.T, body string) map[string]string {
 	t.Helper()
 	lines := strings.Split(body, "\n")
@@ -81,18 +77,16 @@ func TestSupplyChain_EveryReleaseJobDeclaresItsOwnPermissions(t *testing.T) {
 	}
 }
 
-// The Homebrew job pushes to the tap with its own PAT and touches nothing in this
-// repository, so a token that can rewrite this repository's releases is pure
-// standing blast radius — any step it runs would inherit it.
+// The Homebrew job pushes to the tap with its own PAT, so a token that can
+// rewrite this repository's releases is standing blast radius.
 func TestSupplyChain_HomebrewJobCannotWriteThisRepository(t *testing.T) {
 	jobs := splitJobs(t, releaseWorkflow(t))
 	block, ok := jobs["homebrew"]
 	if !ok {
 		t.Skipf("no `homebrew` job in release.yml; jobs present: %v", jobNames(jobs))
 	}
-	// Checking only for the absence of `contents: write` would pass VACUOUSLY: the
-	// job holds it precisely BECAUSE it declares nothing, so the literal is not
-	// there to find. The missing block is the finding.
+	// Checking only for the absence of `contents: write` passes VACUOUSLY: the job
+	// holds it precisely BECAUSE it declares nothing. The missing block is it.
 	if !jobPermsRe.MatchString(block) {
 		t.Fatalf("the homebrew job declares no `permissions:` block, so it inherits the workflow-level contents: write on THIS repository — while all it does here is read tools/gen-formula.sh.")
 	}
@@ -101,10 +95,8 @@ func TestSupplyChain_HomebrewJobCannotWriteThisRepository(t *testing.T) {
 	}
 }
 
-// A token pasted into a clone URL lands in .git/config on the runner in cleartext
-// and in any git error that echoes the remote. Actions masks secrets in its own
-// log lines, but this value has been through a shell, and neither the runner's
-// git config nor a third-party log shipper is masked at all.
+// A token pasted into a clone URL lands in .git/config in cleartext and in any
+// git error echoing the remote. Actions masks its own log lines, not those.
 func TestSupplyChain_NoWorkflowEmbedsACredentialInAURL(t *testing.T) {
 	// A URL whose authority contains a shell or Actions expansion: the only
 	// reason to interpolate anything before the `@` is a credential.
@@ -116,11 +108,9 @@ func TestSupplyChain_NoWorkflowEmbedsACredentialInAURL(t *testing.T) {
 	}
 }
 
-// stripComments drops whole-line comments before the scan above.
-//
-// Not cosmetic: release.yml documents this very fix in a comment quoting the URL
-// it replaced, and a detector that fails on its own remediation is a detector
-// somebody deletes. A commented-out URL is inert to both shell and YAML.
+// stripComments drops whole-line comments: release.yml documents this very fix in
+// a comment quoting the URL it replaced, and a detector that fails on its own
+// remediation is one somebody deletes.
 func stripComments(body string) string {
 	lines := strings.Split(body, "\n")
 	out := lines[:0]

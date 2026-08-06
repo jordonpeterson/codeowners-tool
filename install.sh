@@ -21,14 +21,9 @@ WORKFLOW=".github/workflows/release.yml"
 err() { echo "install.sh: $*" >&2; exit 1; }
 have() { command -v "$1" >/dev/null 2>&1; }
 
-# verify_provenance answers "was this built by THIS workflow in THIS repository",
-# which no hash on the release can answer.
-#
-# A verification that RUNS and FAILS is always fatal, kept apart from the
-# inability to run one (handled by the caller). gh exits nonzero for a forged
-# attestation, a missing one, and an unknown flag alike, so the only branch on
-# its error text is for a gh too old to know --signer-workflow — a missing client
-# feature, not a statement about the artifact.
+# gh exits nonzero for a forged attestation, a missing one, and an unknown flag
+# alike, so the only branch taken on its error text is for a gh too old to know
+# --signer-workflow. Anything else is fatal.
 verify_provenance() {
   echo "Verifying build provenance..."
   if out=$(gh attestation verify "$1" --repo "$REPO" \
@@ -101,18 +96,11 @@ fi
 echo "Checksum OK."
 
 # --- verify build provenance ---
-# The checksum proves the archive arrived intact, not where it came from:
-# checksums.txt ships on the same release from the same host, so whoever can
-# write the release rewrites both and "Checksum OK." still prints. The
-# attestation is the one thing a rewrite cannot forge, being signed with a
-# short-lived OIDC identity belonging to this repository's release workflow.
-#
-# gh is deliberately NOT a prerequisite. This script exists for `curl | sh` on a
-# machine with nothing on it, and gh is absent from most of them; requiring it
-# would not make those installs verified, it would make them fail, and the
-# realistic answer to a failing install is a hand-downloaded tarball verified
-# less than this. So the default verifies when it can and is loud when it cannot,
-# and environments that can insist say so:
+# The checksum proves the bytes arrived intact, not where they came from:
+# checksums.txt ships on the same release from the same host. gh is deliberately
+# not a prerequisite — most machines running `curl | sh` don't have it, and a hard
+# requirement would push people to hand-downloaded tarballs verified less than
+# this.
 #
 #   PROVENANCE=auto     verify when gh can; warn loudly when it cannot (default)
 #   PROVENANCE=require  no verification, no install
@@ -126,9 +114,8 @@ esac
 if [ "$provenance" = skip ]; then
   echo "Provenance check skipped (PROVENANCE=skip): the origin of this build is unverified." >&2
 else
-  # gh's availability is established BEFORE running it: "no attestation exists for
-  # these bytes" and "this machine cannot check" must never collapse into one
-  # outcome. The first aborts the install; the second must not.
+  # Checked before running gh: "no attestation for these bytes" has to abort the
+  # install, "this machine cannot check" must not.
   cannot=""
   if ! have gh; then
     cannot="the GitHub CLI (gh) is not installed"

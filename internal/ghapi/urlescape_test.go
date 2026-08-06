@@ -9,20 +9,12 @@ import (
 	"github.com/jordonpeterson/codeowners-tool/internal/ghapi"
 )
 
-// Request paths here are built by concatenation from CODEOWNERS tokens and
-// command-line values.
+// `@org/..` is a LEGAL owner, so TeamExists gets the slug ".." and
+// GET /orgs/org/teams/.. normalizes to GET /orgs/org — 200 for any visible org,
+// so A-1 blesses an owner that can never be granted review.
 //
-// The owner grammar permits a dot, so `@org/..` is a LEGAL owner reaching
-// TeamExists as the slug "..". GET /orgs/org/teams/.. is then normalized — by
-// Go's own ServeMux, by any proxy in front of GHES — to GET /orgs/org, which
-// answers 200 for any visible org. The client concludes the team EXISTS and A-1
-// blesses an owner that can never be granted review.
-//
-// A wrong answer, not a compromise: the client never writes and the token is the
-// caller's own. But "the audit said it was fine" is the product.
-//
-// recordingServer captures the exact request line, with no ServeMux in the way —
-// a mux would normalize the very thing under test.
+// recordingServer takes the raw request line, with no ServeMux in the way: a mux
+// would normalize the very thing under test.
 func recordingServer(t *testing.T, code int, body string) (*httptest.Server, *[]string) {
 	t.Helper()
 	var seen []string

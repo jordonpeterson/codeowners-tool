@@ -6,14 +6,9 @@ import (
 	"testing"
 )
 
-// Signing that nobody verifies buys nothing.
-//
-// release.yml attests every archive, and install.sh checked only the SHA-256
-// against checksums.txt — published on the same release, from the same host, over
-// the same channel. That is integrity in transit and nothing about ORIGIN:
-// whoever can write the release rewrites both in one step and "Checksum OK."
-// still prints. The attestation is the one thing a rewrite cannot forge, being
-// signed with a short-lived OIDC identity the attacker does not hold.
+// Signing that nobody verifies buys nothing. checksums.txt ships on the same
+// release from the same host, so whoever can write the release rewrites both and
+// "Checksum OK." still prints; only the attestation is unforgeable.
 
 const (
 	installScript = "../../install.sh"
@@ -29,8 +24,7 @@ func readRepoFile(t *testing.T, path string) string {
 	return string(b)
 }
 
-// The install path must ask "was this built by THIS workflow in THIS repo",
-// not only "does it hash to what the release says it hashes to".
+// The install must ask where the archive came from, not only what it hashes to.
 func TestSupplyChain_InstallScriptVerifiesProvenanceNotOnlyTheChecksum(t *testing.T) {
 	body := readRepoFile(t, installScript)
 	if !strings.Contains(body, "gh attestation verify") {
@@ -41,16 +35,14 @@ integrity in transit and nothing about origin. release.yml already produces a
 build-provenance attestation — until install.sh runs 'gh attestation verify'
 against it, that signature is never read by anything.`)
 	}
-	// Without --repo it would accept a provenance statement from anywhere, which is
-	// no narrower a claim than the checksum it is meant to strengthen.
+	// Without --repo it accepts a provenance statement from anywhere.
 	if strings.Contains(body, "gh attestation verify") && !strings.Contains(body, "--repo") {
 		t.Errorf("install.sh runs `gh attestation verify` without --repo: an attestation from ANY repository would satisfy it, which proves no more about origin than the checksum already did")
 	}
 }
 
-// `curl | sh` is the documented install path and gh is absent from most minimal
-// containers, so a missing gh needs a deliberate, visible behavior rather than
-// the install exploding on `gh: not found`.
+// gh is absent from most machines running `curl | sh`, so its absence needs a
+// deliberate behavior rather than a dead install.
 func TestSupplyChain_InstallScriptHandlesAMachineWithoutGH(t *testing.T) {
 	body := readRepoFile(t, installScript)
 	if !strings.Contains(body, "gh attestation verify") {
@@ -61,9 +53,8 @@ func TestSupplyChain_InstallScriptHandlesAMachineWithoutGH(t *testing.T) {
 	}
 }
 
-// The direct-download path bypasses install.sh, so a reader told only to "verify
-// it against checksums.txt" has been handed the weaker of the two checks as
-// though it were the whole story.
+// The direct-download path bypasses install.sh, so a reader told only about
+// checksums.txt gets the weaker check as though it were the whole story.
 func TestSupplyChain_ReadmeDocumentsVerifyingTheDirectDownload(t *testing.T) {
 	body := readRepoFile(t, readmePath)
 	if !strings.Contains(body, "gh attestation verify") {

@@ -41,9 +41,8 @@ var (
 	shaRe  = regexp.MustCompile(`^[0-9a-f]{40}$`)
 )
 
-// releaseWorkflow returns release.yml, failing clearly if it is not there.
-// Otherwise a rename fails every gate below with a message about the missing
-// property rather than the missing file.
+// releaseWorkflow returns release.yml. Without the check, a rename fails every
+// gate below with a message about the missing property, not the missing file.
 func releaseWorkflow(t *testing.T) string {
 	t.Helper()
 	files := workflowFiles(t)

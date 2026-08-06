@@ -16,9 +16,7 @@ vet:
 docs:
 	go run ./tools/gendocs
 
-# Differential fuzz of the pattern matcher against the vendored, unmodified
-# hmarr/codeowners oracle (500k cases). Exactly what CI runs on every PR, so a
-# green run here is a green gate there. Pass a seed to explore elsewhere:
-#   go run ./tools/difftest 500000 42
+# Differential fuzz against the vendored hmarr/codeowners oracle — exactly what
+# CI runs. Pass a seed to explore elsewhere: go run ./tools/difftest 500000 42
 diff-test:
 	go run ./tools/difftest 500000

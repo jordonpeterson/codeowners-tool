@@ -124,17 +124,11 @@ func cmdSync(args []string, stdout, stderr io.Writer) int {
 	create := fs.Bool("create", false, "write .github/CODEOWNERS when the repo has none; never overwrites (R-23)")
 	dryRun := fs.Bool("dry-run", false, "change no CODEOWNERS; --out and --summary-out still emit")
 	format := fs.String("format", "text", "text|json — governs stdout only")
-	// TRUSTED OPERATOR INPUT, deliberately not contained to --repo.
-	//
-	// What matters is who chooses the path. --file and the discovered CODEOWNERS
-	// path come from the REPOSITORY, so a committed symlink lets anyone with push
-	// access steer a fleet runner's write — that is what containedWritePath is for.
-	// These two are typed on the command line next to the `>` they replace.
-	//
-	// Containing them would also break their only real uses, all outside the clone
-	// on purpose: `--out records/$repo.json` and `--summary-out
-	// "$GITHUB_STEP_SUMMARY"`. No O_EXCL for the same reason — a re-run must
-	// overwrite last run's records, not fail on every repo.
+	// Trusted operator input, deliberately not contained to --repo: unlike --file
+	// and the discovered CODEOWNERS path, no repository can influence these. Their
+	// real uses are outside the clone anyway (`--out records/$repo.json`,
+	// `--summary-out "$GITHUB_STEP_SUMMARY"`), and no O_EXCL because a re-run has
+	// to overwrite last run's records.
 	out := fs.String("out", "", "write the JSON record here (always JSON, whatever --format says); trusted operator path — overwritten, and not contained to --repo")
 	summaryOut := fs.String("summary-out", "", "write a markdown PR body here; trusted operator path — overwritten, and not contained to --repo")
 	if err := fs.Parse(args); err != nil {
@@ -163,9 +157,8 @@ func cmdSync(args []string, stdout, stderr io.Writer) int {
 	if err := containedRelPath(*filePath); err != nil {
 		return exit3(stderr, err)
 	}
-	// Argument-only and repo-independent, hence exit 3 — checked here rather than
-	// left to gittree so a fleet run halts at repo 0 instead of recording the same
-	// exit-2 refusal 100 times.
+	// Argument-only, hence exit 3: a fleet run halts at repo 0 rather than
+	// recording the same refusal 100 times.
 	if err := gittree.ValidateRef(*branch); err != nil {
 		return exit3(stderr, err)
 	}
@@ -389,8 +382,8 @@ func (r *syncRun) checkBranchIsWritable() error {
 	if r.branch == "HEAD" || r.dryRun {
 		return nil
 	}
-	// --end-of-options on top of cmdSync's guard: rev-parse has no trailing `--`
-	// for it to swallow (unlike ls-tree — see gittree.ValidateRef), so it is free.
+	// rev-parse has no trailing `--` for --end-of-options to swallow (unlike
+	// ls-tree — see gittree.ValidateRef), so it is free here.
 	head, err := gitLine(r.repoArg, "rev-parse", "--verify", "--end-of-options", "HEAD^{commit}")
 	if err != nil {
 		return err
