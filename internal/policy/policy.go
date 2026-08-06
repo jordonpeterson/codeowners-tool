@@ -12,6 +12,7 @@ package policy
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"sort"
 	"strconv"
@@ -22,6 +23,15 @@ import (
 
 // Version is the only policy format version this binary understands.
 const Version = 1
+
+// MaxPolicyBytes caps what Load will read into memory.
+//
+// A policy is reviewed by a human before it runs against a fleet, so 1 MB is
+// already far past anything reviewable — the largest plausible generated policy,
+// a few thousand ops, is tens of kilobytes. Without a cap `check --policy` reads
+// whatever it is pointed at, and the first sign of a generator that ran away is
+// the runner being OOM-killed partway through a rollout.
+const MaxPolicyBytes = 1 << 20
 
 // The field sets are PER LEVEL, not one merged bag. `description` is legal at
 // the top and meaningless on an op; accepting it in both places would let a
@@ -154,9 +164,22 @@ func Parse(src []byte, filename string) (*Policy, error) {
 // a malformed file — one is a shell mistake, the other sends someone to a
 // generator.
 func Load(path string) (*Policy, error) {
-	src, err := os.ReadFile(path)
+	f, err := os.Open(path)
 	if err != nil {
 		return nil, fmt.Errorf("cannot read policy file: %w", err)
+	}
+	defer f.Close()
+	// One byte past the cap, rather than trusting Stat: the size a filesystem
+	// reports is not always the number of bytes a read produces, and reading
+	// first to find out how much was read is what the cap exists to prevent.
+	src, err := io.ReadAll(io.LimitReader(f, MaxPolicyBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("cannot read policy file: %w", err)
+	}
+	if len(src) > MaxPolicyBytes {
+		return nil, &Error{File: path, OpIndex: -1, Msg: fmt.Sprintf(
+			"the policy file is larger than the %d-byte size limit; a policy is a human-reviewed artifact, and one this big is a broken generator — finding that out by exhausting the runner's memory is the wrong way round",
+			MaxPolicyBytes)}
 	}
 	return Parse(src, path)
 }
@@ -244,11 +267,11 @@ func (v *validator) version(p *Policy, m *member, rootOff int) {
 	n, err := strconv.Atoi(val.num.String())
 	switch {
 	case err != nil:
-		v.at(val.off, -1, "", `field "version" must be a whole number, got %s`, val.raw)
+		v.at(val.off, -1, "", `field "version" must be a whole number, got %s`, val.raw())
 	case n == 0:
 		v.at(val.off, -1, "", `field "version" must be a positive integer, got 0; 0 is what an absent field decodes to, so it cannot also name a real format version`)
 	case n < 0:
-		v.at(val.off, -1, "", `field "version" must be a positive integer, got %s`, val.raw)
+		v.at(val.off, -1, "", `field "version" must be a positive integer, got %s`, val.raw())
 	case n > Version:
 		v.at(val.off, -1, "", `policy version %d is newer than this binary understands; this build implements policy version %d, so upgrade codeowners-tool or regenerate the file at version %d`, n, Version, Version)
 	default:

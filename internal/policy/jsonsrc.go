@@ -48,16 +48,34 @@ const (
 )
 
 // jsonValue is one JSON value plus where in the file it was written.
+//
+// The source text is held as OFFSETS INTO src, not as a copy. Copying it eagerly
+// — `v.raw = string(s.src[start:end])` at the end of every value — is quadratic
+// in nesting depth, because each container's span covers everything below it and
+// gets copied again at every level: a 40 KB generated policy allocated 434 MB,
+// and 60 KB reached 962 MB resident and 3.5 s. Policies are generated, so one
+// extra layer of nesting from a generator turned `check --policy` — documented
+// as the first line of every fleet script — into an OOM kill on the runner. raw()
+// materializes the span on demand instead, and every caller is an error path.
 type jsonValue struct {
 	kind byte
 	off  int    // byte offset of the value's first byte
-	raw  string // exact source text of the value, for echoing it back verbatim
+	end  int    // one past the value's last byte
+	src  []byte // the whole document; raw() slices it, sharing these bytes
 	str  string // kString
 	num  json.Number
 	// members is in source order. Duplicates are rejected before anything reads
 	// this, so first-wins here is never observable.
 	members []*member
 	elems   []*jsonValue
+}
+
+// raw is the exact source text of the value, for echoing it back verbatim.
+func (v *jsonValue) raw() string {
+	if v == nil || v.off < 0 || v.end > len(v.src) || v.off > v.end {
+		return ""
+	}
+	return string(v.src[v.off:v.end])
 }
 
 // member is one key/value pair, with the key's own offset — errors about a
@@ -92,7 +110,7 @@ func (v *jsonValue) describe() string {
 	case kNumber:
 		return "the number " + v.num.String()
 	case kBool:
-		return "the boolean " + v.raw
+		return "the boolean " + v.raw()
 	case kNull:
 		return "null"
 	case kArray:
@@ -100,7 +118,7 @@ func (v *jsonValue) describe() string {
 	case kObject:
 		return "an object"
 	}
-	return v.raw
+	return v.raw()
 }
 
 // show is describe's compact form, used where the surrounding sentence already
@@ -112,16 +130,32 @@ func (v *jsonValue) show() string {
 	case kObject:
 		return "an object"
 	}
-	return v.raw
+	return v.raw()
 }
+
+// maxDepth caps how deeply a policy may nest.
+//
+// A real policy nests three levels: the document object, its "ops" array, and an
+// op object inside it. 64 leaves that untouched by two orders of magnitude while
+// bounding the recursion in value(), which is the point — Go grows a goroutine
+// stack until it cannot, and that failure is a FATAL error no recover() can
+// catch, so a deep document is a process death rather than a rejected file. The
+// cap has to be its own guard: making the parser allocate linearly still leaves
+// it recursing until the runtime kills it.
+const maxDepth = 64
+
+// errTooDeep is raised by value() and converted to a located error by
+// syntaxError, so every path out of the scanner reports it the same way.
+var errTooDeep = errors.New("policy nesting exceeds the depth limit")
 
 // scanner walks the token stream once, building the located tree and collecting
 // duplicate keys as it goes.
 type scanner struct {
-	src  []byte
-	file string
-	dec  *json.Decoder
-	dups []error
+	src     []byte
+	file    string
+	dec     *json.Decoder
+	dups    []error
+	deepOff int // where the depth limit was hit, for the error's line:col
 }
 
 // scanSource parses src into a located tree.
@@ -142,7 +176,7 @@ func scanSource(src []byte, file string) (root *jsonValue, dups []error, syntax 
 	if len(bytes.TrimSpace(src)) == 0 {
 		return nil, nil, s.errAt(0, "the policy file is empty; a policy is at minimum {\"version\": 1, \"ops\": [...]}")
 	}
-	v, err := s.value()
+	v, err := s.value(1)
 	if err != nil {
 		return nil, nil, s.syntaxError(err)
 	}
@@ -161,23 +195,29 @@ func scanSource(src []byte, file string) (root *jsonValue, dups []error, syntax 
 	return v, s.dups, nil
 }
 
-// value consumes exactly one JSON value, recording where it started.
-func (s *scanner) value() (*jsonValue, error) {
+// value consumes exactly one JSON value, recording where it started. depth is
+// this value's nesting level, 1 for the document itself; it is checked BEFORE
+// the token is read, so a 20,000-level document costs 64 frames, not 20,000.
+func (s *scanner) value(depth int) (*jsonValue, error) {
+	if depth > maxDepth {
+		s.deepOff = s.valueStart()
+		return nil, errTooDeep
+	}
 	start := s.valueStart()
 	tok, err := s.dec.Token()
 	if err != nil {
 		return nil, err
 	}
-	v := &jsonValue{off: start}
+	v := &jsonValue{off: start, src: s.src}
 	switch t := tok.(type) {
 	case json.Delim:
 		switch t {
 		case '{':
 			v.kind = kObject
-			err = s.object(v)
+			err = s.object(v, depth)
 		case '[':
 			v.kind = kArray
-			err = s.array(v)
+			err = s.array(v, depth)
 		default:
 			// A closing delimiter can only arrive here if object/array below
 			// mis-tracked its own extent, which would be a bug in this file.
@@ -198,11 +238,11 @@ func (s *scanner) value() (*jsonValue, error) {
 	case nil:
 		v.kind = kNull
 	}
-	v.raw = string(s.src[start:min(int(s.dec.InputOffset()), len(s.src))])
+	v.end = min(int(s.dec.InputOffset()), len(s.src))
 	return v, nil
 }
 
-func (s *scanner) object(v *jsonValue) error {
+func (s *scanner) object(v *jsonValue, depth int) error {
 	seen := make(map[string]*member)
 	for s.dec.More() {
 		keyOff := s.valueStart()
@@ -214,7 +254,7 @@ func (s *scanner) object(v *jsonValue) error {
 		if !ok {
 			return fmt.Errorf("object key is not a string")
 		}
-		val, err := s.value()
+		val, err := s.value(depth + 1)
 		if err != nil {
 			return err
 		}
@@ -236,9 +276,9 @@ func (s *scanner) object(v *jsonValue) error {
 	return err
 }
 
-func (s *scanner) array(v *jsonValue) error {
+func (s *scanner) array(v *jsonValue, depth int) error {
 	for s.dec.More() {
-		e, err := s.value()
+		e, err := s.value(depth + 1)
 		if err != nil {
 			return err
 		}
@@ -274,6 +314,14 @@ func (s *scanner) valueStart() int {
 // 5 and are genuinely the most precise thing available. What does not survive is
 // the byte offset, which is why every branch here resolves one.
 func (s *scanner) syntaxError(err error) *Error {
+	// The depth limit is not a syntax problem — the document may be perfectly
+	// well-formed — but it surfaces through the same return path, and it has to
+	// say DEPTH. Rendered as anything else ("an op must be a string, got an
+	// array", which is what the ordinary type check happened to produce) there is
+	// no way to tell a bounded parser from a lucky one.
+	if errors.Is(err, errTooDeep) {
+		return s.errAt(s.deepOff, "the policy nests more than %d levels deep; a policy nests three (the document, its \"ops\" array, and each op), so this is a generator emitting structure rather than a file anyone wrote — flatten it", maxDepth)
+	}
 	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
 		return s.errAt(len(s.src), "the policy file ends in the middle of a value; a bracket or brace is unclosed")
 	}
