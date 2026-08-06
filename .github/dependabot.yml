@@ -1,0 +1,29 @@
+version: 2
+
+updates:
+  # GitHub Actions only, and that is the point of this file.
+  #
+  # Every `uses:` in this repository is pinned to a 40-character commit SHA, and
+  # a test (tools/supplychain) fails the build if one is not. That closes the
+  # moved-tag problem and opens a staleness one: a SHA pin never picks up an
+  # upstream security fix on its own, and nothing else in the repository is
+  # watching for one. Dependabot understands SHA pins and raises a PR that moves
+  # the SHA and updates the trailing `# v4` comment with it, which is exactly the
+  # review this needs — a human reading a diff of one hash.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: ci
+    labels:
+      - dependencies
+      - supply-chain
+
+  # There is deliberately NO gomod entry. This module has zero dependencies and
+  # no go.sum, which is a hard constraint rather than a coincidence: it is what
+  # makes the supply chain of the binary equal to the supply chain of the Go
+  # toolchain. Dependabot has nothing to update here, and an entry that can only
+  # ever act by touching go.mod is a standing invitation to land the first
+  # dependency without anyone deciding to. Adding one is a choice to make in a PR
+  # with a reason attached, not a default.
