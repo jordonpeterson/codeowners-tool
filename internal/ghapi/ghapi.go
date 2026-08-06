@@ -18,8 +18,10 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
@@ -146,6 +148,37 @@ func New(baseURL, token string, cache Cache) *Client {
 
 func (c *Client) key(k string) string { return c.scope + ":" + k }
 
+// pathSeg encodes one value as exactly one URL path segment.
+//
+// Every path in this package is assembled from values that came out of a
+// CODEOWNERS file or off the command line, and concatenating them raw produced
+// wrong ANSWERS rather than a compromise — the client never writes and the token
+// is the caller's own. Wrong answers are the expensive kind here, because "the
+// audit said it was fine" is the product.
+//
+// Two failures, both reachable:
+//
+//   - The owner grammar permits a dot, so `@org/..` is a legal owner and reaches
+//     TeamExists as the slug "..". GET /orgs/org/teams/.. is normalized — by Go's
+//     own ServeMux, by nginx, by any proxy in front of GHES — to GET /orgs/org,
+//     which answers 200 for any visible org. The client concludes the team exists
+//     and A-1 blesses an owner that can never be granted review.
+//   - A slug or login containing a slash silently becomes two segments, asking a
+//     different question of a different endpoint.
+//
+// url.PathEscape closes the second (it escapes / ? # and spaces) but not the
+// first: "." and ".." are legal path characters and it leaves them alone. A
+// segment made only of dots is therefore encoded by hand, which turns the
+// traversal into a plain 404 — the definitive negative that is the correct
+// answer for a team that does not exist.
+func pathSeg(s string) string {
+	e := url.PathEscape(s)
+	if e != "" && strings.Trim(e, ".") == "" {
+		return strings.ReplaceAll(e, ".", "%2E")
+	}
+	return e
+}
+
 // get performs a GET, classifying failures per R-12. Definitive statuses are
 // 2xx and 404; everything else is inconclusive.
 func (c *Client) get(path, accept string) (int, []byte, error) {
@@ -215,7 +248,7 @@ func (c *Client) ProbeOrg(org string) error {
 	if _, ok := c.cache.Get(c.key("probe:" + org)); ok {
 		return nil
 	}
-	for _, p := range []string{"/orgs/" + org + "/teams?per_page=1", "/orgs/" + org + "/members?per_page=1"} {
+	for _, p := range []string{"/orgs/" + pathSeg(org) + "/teams?per_page=1", "/orgs/" + pathSeg(org) + "/members?per_page=1"} {
 		status, _, err := c.get(p, "")
 		if err != nil {
 			return err
@@ -234,7 +267,7 @@ func (c *Client) ProbeRepo(owner, repo string) error {
 	if _, ok := c.cache.Get(c.key("probe-repo:" + owner + "/" + repo)); ok {
 		return nil
 	}
-	status, _, err := c.get("/repos/"+owner+"/"+repo, "")
+	status, _, err := c.get("/repos/"+pathSeg(owner)+"/"+pathSeg(repo), "")
 	if err != nil {
 		return err
 	}
@@ -272,7 +305,7 @@ func (c *Client) ProbeAPI() error {
 // GitHub API".
 func (c *Client) UserExists(login string) (bool, error) {
 	return c.cachedBool("user:"+login, func() (bool, error) {
-		status, _, err := c.get("/users/"+login, "")
+		status, _, err := c.get("/users/"+pathSeg(login), "")
 		if err != nil {
 			return false, err
 		}
@@ -289,7 +322,7 @@ func (c *Client) UserExists(login string) (bool, error) {
 // TeamExists: A-1 for @org/team owners. Callers must ProbeOrg(org) first.
 func (c *Client) TeamExists(org, slug string) (bool, error) {
 	return c.cachedBool("team:"+org+"/"+slug, func() (bool, error) {
-		status, _, err := c.get("/orgs/"+org+"/teams/"+slug, "")
+		status, _, err := c.get("/orgs/"+pathSeg(org)+"/teams/"+pathSeg(slug), "")
 		if err != nil {
 			return false, err
 		}
@@ -300,7 +333,7 @@ func (c *Client) TeamExists(org, slug string) (bool, error) {
 // UserIsOrgMember: A-2. Callers must ProbeOrg(org) first.
 func (c *Client) UserIsOrgMember(org, login string) (bool, error) {
 	return c.cachedBool("member:"+org+"/"+login, func() (bool, error) {
-		status, _, err := c.get("/orgs/"+org+"/members/"+login, "")
+		status, _, err := c.get("/orgs/"+pathSeg(org)+"/members/"+pathSeg(login), "")
 		if err != nil {
 			return false, err
 		}
@@ -312,7 +345,7 @@ func (c *Client) UserIsOrgMember(org, login string) (bool, error) {
 // is not enough. Callers must ProbeRepo first.
 func (c *Client) UserHasWrite(owner, repo, login string) (bool, error) {
 	return c.cachedBool("perm:"+owner+"/"+repo+":"+login, func() (bool, error) {
-		status, body, err := c.get("/repos/"+owner+"/"+repo+"/collaborators/"+login+"/permission", "")
+		status, body, err := c.get("/repos/"+pathSeg(owner)+"/"+pathSeg(repo)+"/collaborators/"+pathSeg(login)+"/permission", "")
 		if err != nil {
 			return false, err
 		}
@@ -339,7 +372,7 @@ func (c *Client) UserHasWrite(owner, repo, login string) (bool, error) {
 func (c *Client) TeamHasWrite(org, slug, owner, repo string) (bool, error) {
 	return c.cachedBool("teamperm:"+org+"/"+slug+":"+owner+"/"+repo, func() (bool, error) {
 		status, body, err := c.get(
-			"/orgs/"+org+"/teams/"+slug+"/repos/"+owner+"/"+repo,
+			"/orgs/"+pathSeg(org)+"/teams/"+pathSeg(slug)+"/repos/"+pathSeg(owner)+"/"+pathSeg(repo),
 			"application/vnd.github.v3.repository+json")
 		if err != nil {
 			return false, err
@@ -369,9 +402,15 @@ func (c *Client) TeamHasWrite(org, slug, owner, repo string) (bool, error) {
 // CodeownersErrors calls GET /repos/{owner}/{repo}/codeowners/errors (A-8
 // remote validation). ref "" means the default branch.
 func (c *Client) CodeownersErrors(owner, repo, ref string) ([]RemoteError, error) {
-	p := "/repos/" + owner + "/" + repo + "/codeowners/errors"
+	p := "/repos/" + pathSeg(owner) + "/" + pathSeg(repo) + "/codeowners/errors"
 	if ref != "" {
-		p += "?ref=" + ref
+		// ref is an operator-supplied --branch pasted straight into the query
+		// before this. A ref containing `&` or `=` — both legal in a refname —
+		// therefore appended PARAMETERS the caller never wrote to an endpoint
+		// whose parameters decide what comes back, and an ordinary ref containing
+		// a space failed to parse as a URL at all, so the lookup came back
+		// inconclusive for a branch that exists.
+		p += "?" + url.Values{"ref": {ref}}.Encode()
 	}
 	status, body, err := c.get(p, "")
 	if err != nil {
