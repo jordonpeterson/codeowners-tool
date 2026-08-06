@@ -37,17 +37,23 @@ jobs:
   release:
     name: build & release
     runs-on: ubuntu-latest
+    # A job-level block REPLACES the workflow-level one rather than adding to
+    # it, so contents:write is restated here — dropping it would leave
+    # `gh release create` unable to create the release it is here to publish.
+    permissions:
+      contents: write # create tags and releases
+      id-token: write # mint the OIDC token the provenance attestation is signed with
     outputs:
       tag: ${{ steps.ver.outputs.tag }}
       published: ${{ steps.guard.outputs.exists == 'false' }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0 # full history + tags for versioning and release notes
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version-file: go.mod
 
@@ -99,8 +105,13 @@ jobs:
             [ "$os" = "windows" ] && bin="codeowners-tool.exe"
             name="codeowners-tool_${TAG}_${os}_${arch}"
             mkdir -p "dist/$name"
+            # -X stamps the tag into the binary so `codeowners-tool version`
+            # answers with the build it is, not with "dev". A fleet that cannot
+            # be asked which build it is running makes both rollback and CVE
+            # response guesswork.
             CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" \
-              go build -trimpath -ldflags "-s -w" \
+              go build -trimpath \
+              -ldflags "-s -w -X github.com/jordonpeterson/codeowners-tool/internal/cli.Version=${TAG}" \
               -o "dist/$name/$bin" ./cmd/codeowners-tool
             cp LICENSE NOTICE README.md "dist/$name/"
             if [ "$os" = "windows" ]; then
@@ -112,6 +123,28 @@ jobs:
           done
           (cd dist && sha256sum ./*.tar.gz ./*.zip > checksums.txt)
           ls -la dist
+
+      # checksums.txt lives on the same release as the archives it covers and is
+      # fetched by install.sh over the same channel from the same host, so it
+      # proves integrity in transit and nothing about ORIGIN: whoever can write
+      # the release rewrites the archives and the checksums in one step, and
+      # every downstream check still passes. Homebrew inherits that, because
+      # tools/gen-formula.sh reads its sha256 values out of that same file.
+      #
+      # A build-provenance attestation is signed with a short-lived OIDC identity
+      # for this workflow in this repository, so `gh attestation verify` answers
+      # "was this built HERE, by THIS workflow" — a question no hash on the
+      # release can answer. It runs BEFORE the release is created: an attestation
+      # failure should mean no release exists, not a published release nobody can
+      # verify.
+      - name: Attest build provenance
+        if: steps.guard.outputs.exists == 'false'
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
+        with:
+          subject-path: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/checksums.txt
 
       - name: Create release
         if: steps.guard.outputs.exists == 'false'
@@ -134,9 +167,15 @@ jobs:
     needs: release
     if: needs.release.outputs.published == 'true'
     runs-on: ubuntu-latest
+    # This job only reads tools/gen-formula.sh here and writes to the tap with its
+    # own PAT. Without a block it inherits the workflow-level contents: write.
+    permissions:
+      contents: read # read tools/gen-formula.sh; the tap is written with TAP_TOKEN
     steps:
       - name: Checkout (for tools/gen-formula.sh)
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false # nothing here needs a token for this repo
 
       - name: Update tap formula
         env:
@@ -149,7 +188,11 @@ jobs:
             exit 0
           fi
           curl -fsSL "https://github.com/jordonpeterson/codeowners-tool/releases/download/${TAG}/checksums.txt" -o checksums.txt
-          git clone --depth 1 "https://x-access-token:${TAP_TOKEN}@github.com/jordonpeterson/homebrew-tap.git" tap
+          # Via gh's credential helper, never a URL: the old form wrote the PAT in
+          # cleartext to tap/.git/config and into any git error echoing the remote.
+          echo "${TAP_TOKEN}" | gh auth login --with-token
+          gh auth setup-git
+          git clone --depth 1 "https://github.com/jordonpeterson/homebrew-tap.git" tap
           sh tools/gen-formula.sh "${TAG}" checksums.txt > tap/Formula/codeowners-tool.rb
           cd tap
           if git diff --quiet; then

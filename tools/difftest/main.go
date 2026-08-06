@@ -6,7 +6,10 @@
 // Known deliberate divergences (skipped): our Compile rejects "!" negation
 // and empty patterns.
 //
-// Usage: go run ./tools/difftest [iterations]
+// Usage: go run ./tools/difftest [iterations] [seed]
+//
+// The seed defaults to 1, which is what CI runs; pass another to reach input
+// outside that region.
 package main
 
 import (
@@ -61,7 +64,16 @@ func main() {
 			iters = n
 		}
 	}
-	r := rand.New(rand.NewSource(1))
+	// Fixed by default so the PR gate fails for everyone or for no one. Raising the
+	// case count alone only extends the same sequence; a new seed is the only way
+	// to reach input that gate never visits.
+	seed := int64(1)
+	if len(os.Args) > 2 {
+		if n, err := strconv.ParseInt(os.Args[2], 10, 64); err == nil {
+			seed = n
+		}
+	}
+	r := rand.New(rand.NewSource(seed))
 	compared, skipped, mismatches := 0, 0, 0
 	for i := 0; i < iters; i++ {
 		pat := genPattern(r)
@@ -91,8 +103,8 @@ func main() {
 			}
 		}
 	}
-	fmt.Printf("differential fuzz vs hmarr/codeowners oracle: %d compared, %d skipped (compile-reject), %d mismatches\n",
-		compared, skipped, mismatches)
+	fmt.Printf("differential fuzz vs hmarr/codeowners oracle (seed %d): %d compared, %d skipped (compile-reject), %d mismatches\n",
+		seed, compared, skipped, mismatches)
 	if mismatches > 0 {
 		os.Exit(1)
 	}

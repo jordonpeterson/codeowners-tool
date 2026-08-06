@@ -10,9 +10,29 @@ import (
 	"strings"
 )
 
+// ValidateRef rejects a ref git would parse as one of its own options: --branch
+// arrives positionally, so `--branch '--format=…'` lands in ls-tree's option
+// parser. A refname cannot begin with a dash anyway.
+//
+// --end-of-options is NOT usable on ls-tree — it turns the trailing `--` into a
+// pathspec, so the tree comes back EMPTY and every scope resolves against a repo
+// that appears to have no files.
+func ValidateRef(ref string) error {
+	if ref == "" {
+		return fmt.Errorf("empty ref: pass a branch, tag, or commit (default HEAD)")
+	}
+	if strings.HasPrefix(ref, "-") {
+		return fmt.Errorf("invalid ref %q: a ref may not begin with '-' (git-check-ref-format forbids it), and git would parse this one as one of its own options rather than as a ref", ref)
+	}
+	return nil
+}
+
 // ListTracked returns the repo-relative paths (forward slashes) of every
 // tracked file at ref. A bad ref or non-repo is a hard error.
 func ListTracked(repoDir, ref string) ([]string, error) {
+	if err := ValidateRef(ref); err != nil {
+		return nil, err
+	}
 	out, err := gitOutput(repoDir, "ls-tree", "-r", "--name-only", "-z", ref, "--")
 	if err != nil {
 		return nil, err
@@ -26,10 +46,13 @@ func ListTracked(repoDir, ref string) ([]string, error) {
 	return paths, nil
 }
 
-// ReadFileAtRef reads a file's content from a ref without touching the
-// working tree.
+// ReadFileAtRef reads a file's content from a ref without touching the working
+// tree. cat-file has no separator to lose, so --end-of-options is safe here.
 func ReadFileAtRef(repoDir, ref, path string) ([]byte, error) {
-	return gitOutput(repoDir, "cat-file", "blob", ref+":"+path)
+	if err := ValidateRef(ref); err != nil {
+		return nil, err
+	}
+	return gitOutput(repoDir, "cat-file", "--end-of-options", "blob", ref+":"+path)
 }
 
 // CodeownersLocations is GitHub's search order: first found wins (S-8).

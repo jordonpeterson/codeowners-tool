@@ -1,0 +1,18 @@
+version: 2
+
+updates:
+  # Every `uses:` here is SHA-pinned (enforced in tools/supplychain), so nothing
+  # picks up an upstream fix on its own. Dependabot moves the pinned hash and its
+  # trailing `# v4` comment together.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: ci
+    labels:
+      - dependencies
+      - supply-chain
+
+  # No gomod entry, deliberately: this module has zero dependencies by policy, and
+  # an entry whose only possible action is touching go.mod invites the first one.

@@ -163,6 +163,35 @@ a bare line deletion.
 > Package cli_test exercises the end-to-end contract: real git repo, real
 > files, real exit codes (R-17).
 
+**`containment_test.go`**
+
+> BLOCKER 1 — the write must not leave the repository.
+>
+> containedRelPath already closes one spelling of this: `--file ../ESCAPED/CODEOWNERS`
+> is rejected before the repo is opened, and its comment names the consequence
+> exactly — "a fleet loop pointed at 100 clones writes 100 files into whatever
+> happens to sit next to them". checkRepoRoot closes a second, where --repo points
+> below the root and the file lands where GitHub never reads it.
+>
+> A third spelling is open, and unlike the other two it needs no flag: a committed
+> symlink. apply.Apply calls filepath.EvalSymlinks and writes the RESOLVED target,
+> so a repository whose governing CODEOWNERS is a symlink to ../../outside/f edits
+> `f` — outside the clone — and reports "applied", exit 0.
+>
+> In the fleet model this verb exists for, the symlink travels IN the repository:
+> anyone with commit access to any one repo in the fleet chooses a path the central
+> runner writes to. The primitive is constrained (the target must already exist, its
+> bytes must match the hash the planner pinned, and the appended text is
+> CODEOWNERS-shaped) but the PATH is arbitrary.
+>
+> It is also wrong with no attacker at all. GitHub does not follow a symlinked
+> CODEOWNERS, so the file this run edits governs nothing, while the run reports
+> success — the "applied, dead on arrival" outcome the whole verb exists to prevent.
+>
+> Refusing outright and containing to the repo root are both acceptable fixes; these
+> tests pin only that the bytes outside the repository are never touched and that no
+> record claims otherwise.
+
 **`fleet_idempotence_test.go`**
 
 > R-19 — convergence and idempotence at fleet scale.
@@ -232,6 +261,32 @@ a bare line deletion.
 > encoding/json emits fields in declaration order, but that ordering is not
 > part of the contract and pinning it would fail on a harmless reshuffle.
 
+**`token_redaction_test.go`**
+
+> BLOCKER 2 — the token must never be rendered.
+>
+> cmdAudit declares the flag as
+>
+> 	token := fs.String("token", os.Getenv("GITHUB_TOKEN"), "...")
+>
+> which makes the LIVE CREDENTIAL the flag's default value, and Go's flag package
+> prints non-empty string defaults in its usage text. So the secret is written to
+> stderr by `audit --help` and by ANY flag error:
+>
+> 	$ GITHUB_TOKEN=ghp_real codeowners-tool audit --bogusflag
+> 	flag provided but not defined: -bogusflag
+> 	  -token string
+> 	        GitHub token (default $GITHUB_TOKEN) (default "ghp_real")
+>
+> That is CWE-532. One mistyped flag in a scheduled fleet job writes the PAT into
+> the build log and from there into whatever aggregates logs. GitHub Actions masks
+> secrets it registered; Jenkins, GitLab, CircleCI and Buildkite are much less
+> reliable, and a terminal on a screen share is masked by nothing.
+>
+> The fix is to default the flag to "" and read the environment AFTER Parse, so the
+> token is never a value the flag package can render. These tests pin both halves:
+> the secret never appears in output, and $GITHUB_TOKEN is still honored.
+
 ### `TestCheck_BrokenPolicyExitsThree`
 
 SPEC R-22: `check` exits 3 on every member of the exit-3 class, and 3 only.
@@ -274,6 +329,34 @@ no-op code would abort the run before the loop starts.
 SPEC R-22: `check` writes nothing. It sits one token away from --dry-run,
 where the failure mode is exit 0 across all 100 repos having read and
 written nothing — silent success, the worst outcome this design produces.
+
+### `TestContainment_ApplyNeverWritesThroughASymlinkLeavingTheRepo`
+
+The same escape must not be reachable through plan → apply. `plan` is the
+artifact-producing verb and writes no CODEOWNERS, so the containment decision
+has to hold at apply time too — a plan reviewed and merged in one place is
+applied somewhere else entirely.
+
+### `TestContainment_ApplyRefusesAPlanWhosePathEscapesTheRepo`
+
+With plan refusing, the chain above stops early — and a plan is reviewed in one
+place and applied in another, so the bytes reaching `apply` are not necessarily
+the ones `plan` emitted.
+
+### `TestContainment_CreateNeverFollowsADanglingSymlinkOutOfTheRepo`
+
+--create is already safe (O_EXCL), but only because the file does not exist.
+A DANGLING symlink is the create path's version of the same escape: the link
+resolves to nothing, so O_EXCL succeeds, and the new file lands outside.
+
+### `TestContainment_PlanRefusesToPlanThroughASymlinkLeavingTheRepo`
+
+`plan` writes nothing, so this is not an escape — but a human approves the
+artifact, and every downstream refusal fires after that.
+
+### `TestContainment_SyncNeverWritesThroughASymlinkLeavingTheRepo`
+
+A committed symlink must not turn `sync` into a writer outside the clone.
 
 ### `TestEndToEnd_PlanApplyVerify`
 
@@ -932,6 +1015,28 @@ SPEC R-19/R-21: a scope matching zero tracked files under the default
 because whether a path exists is the most repo-specific fact there is.
 Getting this backwards halts a 100-repo run on repo 3.
 
+### `TestTokenRedaction_EnvTokenIsStillSentToTheAPI`
+
+The other half of the contract: redaction must not be achieved by dropping
+support for $GITHUB_TOKEN. A local API stands in for GitHub so this asserts the
+credential actually reaches the wire, with no network access.
+
+### `TestTokenRedaction_FlagErrorDoesNotPrintTheToken`
+
+The flag-error path is the dangerous one: it is reached by a typo, in CI, where
+nobody is watching the output at the time it is produced.
+
+### `TestTokenRedaction_HelpDoesNotPrintTheToken`
+
+`--help` is a request, not a broken invocation (flagParseCode says so), and it is
+the single most likely command to be run by someone reading over a shoulder.
+
+### `TestTokenRedaction_NoVerbPrintsTheToken`
+
+Every verb, not just audit: a token in the environment must survive any usage
+render anywhere in the CLI. This is the regression guard for the day a second
+command grows a credential flag.
+
 ## internal/file
 
 **`file_test.go`**
@@ -1082,6 +1187,20 @@ makes no HTTP call. Assume thousands of lookups per run.
 
 SPEC R-15: the disk cache honors its TTL.
 
+### `TestURLEscaping_PathSegmentsCannotAddSegments`
+
+A slug or login containing a slash must stay one segment, not become two.
+
+### `TestURLEscaping_PathSegmentsCannotTraverse`
+
+(no doc comment)
+
+### `TestURLEscaping_RefIsEscapedIntoTheQuery`
+
+A ref interpolated straight into the query does not describe a ref: `&` appends
+parameters the caller never wrote, against an endpoint whose parameters govern
+what comes back.
+
 ### `TestTeamHasWrite`
 
 Team write-access: 200 with push/maintain/admin permission is access;
@@ -1100,6 +1219,18 @@ A 404 on /users/{login} with a working token is a definitive negative.
 > SPEC S-7 / INV-3: resolution runs against the tracked tree of a specific
 > ref (default HEAD) of a local repository — never the working directory
 > listing, never the pattern set.
+
+### `TestRefGuard_ListTrackedRejectsARefThatGitWouldParseAsAnOption`
+
+Refused by us, rather than handed to git's option parser.
+
+### `TestRefGuard_OrdinaryRefsStillResolve`
+
+The guard must cost nothing legitimate.
+
+### `TestRefGuard_ReadFileAtRefRejectsADashLeadingRef`
+
+Same guard on the blob read, where the ref is concatenated with the path.
 
 ### `TestS7_BadRefErrors`
 
@@ -2113,6 +2244,33 @@ list attributes the wrong outcome to the wrong op.
 
 ## internal/policy
 
+**`bounds_test.go`**
+
+> BLOCKER 3 — the policy parser must be bounded by its input.
+>
+> scanner.value() ends every value with
+>
+> 	v.raw = string(s.src[start:min(int(s.dec.InputOffset()), len(s.src))])
+>
+> which materializes a COPY of that value's source span for every value in the
+> document. Nested containers each span nearly the whole file, so the copies are
+> quadratic in nesting depth. Measured against the current implementation:
+>
+> 	  16 KB policy  →   0.2 s
+> 	  60 KB policy  →   3.5 s and 962 MB resident
+> 	 400 KB policy  →   over two minutes
+>
+> `check --policy` is documented as the first line of every fleet script, and
+> policy files are generated — a generator that emits one extra layer of nesting
+> turns a routine preflight into an OOM kill on the runner. scanner.value() is also
+> unbounded recursion, and Go's stack-growth failure is a fatal error that no
+> recover() can catch, so depth needs its own limit rather than falling out of the
+> memory fix.
+>
+> Three separate guards are pinned below because they fail differently: a depth cap
+> (structure), a size cap (input), and linear allocation (the raw copies). Fixing
+> only the last still leaves a document that recurses until the process dies.
+
 **`policy_test.go`**
 
 > Package policy_test encodes the acceptance tests for the policy file.
@@ -2133,6 +2291,40 @@ list attributes the wrong outcome to the wrong op.
 > Per-op zero-match (R-21) is validated here too, because whether an op may
 > carry `on_zero_match` at all depends only on the op kind — a repo-independent
 > fact, and therefore a policy error, caught on repo 0 rather than repo 47.
+
+### `TestBounds_AllocationIsLinearInInputSize`
+
+The allocation guard. TotalAlloc is cumulative and monotonic, so it measures the
+copies the parser makes even after GC reclaims them — which is the actual defect,
+since the peak is what the OOM killer sees.
+
+The threshold is deliberately loose: a linear parser allocates a small multiple
+of its input, while the current implementation allocates roughly ten thousand
+times it, so nothing about this test is sensitive to allocator details.
+
+### `TestBounds_LoadRejectsAnOversizePolicyFile`
+
+policy.Load reads the whole file with no size limit. A policy is a
+human-reviewed artifact; a multi-megabyte one is a broken generator, and finding
+that out by exhausting the runner's memory is the wrong way round.
+
+### `TestBounds_OrdinaryGeneratedPolicyStillParses`
+
+The guards must not be bought by rejecting real policies. This is the positive
+control: an ordinary generated policy — more ops than anyone writes by hand,
+nested exactly as the format requires — still parses.
+
+### `TestBounds_RejectsExcessiveNestingDepth`
+
+A policy nested far past anything a legitimate generator emits must be rejected
+for THAT reason, cheaply, before the document is walked.
+
+Today the document is rejected — but as `ops[0]: an op must be a string ..., got
+an array`, which is the format's ordinary type check noticing the first `[`. That
+is not a depth guard: it fires only because the nesting happens to start inside
+`ops`, and it says nothing at all about the 999 levels below it or about the
+recursion that walked them. The error has to name the limit, or there is no way
+to tell a bounded parser from a lucky one.
 
 ### `TestR20_AllOptionalFieldsArePopulated`
 
@@ -2490,4 +2682,4 @@ DIFFERENT states; transitioning between them is a real ownership change.
 
 ---
 
-293 documented test cases across 12 packages.
+312 documented test cases across 12 packages.
