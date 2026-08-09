@@ -144,7 +144,9 @@ changes to which class a failure lands in are called out explicitly.
   `lint` alongside `sync`. The README keeps a 45-line entry point: what the
   three stages are, one worked `--dry-run`, the CI gate, and a link.
   `docs/REFERENCE.md` keeps the lookup tables, so the same material is not
-  written out three times.
+  written out three times. The README's own lint section is five lines and a
+  link: the reader who types `lint` wants the command, not an essay on what it
+  does before they have run it once.
 - **The README is a front door, not the manual.** It now carries the mental model
   (`add_owner` co-owns, `set_owners` displaces), one worked example, and three
   task guides — lint a file, write a new one, modify an existing one — plus a

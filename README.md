@@ -191,9 +191,8 @@ unchanged: 0 op(s) applied, 0 skipped; 0 line change(s), 0 path(s) change owners
 ## How to: lint a CODEOWNERS file
 
 `audit` is the linter and it is read-only — where a fix is expressible it prints an op
-string for a human to run, and never applies one itself. `lint` is the command that
-applies them; that's [below](#fixing-what-it-finds-lint), and in full in
-[docs/LINTING.md](docs/LINTING.md).
+string for a human to run, and never applies one itself. `lint`
+([below](#fixing-what-it-finds-lint)) is the command that applies them.
 
 ```console
 $ codeowners-tool audit
@@ -242,47 +241,16 @@ is in [docs/REFERENCE.md](docs/REFERENCE.md#audit-checks). Run a subset with
 
 ### Fixing what it finds: `lint`
 
-`audit` reports twelve checks; `lint` repairs three of them, in this order:
-
-1. **Rejoins `@`handles that whitespace has split** — `/x/ @ org/team` is a line GitHub
-   cannot parse and skips entirely, so that team owns nothing. Repaired *before* anyone
-   asks whether the team exists, because `@` and `org/team` are one owner nobody has
-   looked up yet, not two that are missing.
-2. **Removes users and teams that no longer exist** — a deleted team is a review request
-   that silently goes nowhere.
-3. **Removes rules matching no files** — only with `--remove-stale-paths`, because a dead
-   pattern is often deliberate.
-
-Look before you write; `--dry-run` changes nothing:
+`lint` repairs what `audit` reports: handles whitespace has broken, owners that no longer
+exist, and — with `--remove-stale-paths` — rules matching no files. Exit 4 means the file
+still needs a person, so the dry run is your CI gate.
 
 ```console
 $ GITHUB_TOKEN=... codeowners-tool lint --github-repo org/repo --dry-run
-lint: 2 fix(es) pending in .github/CODEOWNERS (--dry-run; nothing written)
-  [repair-owner-spacing] (line 3) "/x/ @ acme/live" → "/x/ @acme/live"
-  [remove-dead-owner] (line 5) @acme/gone removed from "/y/": team @acme/gone does not exist (deleted or renamed); review requests to it silently do nothing
-  owners change: y/b.go  {@acme/live, @acme/gone} → {@acme/live}
-$ echo $?
-4
 ```
 
-Drop `--dry-run` to write it. **Exit 4 means the file still needs a person** — which makes
-the dry run your CI gate:
-
-```yaml
-- run: codeowners-tool lint --dry-run --github-repo ${{ github.repository }}
-  env:
-    GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-```
-
-Three things worth knowing up front. It **needs a token and `--github-repo`** — whether an
-owner exists is not decidable offline. It **fails closed for the whole run**: one lookup
-it cannot answer and nothing is written, not even the offline whitespace fixes. And it
-**refuses what it would have to guess at** — `@org /team` reads exactly like `@alice
-/docs`, so lint repairs neither and reports the line.
-
-**[docs/LINTING.md](docs/LINTING.md)** is the rest: every stage in detail, the exit-code
-table, the errors you'll actually hit and what to do about each, the `--on-empty` choices,
-and why you shouldn't schedule `lint` and `sync` against the same owners.
+Drop `--dry-run` to write it. **[docs/LINTING.md](docs/LINTING.md)** has the flags, the
+exit codes, and what to do about every error it can print.
 
 There's a second kind of lint that has nothing to do with a repo. If you keep your ops in
 a policy file, `check` validates the file itself:
