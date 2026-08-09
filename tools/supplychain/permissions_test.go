@@ -16,6 +16,9 @@ var (
 	jobPermsRe   = regexp.MustCompile(`(?m)^    permissions:\s*$`)
 	contentsRe   = regexp.MustCompile(`(?m)^\s*contents:\s*write\b`)
 	topLevelKeyR = regexp.MustCompile(`^[A-Za-z0-9_-]+:`)
+
+	attestUsesRe  = regexp.MustCompile(`(?m)^\s*(?:-\s*)?uses:\s*["']?actions/attest[^\s"'@]*@`)
+	attestWriteRe = regexp.MustCompile(`(?m)^\s*attestations:\s*write\b`)
 )
 
 // splitJobs maps each job name to its block. A line scan, not a YAML parse:
@@ -92,6 +95,30 @@ func TestSupplyChain_HomebrewJobCannotWriteThisRepository(t *testing.T) {
 	}
 	if contentsRe.MatchString(block) {
 		t.Errorf("the homebrew job declares contents: write on THIS repository, but it only reads tools/gen-formula.sh and writes to the tap with its own PAT.\nDeclare `permissions: contents: read`.")
+	}
+}
+
+// Least privilege has a floor: a job must still hold what its own steps need.
+// Minting the OIDC token that signs the attestation (id-token: write) and writing
+// the signed statement to the repository's attestation store (attestations: write)
+// are separate permissions, and the job held only the first — so every release
+// after the attest step was added died on "Resource not accessible by
+// integration". The step runs before `gh release create` on purpose, which turns
+// the missing permission into a dropped release rather than an unsigned one.
+func TestSupplyChain_JobsThatAttestCanWriteAnAttestation(t *testing.T) {
+	for file, body := range workflowFiles(t) {
+		if !attestUsesRe.MatchString(stripComments(body)) {
+			continue
+		}
+		for name, block := range splitJobs(t, body) {
+			block = stripComments(block)
+			if !attestUsesRe.MatchString(block) {
+				continue
+			}
+			if !attestWriteRe.MatchString(block) {
+				t.Errorf("%s: job %q runs an actions/attest* step but declares no `attestations: write`.\nid-token: write only mints the signing token; persisting the attestation needs attestations: write, and without it the step fails with \"Resource not accessible by integration\".", file, name)
+			}
+		}
 	}
 }
 
