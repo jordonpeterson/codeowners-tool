@@ -54,6 +54,20 @@ changes to which class a failure lands in are called out explicitly.
 - `--out`, `--summary-out` and `plan --out` are documented in their flag help as
   trusted operator paths: overwritten, and not contained to `--repo`. Unlike
   `--file` and the discovered CODEOWNERS path, no repository can influence them.
+- **The Homebrew tap pulls its own bump instead of the release pushing it.** The
+  push needed a personal access token holding write on a second repository,
+  stored here, with no way for this repository to see whether it was still valid.
+  A workflow in `jordonpeterson/homebrew-tap` now polls for the newest release and
+  writes its own formula with the token Actions mints for it, so there is no
+  cross-repo secret to rotate or to silently expire. It verifies the release's
+  build provenance before writing, so the formula's `sha256` values mean "built by
+  this workflow" rather than "whatever that release currently holds". The cost is
+  latency — a release cannot notify the tap without reintroducing the token — so
+  the tap polls hourly and can be run on demand.
+- A supply-chain gate now rejects any `secrets.*` reference other than
+  `GITHUB_TOKEN` in a workflow. The failed tap token was invisible precisely
+  because an unset secret is indistinguishable from a set one until something
+  tries to use it.
 
 ### Fixed
 
@@ -68,6 +82,13 @@ changes to which class a failure lands in are called out explicitly.
 - **A change to `release.yml` cuts a release.** The path filter listed only the
   binary's sources, so a merge that repairs the release pipeline could not itself
   publish the releases the broken pipeline had dropped.
+- **The Homebrew formula tracks releases again.** `brew install
+  jordonpeterson/tap/codeowners-tool` — the first install method the README lists
+  — served `v0.0.2` from July 28, missing every fix through `v0.0.6`. The bump was
+  never automated in practice: the job that pushed it was gated on a
+  `HOMEBREW_TAP_TOKEN` secret that was never set, and with the secret absent it
+  logged a notice and exited 0, so four releases showed a green `bump homebrew
+  tap` while the formula went nowhere.
 
 ## Earlier releases
 

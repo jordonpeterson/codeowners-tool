@@ -80,21 +80,24 @@ func TestSupplyChain_EveryReleaseJobDeclaresItsOwnPermissions(t *testing.T) {
 	}
 }
 
-// The Homebrew job pushes to the tap with its own PAT, so a token that can
-// rewrite this repository's releases is standing blast radius.
-func TestSupplyChain_HomebrewJobCannotWriteThisRepository(t *testing.T) {
-	jobs := splitJobs(t, releaseWorkflow(t))
-	block, ok := jobs["homebrew"]
-	if !ok {
-		t.Skipf("no `homebrew` job in release.yml; jobs present: %v", jobNames(jobs))
-	}
-	// Checking only for the absence of `contents: write` passes VACUOUSLY: the job
-	// holds it precisely BECAUSE it declares nothing. The missing block is it.
-	if !jobPermsRe.MatchString(block) {
-		t.Fatalf("the homebrew job declares no `permissions:` block, so it inherits the workflow-level contents: write on THIS repository — while all it does here is read tools/gen-formula.sh.")
-	}
-	if contentsRe.MatchString(block) {
-		t.Errorf("the homebrew job declares contents: write on THIS repository, but it only reads tools/gen-formula.sh and writes to the tap with its own PAT.\nDeclare `permissions: contents: read`.")
+// The release used to push the Homebrew formula to jordonpeterson/homebrew-tap
+// with a HOMEBREW_TAP_TOKEN secret — a personal access token holding write on a
+// second repository, for the lifetime of the secret. It was never set, and the
+// job it gated logged a notice and exited 0, so four releases reported a green
+// "bump homebrew tap" while the formula stayed at v0.0.2. The tap now pulls its
+// own bump with the token Actions mints for it, and this asserts the credential
+// does not come back: `secrets.GITHUB_TOKEN` is scoped to this repository and
+// minted per run, and anything else in a workflow holding contents: write is a
+// standing grant on something else.
+func TestSupplyChain_NoWorkflowHoldsACrossRepositoryCredential(t *testing.T) {
+	secretRefRe := regexp.MustCompile(`\$\{\{\s*secrets\.([A-Za-z_][A-Za-z0-9_]*)\s*\}\}`)
+	for file, body := range workflowFiles(t) {
+		for _, m := range secretRefRe.FindAllStringSubmatch(stripComments(body), -1) {
+			if m[1] == "GITHUB_TOKEN" {
+				continue
+			}
+			t.Errorf("%s reads `secrets.%s`. A secret that is not GITHUB_TOKEN is a standing credential for something outside this repository, and its absence is invisible — the tap token was never set, and the job that needed it stayed green for four releases while doing nothing.\nIf a second repository has to be written, have THAT repository pull the change with its own token.", file, m[1])
+		}
 	}
 }
 
@@ -148,12 +151,4 @@ func stripComments(body string) string {
 		out = append(out, l)
 	}
 	return strings.Join(out, "\n")
-}
-
-func jobNames(m map[string]string) []string {
-	out := make([]string, 0, len(m))
-	for k := range m {
-		out = append(out, k)
-	}
-	return out
 }
