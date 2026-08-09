@@ -12,8 +12,10 @@ name: Release
 #
 # Runs when a merge to main changes the binary — the command or its internal
 # packages, the module files, or the VERSION file (for a manual minor/major
-# bump). Docs- or CI-config-only merges don't cut a release. Can also be run
-# on demand from the Actions tab (workflow_dispatch) to publish the next patch.
+# bump) — or when it changes this file, since a merge that repairs the release
+# pipeline has to be able to publish the releases the broken pipeline dropped.
+# Docs- or CI-config-only merges don't cut a release. Can also be run on demand
+# from the Actions tab (workflow_dispatch) to publish the next patch.
 on:
   push:
     branches: [main]
@@ -23,6 +25,7 @@ on:
       - 'go.mod'
       - 'go.sum'
       - 'VERSION'
+      - '.github/workflows/release.yml'
   workflow_dispatch: {}
 
 permissions:
@@ -43,6 +46,11 @@ jobs:
     permissions:
       contents: write # create tags and releases
       id-token: write # mint the OIDC token the provenance attestation is signed with
+      # Writing the signed statement to the repository's attestation store is a
+      # separate permission from minting the token that signs it. Without it the
+      # attest step fails with "Resource not accessible by integration" — and
+      # because it runs before `gh release create`, the whole release is lost.
+      attestations: write
     outputs:
       tag: ${{ steps.ver.outputs.tag }}
       published: ${{ steps.guard.outputs.exists == 'false' }}

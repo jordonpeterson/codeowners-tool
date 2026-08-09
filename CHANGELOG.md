@@ -55,6 +55,20 @@ changes to which class a failure lands in are called out explicitly.
   trusted operator paths: overwritten, and not contained to `--repo`. Unlike
   `--file` and the discovered CODEOWNERS path, no repository can influence them.
 
+### Fixed
+
+- **Merges to `main` publish a release again.** The build-provenance step added in
+  the last change ran with `id-token: write` and no `attestations: write` — the
+  token that signs the statement, but not the permission to store it. Every
+  release since died there on `Resource not accessible by integration`, and
+  because the step deliberately runs before `gh release create`, the failure
+  dropped the whole release rather than leaving an unattested one. `v0.0.6` never
+  shipped. A supply-chain gate now fails any job that runs an `actions/attest*`
+  step without the permission to persist its output.
+- **A change to `release.yml` cuts a release.** The path filter listed only the
+  binary's sources, so a merge that repairs the release pipeline could not itself
+  publish the releases the broken pipeline had dropped.
+
 ## Earlier releases
 
 `v0.0.1` (2026-07-27) through `v0.0.5` (2026-08-04) predate this file; see the
