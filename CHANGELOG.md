@@ -41,6 +41,36 @@ changes to which class a failure lands in are called out explicitly.
 
 ### Added
 
+- **`audit --lint` repairs the whole file instead of only describing it.** Three
+  stages, in this order: rejoin `@`handles that whitespace has split
+  (`/x/ @ org/team` — GitHub skips such a line entirely, so that team owns
+  nothing and nobody is told); remove users and teams that definitively do not
+  exist; and, only with `--remove-stale-paths`, delete rules matching zero
+  tracked files. The rejoin runs before any lookup on purpose: `@` and
+  `org/team` are not two owners that do not exist, they are one owner nobody has
+  asked about yet. `--dry-run` reports without writing and exits 4, which is the
+  CI gate. `audit` without `--lint` is unchanged and still never writes; the
+  bytes still reach disk only through `apply`, with the hash pin, the size cap,
+  the pre-write validation and the atomic rename.
+  - R-12 is applied to the WHOLE RUN rather than per owner: one inconclusive
+    lookup and nothing is written at all, including the offline whitespace
+    fixes. A rate-limited run therefore leaves the file byte-identical instead
+    of dribbling out partial repairs, and `--lint` requires a token and
+    `--github-repo` rather than silently degrading to a whitespace tidy.
+  - The repair is a guess, so its boundaries are exact: the run must start with
+    a token beginning `@`, every join must sit against an `@` or a `/`, and the
+    concatenation must be a valid handle — so `@a @b` never fuses into `@a@b`
+    and an email owner is never repaired at all, since `a@b.com` + `/x`
+    concatenates into a syntactically valid address nobody wrote. A repair is
+    accepted only if the result re-parses as a rule with a byte-identical
+    pattern. Lines outside those rules are reported and left as written.
+  - Stale-path removal stays opt-in per R-11: a pattern matching nothing may be
+    deliberate and forward-looking, and deleting it destroys that intent.
+  - Exit codes under `--lint` follow one rule — 0 when the file needs nothing
+    further from a human, 4 when it does (pending fixes under `--dry-run`, or a
+    line lint would not guess at). `--remove-stale-paths`, `--on-empty` and
+    `--dry-run` are rejected with exit 3 when `--lint` is absent rather than
+    ignored.
 - `SECURITY.md`, `CONTRIBUTING.md`, `CHANGELOG.md`, `.github/dependabot.yml`
   (GitHub Actions only — see the file), and a `CODEOWNERS` for this repository,
   which previously failed its own A-11 check.
