@@ -299,7 +299,14 @@ Four things to know:
   `--file`.
 - **It refuses what it can't repair.** `@org /team` reads exactly like `@alice /docs` —
   somebody putting two rules on one line — so lint repairs neither and reports the line.
-  Only a visibly broken handle (`@ org/team`, `@org/ team`, `@ org / team`) is rejoined.
+  Only a visibly broken handle is rejoined (`@ org/team`, `@org/ team`, `@ org / team`),
+  and only until it becomes a valid owner: `@ alice /docs` assembles `@alice` and then
+  stops, because everything after that is the same ambiguity again.
+
+One thing to watch if you schedule it. `sync` adds the owners your policy names and never
+asks whether they exist; `lint` removes owners that don't and knows nothing about your
+policy. Point both at the same repo on a timer and they will undo each other forever, each
+one exiting 0. Run `lint` on a schedule *or* `sync`, not both against overlapping owners.
 
 It is not a shortcut around the invariants: the edits are proven against every tracked
 file first, then written through the same `apply` path as everything else — hash pinned,

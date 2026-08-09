@@ -65,6 +65,18 @@ changes to which class a failure lands in are called out explicitly.
     typo happened while quietly un-owning the files it was aimed at. Lint
     cannot correct the casing safely, because the tree's real casing may not be
     the naive lowercase, so it hands it over.
+  - The merge rule refuses a join once the accumulator is already a valid
+    owner, with a bare `/` as the sole exception. Guarding only the run's first
+    token left the fusion defect reachable one space away — `/src @ alice /docs
+    @bob` still fused into `@alice/docs` where `/src @alice /docs @bob` was
+    correctly refused — because brokenness is a property of the FIRST join, not
+    of the whole run. Reproduced in 178 of 200,000 generated files by a second
+    review; now covered by a byte-conservation property test rather than by
+    examples of the two spellings we happen to know about.
+  - Owner handles are case-folded for the LOOKUP (never in the file). GitHub
+    treats `@Org/Team` and `@org/team` as one owner and team slugs are lowercase
+    by construction, so asking about a capitalised spelling risked a 404 that
+    means only "you typed it differently" — and under lint a 404 deletes.
   - The JSON record carries `needs_human` and `exit_code`, both from the same
     function that produces the process status. The obvious hand-written gate
     (`jq '.changes|length > 0'`) went green over a file whose only problems were

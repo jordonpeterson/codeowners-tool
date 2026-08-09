@@ -299,6 +299,7 @@ func TestR12_InconclusiveAlsoBlocksTheOfflineStages(t *testing.T) {
 
 	opts := fcOpts()
 	opts.RemoveStalePaths = true // stage 3 explicitly opted in
+	opts.WorkTree = []string{"x/a.go"}
 
 	content := []byte("* @flaky\n/x/ @ org/team\n/ghost/ @keep\n")
 	res, err := lint.Build(content, []string{"x/a.go"}, v, opts)

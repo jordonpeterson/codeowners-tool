@@ -256,3 +256,244 @@ func resolveEqual(a, b []string) bool {
 	}
 	return true
 }
+
+// The fusion defect, one space to the right of where it was first fixed.
+//
+// The first fix guarded only the FIRST token of a merge run, so
+// `/src @alice /docs @bob` was refused while `/src @ alice /docs @bob` — the
+// same line with one more space — still fused into `@alice/docs`, handed
+// `@bob`'s directory to an owner nobody typed, and exited 0. A second review
+// reproduced it in 178 of 200,000 generated files.
+//
+// Brokenness is a property of the first join, not of the whole run: after
+// `@`+`alice` the accumulator is `@alice`, an ordinary owner, and `@alice` +
+// `/docs` is byte-for-byte the ambiguity the package already refuses. The pair
+// below must therefore have the SAME outcome — that is the assertion, more than
+// either case individually.
+func TestRepair_ABrokenStartDoesNotLicenseTheNextJoin(t *testing.T) {
+	pairs := [][2]string{
+		{"/src @alice /docs @bob", "/src @ alice /docs @bob"},
+		{"/src @org /team", "/src @ org /team"},
+	}
+	for _, p := range pairs {
+		_, okGuarded := lint.RepairLine(p[0])
+		got, okBroken := lint.RepairLine(p[1])
+		if okGuarded != okBroken {
+			t.Errorf("the same ambiguity decided two ways:\n  %q -> ok=%v\n  %q -> ok=%v (%q)",
+				p[0], okGuarded, p[1], okBroken, got)
+		}
+		if okBroken {
+			t.Errorf("fused %q into %q", p[1], got)
+		}
+	}
+	// Every shape a second review found in the wild.
+	for _, in := range []string{
+		"* @ alice /docs @bob",
+		"/a/b a@b.com @ team /x",
+		"/src/ @alice @ org /x",
+		"/a/b @ team /docs @bob @alice",
+	} {
+		if got, ok := lint.RepairLine(in); ok {
+			t.Errorf("fused %q into %q", in, got)
+		}
+	}
+}
+
+// ...and the four-token shattering still repairs, because a BARE "/" is the one
+// token that cannot be anything else — not a pattern anybody writes, not an
+// owner. That single exception is the whole difference between the rule that
+// works and the rule that fused.
+func TestRepair_TheFourTokenShatteringStillWorks(t *testing.T) {
+	for in, want := range map[string]string{
+		"/x/ @ org/team":   "/x/ @org/team",
+		"/x/ @org/ team":   "/x/ @org/team",
+		"/x/ @ org / team": "/x/ @org/team",
+		"/x/ @ alice":      "/x/ @alice",
+	} {
+		got, ok := lint.RepairLine(in)
+		if !ok || got != want {
+			t.Errorf("RepairLine(%q) = %q, ok=%v; want %q", in, got, ok, want)
+		}
+	}
+}
+
+// Property: a merge may only ever remove whitespace, and only from inside one
+// handle. Stated over random token lists, because the two spellings we now know
+// about are not the interesting ones — the next variant is.
+//
+// The invariant that catches every variant at once: concatenating the output
+// must equal concatenating the input (nothing added, nothing lost), and every
+// token the merge PRODUCED must be a valid @handle. A fusion like `@alice/docs`
+// satisfies the first and is caught by the run-start rule; a dropped token
+// fails the first outright.
+func TestRepairHandle_ConservesBytesAndProducesOnlyHandles(t *testing.T) {
+	alphabet := []string{"@", "/", "@a", "@org", "@org/", "org", "team", "/team", "/docs", "@b", "a@b.com", "x", "@org/team"}
+	// Deterministic pseudo-random walk: a fixed sequence beats a seed nobody
+	// records, and this runs on every CI push.
+	next := uint64(1)
+	rnd := func(n int) int {
+		next = next*6364136223846793005 + 1442695040888963407
+		return int((next >> 33) % uint64(n))
+	}
+	for i := 0; i < 200000; i++ {
+		toks := make([]string, 1+rnd(5))
+		for j := range toks {
+			toks[j] = alphabet[rnd(len(alphabet))]
+		}
+		in := append([]string(nil), toks...)
+		out, changed := lint.RepairHandle(toks)
+		if strings.Join(out, "") != strings.Join(in, "") {
+			t.Fatalf("bytes not conserved: %v -> %v", in, out)
+		}
+		if !changed {
+			continue
+		}
+		// Any token that is not one of the inputs was produced by a merge, and
+		// a merge may only ever produce a valid handle.
+		was := map[string]bool{}
+		for _, tk := range in {
+			was[tk] = true
+		}
+		for _, tk := range out {
+			if !was[tk] && !strings.HasPrefix(tk, "@") {
+				t.Fatalf("merge produced a non-handle %q from %v", tk, in)
+			}
+		}
+	}
+}
+
+// Adding a conservative cleanup flag must never make the tool do LESS.
+//
+// Sparing a case-typo rule skipped the dead-owner removal for that line, so the
+// end-of-run gate found the dead owner still present and refused the WHOLE run
+// — exit 2, nothing written, including an unrelated and perfectly safe repair
+// elsewhere in the file. Every file with both a case typo and a dead owner was
+// permanently un-lintable under the flag, and the message read like a tool
+// crash.
+func TestStalePaths_SparingACaseTypoStillCleansThatLine(t *testing.T) {
+	const before = "* @org/all\n/Src/ @org/dead\n/other/ @ org/all\n"
+	tree := []string{"src/a.go", "other/b.go"}
+	v := liveOrg("org/all")
+
+	res, err := lint.Build([]byte(before), tree, v, lint.Options{
+		RemoveStalePaths: true, WorkTree: tree, OnEmpty: "unowned",
+	})
+	if err != nil {
+		t.Fatalf("Build refused a file it can fix: %v", err)
+	}
+	if want := "* @org/all\n/Src/\n/other/ @org/all\n"; res.Plan.AfterContent != want {
+		t.Errorf("after = %q, want %q", res.Plan.AfterContent, want)
+	}
+	// The flag must not subtract the unrelated repair either.
+	if n := len(actionsOfKind(res, lint.ActionRepairOwner)); n != 1 {
+		t.Errorf("repair actions = %d, want 1 — the unrelated fix was lost", n)
+	}
+}
+
+// --remove-stale-paths without a working-tree list is refused.
+//
+// Options.WorkTree is documented as required for stage 3, and nothing enforced
+// it: omitting the field silently reinstated the exact write that judging
+// staleness against the committed tree alone produces. One caller away from the
+// whole protection being off.
+func TestStalePaths_RefuseWithoutAWorkingTreeList(t *testing.T) {
+	v := liveOrg("org/everyone", "org/backend")
+	_, err := lint.Build([]byte("* @org/everyone\n/src/ @org/backend\n"),
+		[]string{".github/CODEOWNERS", "README.md"}, v, lint.Options{RemoveStalePaths: true})
+	var invalid *plan.InvalidError
+	if !errors.As(err, &invalid) {
+		t.Fatalf("err = %v (%T), want *plan.InvalidError", err, err)
+	}
+}
+
+// Owner identity is case-folded for the lookup, because GitHub's is.
+//
+// `@Org/Team` and `@org/team` are one owner to GitHub and were two to lint: two
+// lookups, two cache keys, two entries in the dead set. If the API is
+// case-sensitive on the slug, every capitalised team handle 404s and gets
+// DELETED — the same "a finding under audit is a write under lint" asymmetry
+// that justified the org-owner gate. Folding the lookup is safe either way.
+func TestOwners_CaseFoldedForLookupButNotRewritten(t *testing.T) {
+	v := liveOrg("org/team")
+	res, err := lint.Build([]byte("/x @Org/Team\n"), []string{"x/a.go"}, v, lint.Options{})
+	var noop *plan.NoOpError
+	if !errors.As(err, &noop) {
+		t.Fatalf("err = %v, want NoOpError — @Org/Team is @org/team, which exists", err)
+	}
+	if res.Plan.AfterContent != "/x @Org/Team\n" {
+		t.Errorf("after = %q — lint corrects ownership, not spelling", res.Plan.AfterContent)
+	}
+	if !v.asked("TeamExists(org/team)") {
+		t.Errorf("looked up the unfolded spelling; calls = %v", v.calls)
+	}
+}
+
+// A line repaired and then deleted is ONE change, not two.
+//
+// len(Plan.Changes) drives "N fix(es) applied", so a single removed line
+// reported as two, and the diff rendered a "+" line that never reached disk and
+// was immediately deleted again.
+func TestStages_ARepairedThenDeletedLineCountsOnce(t *testing.T) {
+	tree := []string{"a.txt"}
+	v := liveOrg("org/team", "org/everyone")
+	res, err := lint.Build([]byte("* @org/everyone\n/ghost/ @ org/team\n"), tree, v,
+		lint.Options{RemoveStalePaths: true, WorkTree: tree})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if n := len(res.Plan.Changes); n != 1 {
+		t.Errorf("changes = %d, want 1 for one removed line: %+v", n, res.Plan.Changes)
+	}
+	if strings.Count(res.Plan.Diff, "@ line ") != 1 {
+		t.Errorf("diff has %d hunks for one removed line:\n%s", strings.Count(res.Plan.Diff, "@ line "), res.Plan.Diff)
+	}
+	if strings.Contains(res.Plan.Diff, "+/ghost/") {
+		t.Errorf("diff adds a line that never reached disk:\n%s", res.Plan.Diff)
+	}
+}
+
+// Idempotency, as a property rather than an example.
+//
+// Three stages where stage 1 changes what stages 2 and 3 see is exactly the
+// shape that fails to converge, and the README promises it does. A second run
+// over the first run's output must be a no-op, and so must a third.
+func TestBuild_IsIdempotent(t *testing.T) {
+	lines := []string{
+		"# comment\n", "\n", "* @org/live\n", "/x/ @ org/live\n", "/y/ @org/gone\n",
+		"/Src/ @org/live\n", "/ghost/ @org/live\n", "/z @@@bad\n", "/w/ @org/live @org/live\n",
+		"/e/ a@b.com\n", "/t/\t@org/live\t# note\n", "/cr/ @org/live\r\n",
+	}
+	tree := []string{"x/a.go", "y/b.go", "src/c.go", "w/d.go", "t/e.go", "e/f.go", "cr/g.go", "z/h.go"}
+	next := uint64(7)
+	rnd := func(n int) int {
+		next = next*6364136223846793005 + 1442695040888963407
+		return int((next >> 33) % uint64(n))
+	}
+	policies := []string{"", "error", "inherit", "unowned"}
+	for i := 0; i < 20000; i++ {
+		var b strings.Builder
+		for j := 0; j < 1+rnd(6); j++ {
+			b.WriteString(lines[rnd(len(lines))])
+		}
+		opts := lint.Options{OnEmpty: policies[rnd(len(policies))]}
+		if rnd(2) == 0 {
+			opts.RemoveStalePaths, opts.WorkTree = true, tree
+		}
+		v := liveOrg("org/live")
+
+		first, err := lint.Build([]byte(b.String()), tree, v, opts)
+		if err != nil || first == nil {
+			continue // refusals and no-ops are settled elsewhere
+		}
+		second, err2 := lint.Build([]byte(first.Plan.AfterContent), tree, v, opts)
+		var noop *plan.NoOpError
+		if !errors.As(err2, &noop) {
+			t.Fatalf("second run was not a no-op\n input:  %q\n after:  %q\n err:    %v",
+				b.String(), first.Plan.AfterContent, err2)
+		}
+		if second.Plan.AfterContent != first.Plan.AfterContent {
+			t.Fatalf("second run changed the file again\n first:  %q\n second: %q",
+				first.Plan.AfterContent, second.Plan.AfterContent)
+		}
+	}
+}

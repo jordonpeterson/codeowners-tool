@@ -253,16 +253,35 @@ func longestHandleJoin(tokens []string, i int) int {
 	if !strings.HasPrefix(tokens[i], "@") || file.ValidOwnerToken(tokens[i]) {
 		return i
 	}
-	best, acc := i, tokens[i]
+	best, acc, accValid := i, tokens[i], false
 	for j := i + 1; j < len(tokens) && j-i < maxHandleTokens; j++ {
 		if !joinable(acc, tokens[j]) {
 			break
 		}
+		// Once the accumulator is ITSELF a valid owner, the only thing it may
+		// still absorb is a BARE "/" — the separator in the four-token
+		// shattering `@ org / team`.
+		//
+		// Guarding only the first token was not enough, and the gap was one
+		// space wide: `/src @alice /docs @bob` was correctly refused, while
+		// `/src @ alice /docs @bob` fused into `@alice/docs` and handed `@bob`'s
+		// directory away, exit 0 (found by a second review; 178 of 200,000
+		// generated files reproduced it). Brokenness is a property of the FIRST
+		// join, not of the whole run: after `@`+`alice` the accumulator is
+		// `@alice`, a perfectly ordinary owner, and `@alice` + `/docs` is
+		// byte-for-byte the ambiguity this function exists to refuse.
+		//
+		// A bare "/" is the one exception because it cannot be anything else —
+		// it is not a pattern anyone writes and not an owner, so absorbing it
+		// carries no alternative reading.
+		if accValid && tokens[j] != "/" {
+			break
+		}
 		acc += tokens[j]
-		// An intermediate step may be invalid on the way to a valid whole:
-		// `@` + `org` + `/` + `team` passes through `@org/`, which is not a
-		// handle. Keep extending and remember the last spelling that was.
-		if strings.HasPrefix(acc, "@") && file.ValidOwnerToken(acc) {
+		// Recomputed, never latched: `@ org / team` passes through `@org/`,
+		// which is not a handle, on the way to one that is.
+		accValid = strings.HasPrefix(acc, "@") && file.ValidOwnerToken(acc)
+		if accValid {
 			best = j
 		}
 	}
@@ -459,6 +478,9 @@ func Build(content []byte, tree []string, v Verifier, opts Options) (*Result, er
 	// initial commit or a tag on an empty tree all reach it). plan.Build
 	// refuses a zero-match scope under R-5 for the same reason; this is lint's
 	// analogue.
+	if opts.RemoveStalePaths && len(opts.WorkTree) == 0 {
+		return nil, &plan.InvalidError{Msg: "refusing --remove-stale-paths: Options.WorkTree is empty, so staleness would be judged against the committed tree alone while the edit lands on the working-tree file — a directory created but not yet committed would read as dead and lose its owners; supply the checkout's file list (gittree.ListWorkTree)"}
+	}
 	if opts.RemoveStalePaths && len(tree) == 0 {
 		return nil, &plan.InvalidError{Msg: "refusing --remove-stale-paths: the tree at this ref has no files, so EVERY rule matches nothing and staleness cannot distinguish a dead rule from a tree the tool cannot see — the whole file would be deleted on a proof that examined zero paths (R-5's reasoning)"}
 	}
@@ -541,7 +563,10 @@ func Build(content []byte, tree []string, v Verifier, opts Options) (*Result, er
 			continue
 		}
 		if gone {
-			dead[o] = reason
+			// Keyed by the folded spelling for the same reason the lookup is:
+			// two capitalisations of one dead team must both go, and a file
+			// that names it both ways must not keep one of them.
+			dead[foldOwner(o)] = reason
 		}
 	}
 	// R-12, applied to the whole run rather than to one owner. Partial
@@ -588,7 +613,8 @@ func Build(content []byte, tree []string, v Verifier, opts Options) (*Result, er
 			// success. This is audit's A-5, and A-5's answer is to correct the
 			// casing, which lint has no way to do safely: the tree's real
 			// casing may not be the naive lowercase. Spared and handed over.
-			if sugg, caseOnly := caseOnlyMiss(r, tree, opts.WorkTree); caseOnly {
+			sugg, caseOnly := caseOnlyMiss(r, tree, opts.WorkTree)
+			if caseOnly {
 				msg := fmt.Sprintf("pattern %q matches nothing ONLY because of case — CODEOWNERS is case-sensitive (S-6), so this is a typo, not a dead rule; kept, because deleting it would silently un-own the files it was meant to cover", r.PatternText)
 				if sugg != "" {
 					msg += fmt.Sprintf("; %q would match", sugg)
@@ -597,25 +623,43 @@ func Build(content []byte, tree []string, v Verifier, opts Options) (*Result, er
 					Kind: ActionKeptCaseMismatch, Line: i + 1, Pattern: r.PatternText,
 					Before: f.LineText(i), Reason: msg,
 				})
+				// Deliberately NOT `continue`: the rule is being KEPT, so it
+				// still has to be cleaned like any other. Skipping the removal
+				// below left a dead owner on the line, which the end-of-run
+				// gate then found and refused the WHOLE run over — so adding a
+				// conservative cleanup flag made the tool do strictly less than
+				// nothing, and took every unrelated repair in the file down
+				// with it (found by a second review).
+			} else {
+				res.Actions = append(res.Actions, Action{
+					Kind: ActionRemoveStale, Line: i + 1, Pattern: r.PatternText, Before: f.LineText(i),
+					Reason: fmt.Sprintf("pattern %q matches nothing tracked at this ref and nothing on disk, so it cannot win any path today and deleting it changes no CURRENT ownership; a path added later that it would have matched now falls to whatever rule remains (--remove-stale-paths; R-11 keeps this off by default because a dead pattern may be deliberate)", r.PatternText),
+				})
+				res.Plan.Changes = append(res.Plan.Changes, plan.Change{
+					Action: "delete", Line: i + 1, Pattern: r.PatternText,
+					OldOwners: r.OwnersCopy(), OldLine: f.LineText(i),
+					Reason: "stale rule deleted (stage 3): its pattern matches nothing tracked and nothing on disk",
+				})
+				// A line that stage 1 repaired and stage 3 now deletes is ONE
+				// net change, not two. Leaving the amend in place reported "2
+				// fix(es)" for a single removed line and rendered a diff hunk
+				// adding text that never reached disk.
+				res.Plan.Changes = dropAmendOn(res.Plan.Changes, i+1)
+				f.DeleteLine(i)
 				continue
 			}
-			res.Actions = append(res.Actions, Action{
-				Kind: ActionRemoveStale, Line: i + 1, Pattern: r.PatternText, Before: f.LineText(i),
-				Reason: fmt.Sprintf("pattern %q matches nothing tracked at this ref and nothing on disk, so it cannot win any path today and deleting it changes no CURRENT ownership; a path added later that it would have matched now falls to whatever rule remains (--remove-stale-paths; R-11 keeps this off by default because a dead pattern may be deliberate)", r.PatternText),
-			})
-			res.Plan.Changes = append(res.Plan.Changes, plan.Change{
-				Action: "delete", Line: i + 1, Pattern: r.PatternText,
-				OldOwners: r.OwnersCopy(), OldLine: f.LineText(i),
-				Reason: "stale rule deleted (stage 3): its pattern matches zero tracked files",
-			})
-			f.DeleteLine(i)
-			continue
 		}
 
 		var removed, keep []string
+		seenRemoved := map[string]bool{}
 		for _, o := range r.Owners {
-			if _, isDead := dead[o]; isDead {
-				removed = append(removed, o)
+			if _, isDead := dead[foldOwner(o)]; isDead {
+				// One action per owner, not per mention: a line naming the same
+				// dead team twice is still one owner going away.
+				if !seenRemoved[o] {
+					seenRemoved[o] = true
+					removed = append(removed, o)
+				}
 			} else {
 				keep = append(keep, o)
 			}
@@ -710,7 +754,7 @@ func Build(content []byte, tree []string, v Verifier, opts Options) (*Result, er
 	// reviewer a name that goes nowhere), and no owner may be invented.
 	for _, r := range afterFile.Rules() {
 		for _, o := range r.Owners {
-			if _, isDead := dead[o]; isDead {
+			if _, isDead := dead[foldOwner(o)]; isDead {
 				violations = append(violations, fmt.Sprintf("line %d still lists %s, which does not exist", r.LineIndex+1, o))
 			}
 			if !known[o] && !file.IsEmailOwner(o) {
@@ -741,7 +785,26 @@ func Build(content []byte, tree []string, v Verifier, opts Options) (*Result, er
 		// that never ran on precisely the lines a human still has to fix.
 		msg := "nothing to lint: no repairable owner spacing, and every owner named by a valid rule exists"
 		if n := res.NeedsHuman(); n > 0 {
-			msg = fmt.Sprintf("nothing lint can repair: %d line(s) are invalid in ways it will not guess at, and their owners were never checked — GitHub is skipping those lines", n)
+			// Two unrelated categories, and one sentence written for only one
+			// of them said the other was invalid, unchecked and skipped by
+			// GitHub — none of which is true of a case-only miss.
+			var stuck, typo int
+			for _, a := range res.Actions {
+				switch a.Kind {
+				case ActionUnrepairable:
+					stuck++
+				case ActionKeptCaseMismatch:
+					typo++
+				}
+			}
+			var parts []string
+			if stuck > 0 {
+				parts = append(parts, fmt.Sprintf("%d line(s) are invalid in ways lint will not guess at, and their owners were never checked — GitHub is skipping those lines", stuck))
+			}
+			if typo > 0 {
+				parts = append(parts, fmt.Sprintf("%d rule(s) match nothing only because of case, which is a typo lint will not correct for you (S-6)", typo))
+			}
+			msg = "nothing lint can repair: " + strings.Join(parts, "; ")
 		}
 		return res, &plan.NoOpError{Msg: msg}
 	}
@@ -782,7 +845,18 @@ func Build(content []byte, tree []string, v Verifier, opts Options) (*Result, er
 
 // ownerIsGone answers stage 2's question for one owner: does it definitively
 // not exist? An error means the question could not be answered (R-12).
+// LOOKUPS ARE CASE-FOLDED, identity is not.
+//
+// GitHub treats a login and an org/team handle case-insensitively, and team
+// slugs are lowercase by construction — so `@Org/Team` and `@org/team` are one
+// owner. Asking the API about the mixed-case spelling risks a 404 that means
+// nothing more than "you typed it differently", and under lint a 404 DELETES.
+// Folding the lookup is strictly safer: if the API is case-insensitive it
+// changes nothing, and if it is not, it prevents a live team being stripped
+// because somebody capitalised it. The file's own bytes are never rewritten
+// from this — lint corrects ownership, not spelling.
 func ownerIsGone(v Verifier, owner string) (gone bool, reason string, err error) {
+	owner = strings.ToLower(owner)
 	if org, slug, isTeam := splitTeam(owner); isTeam {
 		// A team 404 is only meaningful once the token has proven it can
 		// enumerate the org — otherwise "invisible to these scopes" and
@@ -871,6 +945,19 @@ func caseOnlyMiss(r *file.Rule, trees ...[]string) (suggestion string, caseOnly 
 	return "", false
 }
 
+// dropAmendOn removes a stage-1 amend recorded for a line that a later stage
+// deleted outright, so one touched line counts as one change.
+func dropAmendOn(changes []plan.Change, line int) []plan.Change {
+	out := changes[:0]
+	for _, c := range changes {
+		if c.Action == "amend" && c.Line == line {
+			continue
+		}
+		out = append(out, c)
+	}
+	return out
+}
+
 // matchesTree reports whether a rule governs at least one tracked file.
 func matchesTree(r *file.Rule, tree []string) bool {
 	for _, p := range tree {
@@ -889,7 +976,7 @@ func withoutDead(owners []string, dead map[string]string) []string {
 	}
 	out := make([]string, 0, len(owners))
 	for _, o := range owners {
-		if _, isDead := dead[o]; !isDead {
+		if _, isDead := dead[foldOwner(o)]; !isDead {
 			out = append(out, o)
 		}
 	}
@@ -898,11 +985,21 @@ func withoutDead(owners []string, dead map[string]string) []string {
 
 func anyDead(owners []string, dead map[string]string) bool {
 	for _, o := range owners {
-		if _, isDead := dead[o]; isDead {
+		if _, isDead := dead[foldOwner(o)]; isDead {
 			return true
 		}
 	}
 	return false
+}
+
+// foldOwner is the identity under which two owner tokens are the same owner.
+// @handles fold to lowercase (GitHub does); an email is left alone, because
+// the local part of an address is not ours to case-fold.
+func foldOwner(o string) string {
+	if strings.HasPrefix(o, "@") {
+		return strings.ToLower(o)
+	}
+	return o
 }
 
 func appendUnique(list []string, s string) []string {

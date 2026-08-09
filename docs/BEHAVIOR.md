@@ -1851,6 +1851,14 @@ so it is UNVERIFIABLE, not dead. Treating "cannot check" as "does not exist"
 is the single worst failure mode available to this package, and the rule is
 absolute: report the address, ask nobody about it, leave it on the line.
 
+### `TestBuild_IsIdempotent`
+
+Idempotency, as a property rather than an example.
+
+Three stages where stage 1 changes what stages 2 and 3 see is exactly the
+shape that fails to converge, and the README promises it does. A second run
+over the first run's output must be a no-op, and so must a third.
+
 ### `TestBuild_OnEmptyPolicies`
 
 SPEC R-6: removing the last owner of a rule is a reassignment of everything
@@ -1967,6 +1975,16 @@ destroy it in the one commit an operator is least likely to read closely: the
 automated one. The correct outcome is a file that still contains the broken
 line and a report that says so.
 
+### `TestOwners_CaseFoldedForLookupButNotRewritten`
+
+Owner identity is case-folded for the lookup, because GitHub's is.
+
+`@Org/Team` and `@org/team` are one owner to GitHub and were two to lint: two
+lookups, two cache keys, two entries in the dead set. If the API is
+case-sensitive on the slug, every capitalised team handle 404s and gets
+DELETED — the same "a finding under audit is a write under lint" asymmetry
+that justified the org-owner gate. Folding the lookup is safe either way.
+
 ### `TestR12_DeadOwnerBesideAnInconclusiveOneWritesNothing`
 
 SPEC R-12: the case the rule exists for — one owner PROVEN dead sitting on
@@ -2043,6 +2061,18 @@ it. It is reported in Result.Unverifiable and left exactly where it is.
 Proven from the call log, not from the output: an implementation that asks
 about `docs@example.com` and merely ignores the reply is one refactor away
 from believing it.
+
+### `TestRepairHandle_ConservesBytesAndProducesOnlyHandles`
+
+Property: a merge may only ever remove whitespace, and only from inside one
+handle. Stated over random token lists, because the two spellings we now know
+about are not the interesting ones — the next variant is.
+
+The invariant that catches every variant at once: concatenating the output
+must equal concatenating the input (nothing added, nothing lost), and every
+token the merge PRODUCED must be a valid @handle. A fusion like `@alice/docs`
+satisfies the first and is caught by the run-start rule; a dropped token
+fails the first outright.
 
 ### `TestRepairHandle_EmailConcatenationIsValidButForbidden`
 
@@ -2159,6 +2189,22 @@ Reported, because an implementation that treats "no owner tokens" as "a
 handle got split" would start manufacturing owners out of the pattern itself,
 and would do it on lines the file's authors were most deliberate about.
 
+### `TestRepair_ABrokenStartDoesNotLicenseTheNextJoin`
+
+The fusion defect, one space to the right of where it was first fixed.
+
+The first fix guarded only the FIRST token of a merge run, so
+`/src @alice /docs @bob` was refused while `/src @ alice /docs @bob` — the
+same line with one more space — still fused into `@alice/docs`, handed
+`@bob`'s directory to an owner nobody typed, and exited 0. A second review
+reproduced it in 178 of 200,000 generated files.
+
+Brokenness is a property of the first join, not of the whole run: after
+`@`+`alice` the accumulator is `@alice`, an ordinary owner, and `@alice` +
+`/docs` is byte-for-byte the ambiguity the package already refuses. The pair
+below must therefore have the SAME outcome — that is the assertion, more than
+either case individually.
+
 ### `TestRepair_LongLineDoesNotBlowUp`
 
 A long line must not take quadratic time.
@@ -2202,6 +2248,13 @@ twice. It conserves bytes and passes every other check, so only an explicit
 duplicate guard catches it. Fuzzing turned up 539 distinct inputs of this
 shape.
 
+### `TestRepair_TheFourTokenShatteringStillWorks`
+
+...and the four-token shattering still repairs, because a BARE "/" is the one
+token that cannot be anything else — not a pattern anybody writes, not an
+owner. That single exception is the whole difference between the rule that
+works and the rule that fused.
+
 ### `TestS4_ResultOverMaxSizeIsRefused`
 
 SPEC S-4: a result over the size cap is refused with *plan.RefusalError, not
@@ -2211,6 +2264,14 @@ GitHub silently ignores a CODEOWNERS file over 3 MB — the whole file, with no
 error anywhere in the UI. A lint pass that pushes a file over that line
 converts "some owners are stale" into "this repository has no code owners at
 all", which is the failure this tool exists to prevent.
+
+### `TestStages_ARepairedThenDeletedLineCountsOnce`
+
+A line repaired and then deleted is ONE change, not two.
+
+len(Plan.Changes) drives "N fix(es) applied", so a single removed line
+reported as two, and the diff rendered a "+" line that never reached disk and
+was immediately deleted again.
 
 ### `TestStalePaths_AnUncommittedButPresentPathIsNotStale`
 
@@ -2231,6 +2292,26 @@ rule, and the gate cannot object because it iterates the tree and therefore
 iterates nothing: the run deleted every rule, reported no ownership rows, and
 exited 0. An orphan branch, an --allow-empty initial commit, or a tag on an
 empty tree all reach it.
+
+### `TestStalePaths_RefuseWithoutAWorkingTreeList`
+
+--remove-stale-paths without a working-tree list is refused.
+
+Options.WorkTree is documented as required for stage 3, and nothing enforced
+it: omitting the field silently reinstated the exact write that judging
+staleness against the committed tree alone produces. One caller away from the
+whole protection being off.
+
+### `TestStalePaths_SparingACaseTypoStillCleansThatLine`
+
+Adding a conservative cleanup flag must never make the tool do LESS.
+
+Sparing a case-typo rule skipped the dead-owner removal for that line, so the
+end-of-run gate found the dead owner still present and refused the WHOLE run
+— exit 2, nothing written, including an unrelated and perfectly safe repair
+elsewhere in the file. Every file with both a case typo and a dead owner was
+permanently un-lintable under the flag, and the message read like a tool
+crash.
 
 ### `TestTeamNotFound_AnOrgOwnerTokenStillRemoves`
 
@@ -3675,4 +3756,4 @@ DIFFERENT states; transitioning between them is a real ownership change.
 
 ---
 
-389 documented test cases across 13 packages.
+397 documented test cases across 13 packages.

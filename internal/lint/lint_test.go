@@ -175,13 +175,20 @@ func TestRepairHandle_MergeBoundary(t *testing.T) {
 			changed: false,
 		},
 		{
-			// The same two tokens reached from a run that DID start broken.
-			// `@` is not something anyone writes as an owner, so once it is
-			// seen the line is known to be shattered and continuing through the
-			// slash is reassembly rather than a guess.
-			name:    "the same join is safe once the run started broken",
+			// `@ org /team` is refused too, and a second review is why. The
+			// first fix guarded only the run's FIRST token, so this row used to
+			// assert `[@org/team]` — and that made `/src @ alice /docs @bob`
+			// fuse into `@alice/docs`, handing `@bob`'s directory away at exit
+			// 0. Brokenness is a property of the first join: after `@`+`org`
+			// the accumulator is `@org`, an ordinary owner, and `@org` +
+			// `/team` is byte-for-byte the ambiguity above.
+			//
+			// `@org` is still assembled — that part is unambiguous — but
+			// `/team` is left alone, so the LINE stays invalid and RepairLine
+			// reports it rather than writing a guess.
+			name:    "a valid accumulator will not swallow a path-shaped token",
 			in:      []string{"@", "org", "/team"},
-			want:    []string{"@org/team"},
+			want:    []string{"@org", "/team"},
 			changed: true,
 		},
 		{
@@ -477,7 +484,10 @@ func TestBuild_StaleRuleRemovedOnOptInWithoutMovingOwnership(t *testing.T) {
 	content := "/ghost/ @org/live\n* @org/all\n"
 	tree := []string{"a.txt"}
 
-	res, err := lint.Build([]byte(content), tree, v, lint.Options{RemoveStalePaths: true})
+	// WorkTree is a precondition of stage 3, not a nicety: without it staleness
+	// would be judged against the committed tree alone while the edit lands on
+	// the working-tree file. Here the checkout and the tree agree.
+	res, err := lint.Build([]byte(content), tree, v, lint.Options{RemoveStalePaths: true, WorkTree: tree})
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
