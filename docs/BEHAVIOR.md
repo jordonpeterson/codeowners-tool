@@ -235,6 +235,27 @@ a bare line deletion.
 > intent inexpressible. The fleet is the unit under test — no single repo's
 > outcome may change any other repo's outcome.
 
+**`lint_guards_test.go`**
+
+> The two repository guards `audit --lint` shares with `sync`, found by
+> adversarial review of the feature after it was written and green.
+>
+> Both are the same failure in two spellings, and it is the failure the whole
+> tool exists to prevent: a run that resolves ownership against ONE tree and
+> writes the file governed by ANOTHER, then reports "applied", exit 0. Nothing
+> about it looks wrong from inside — the plan is proven, the invariants hold,
+> the write succeeds — because every one of those statements is true about the
+> wrong tree.
+>
+> SPEC S-7: CODEOWNERS is per-branch; resolution runs against a specific ref's
+> tree. What is on disk is whatever is checked out, and the two are only the
+> same tree when the clone is standing on that ref.
+> SPEC S-8: GitHub loads the CODEOWNERS at the repository ROOT. A file of the
+> same name one directory down governs nothing.
+>
+> `plan` is deliberately exempt from both: it emits an artifact and writes no
+> CODEOWNERS, so proving against another ref is exactly its job.
+
 **`lint_test.go`**
 
 > `audit --lint` is the first verb in this tool that EDITS a file on the basis
@@ -653,6 +674,12 @@ no-op (exit 1). Under the fleet contract exit 1 reads as "nothing to do here"
 and, in a `set -e` script, as failure — so a repository that is already
 correct would abort the run that was only checking on it.
 
+### `TestLint_DryRunAgainstAnotherRefIsAllowed`
+
+--dry-run against another ref stays allowed: it writes nothing, so there is
+no file to land in the wrong tree, and previewing what a rollout would do on
+another branch is a legitimate thing to want.
+
 ### `TestLint_DryRunOnACleanFileIsSuccess`
 
 A clean file exits 0 under --dry-run as well, or the gate above is a gate
@@ -744,6 +771,14 @@ Under --lint it is worse than usual to get this wrong, because the fallback
 for "no usable repo" is exit 5 — and a run that exits 5 on a TYPO looks like
 a rate limit, which operators retry rather than fix.
 
+### `TestLint_NamedBranchAtTheSameCommitStillWrites`
+
+A --branch naming a DIFFERENT ref that points at the same commit still
+writes. The guard compares resolved commits rather than ref names for the
+reason sync documents: `--branch main` on a clone standing on main is an
+entirely ordinary invocation, and rejecting it by string comparison would
+break every caller that spells HEAD out.
+
 ### `TestLint_PreservesCRLF`
 
 SPEC: a CRLF file stays CRLF.
@@ -784,6 +819,37 @@ no reviewer can see.
 This is exercised with a rule that matches nothing (A-4's territory), so the
 two verbs' disagreement shows up in the EXIT CODE and does not depend on how
 either one happens to parse a broken owner token.
+
+### `TestLint_RefusesRepoBelowTheRepositoryRoot`
+
+A --repo one level below the repository root must refuse.
+
+git walks UP to the enclosing repository rather than refusing, and reports
+tracked paths relative to that ROOT. So discovery pointed at repo/sub finds
+the ROOT's `.github/CODEOWNERS` in the tree, and joining that repo-relative
+path back onto `--repo sub` addresses `sub/.github/CODEOWNERS` — a DIFFERENT
+file that happens to share the name. The run then reads one file, rewrites
+another, prints the first one's path, and leaves the file GitHub actually
+loads untouched (S-8). A fleet whose clone layout carries one extra
+directory level does that to every repository and reports every one a
+success.
+
+### `TestLint_RefusesWritingWhileProvingAgainstAnotherRef`
+
+A --branch that is not what the clone has checked out must refuse to write.
+
+This is not a hypothetical ordering nicety. `--branch` selects the tree lint
+proves against, but the bytes come from — and go back to — the working tree.
+Point it at a ref where a directory does not exist and every rule governing
+that directory looks stale; with --remove-stale-paths those lines are
+deleted, and the file that lands on disk has just un-owned a directory
+sitting right there in the checkout, at exit 0 with "applied" on stdout.
+Before this guard existed the run below deleted `/y/ @org/live` while
+`y/b.go` was present on HEAD.
+
+Refusing is chosen over quietly implying --dry-run for the reason sync
+documents: a run that exits 0 having written nothing reads, to the script
+running it, as "this repo was already clean".
 
 ### `TestLint_RemovesDeadOwner`
 
@@ -830,6 +896,17 @@ The alternative — quietly running stage 1 and skipping stage 2 — would repor
 "lint clean" for a file full of deleted teams, which is worse than not running
 at all: it is a green check that means nothing. Exit 5 keeps a credential-less
 CI job red until someone gives it a token.
+
+### `TestLint_RootGuardAppliesUnderDryRun`
+
+The root guard holds under --dry-run too, unlike the branch guard.
+
+The two are asymmetric on purpose. --dry-run makes the branch mismatch
+harmless — nothing is written, so nothing lands in the wrong tree — but it
+does NOT make a wrong --repo harmless: the preview would be computed from
+the bytes of a file that governs nothing, so every line of it is a claim
+about the wrong document. A preview nobody can act on is worse than a
+refusal, because it looks like an answer.
 
 ### `TestLint_SoleOwnerRemovalNeedsAnExplicitOnEmptyPolicy`
 
@@ -3402,4 +3479,4 @@ DIFFERENT states; transitioning between them is a real ownership change.
 
 ---
 
-368 documented test cases across 13 packages.
+373 documented test cases across 13 packages.

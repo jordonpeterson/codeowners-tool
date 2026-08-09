@@ -12,6 +12,12 @@
 // `sync` and `check` run under a coarser three-code contract of their own
 // (R-19: only 0, 2 and 3), because their question is "did this repo converge?"
 // rather than "what exactly happened?". See sync.go.
+//
+// `audit --lint` narrows 0 and 4 rather than redefining them: it never returns
+// 1, because a file that needs no repair is that verb's SUCCESS and exiting
+// no-op would make every healthy repo in a fleet read as a failure under
+// `set -e`; and its 4 is still "findings present", counting a fix computed but
+// not written (--dry-run) as one. See lint.go.
 package cli
 
 import (
@@ -167,11 +173,12 @@ func usage(w io.Writer) {
   verify   --before before.json --after after.json [--scope PATTERN ...]
   version  print the build this binary was stamped with
 
-audit reports and never writes. --lint is the one mode that fixes: it rejoins
-@handles that whitespace has split, then removes owners that do not exist, over
-the whole file. It reads the WORKING-TREE file (that is what it rewrites) and
-needs --token and --github-repo. Exit 4 means the file still needs a human —
-pending fixes under --dry-run, or a line lint would not guess at.
+audit reports; --lint is its one writing mode. It rejoins @handles that
+whitespace has split, then removes owners that do not exist, over the whole
+file. It reads the WORKING-TREE file (that is what it rewrites) and needs
+--token and --github-repo; one lookup it cannot answer and nothing is written
+at all. Exit 4 means the file still needs a human — fixes pending under
+--dry-run, or a line lint would not guess at.
 
 Exit codes: 0 ok · 1 no-op · 2 refused (invariant/size) · 3 invalid input
             4 audit findings · 5 inconclusive (fail-closed) · 6 rolled back

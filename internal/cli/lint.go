@@ -92,6 +92,27 @@ func runLint(r lintRun, stdout, stderr io.Writer) int {
 		return ExitInvalid
 	}
 
+	// Both of `sync`'s repository guards, for the same reasons it carries them.
+	// Neither is optional here: --lint resolves against a tracked tree git
+	// reports relative to the repository ROOT and then rewrites a file on disk,
+	// which is exactly the pair of assumptions these two protect. Applied even
+	// under --dry-run for the root check, because a preview computed against
+	// the wrong file is a preview of nothing.
+	if err := checkRepoRoot(r.repo); err != nil {
+		return errExit(&plan.RefusalError{Msg: err.Error()}, stderr)
+	}
+	// The same guard `sync` carries, and for the same reason it exists there:
+	// lint proves its edits against --branch's tracked tree but rewrites the
+	// WORKING-TREE file, so on a clone standing anywhere else the two are
+	// different trees. Concretely, a path that exists on HEAD but not on
+	// --branch makes its rule look stale, and --remove-stale-paths deletes the
+	// line — the file that lands on disk has just un-owned a directory that is
+	// sitting right there, reported as applied, exit 0. Refusing beats implying
+	// --dry-run: a run that exits 0 having written nothing reads as "this repo
+	// was already clean".
+	if err := checkBranchIsWritable(r.repo, r.branch, "lint", r.dryRun); err != nil {
+		return errExit(&plan.RefusalError{Msg: err.Error()}, stderr)
+	}
 	tree, coPath, _, err := locate(r.repo, r.branch, r.filePath)
 	if err != nil {
 		return errExit(err, stderr)

@@ -66,6 +66,17 @@ changes to which class a failure lands in are called out explicitly.
     pattern. Lines outside those rules are reported and left as written.
   - Stale-path removal stays opt-in per R-11: a pattern matching nothing may be
     deliberate and forward-looking, and deleting it destroys that intent.
+  - It carries both of `sync`'s repository guards, which adversarial review
+    found it had been shipped without. `--branch` must be what the clone has
+    checked out, or a directory present on HEAD and absent on that ref makes its
+    rule look stale and `--remove-stale-paths` un-owns a directory sitting right
+    there in the checkout, at exit 0 (`--dry-run` lifts this one — nothing is
+    written, so nothing lands in the wrong tree). And `--repo` must be the
+    repository root, or discovery finds the root's `.github/CODEOWNERS` in a tree
+    git reports relative to that root while the join addresses a different file
+    of the same name one level down — reading one file, rewriting another,
+    printing the first one's path, and leaving the file GitHub loads untouched.
+    That guard holds under `--dry-run` too.
   - Exit codes under `--lint` follow one rule — 0 when the file needs nothing
     further from a human, 4 when it does (pending fixes under `--dry-run`, or a
     line lint would not guess at). `--remove-stale-paths`, `--on-empty` and

@@ -324,6 +324,21 @@ Email owners are `unverifiable`, never dead (R-13), and never make a run inconcl
 Removing a dead owner that would empty a rule's owner set needs an explicit
 [`--on-empty`](#--on-empty--on_empty-r-6), the same as `remove_owner` does.
 
+**It carries both of `sync`'s repository guards** (exit 2), because it has the same two
+ways to write a file justified by a tree nobody wrote to:
+
+- **`--branch` must be what the clone has checked out.** Lint proves against `--branch`'s
+  tree and rewrites the working-tree file. Point it elsewhere and a directory present on
+  HEAD but absent on that ref makes its rule look stale — `--remove-stale-paths` then
+  un-owns a directory sitting right there in the checkout, at exit 0. Refs are compared by
+  resolved commit, not name, so `--branch main` on a clone standing on main is fine.
+  `--dry-run` lifts the guard: nothing is written, so nothing lands in the wrong tree.
+- **`--repo` must be the repository root.** git walks up to the enclosing repository and
+  reports tracked paths relative to its ROOT, so pointed one level down, discovery finds
+  the root's `.github/CODEOWNERS` in the tree and the join addresses a *different* file of
+  the same name in the subdirectory. This guard holds even under `--dry-run`: a preview
+  computed from the wrong document is not a preview.
+
 Nothing here bypasses the invariants. The after-bytes are re-parsed and re-resolved over
 every tracked file and compared against an independently computed desired state — the
 ownership the *repaired* file would have, minus the owners proven not to exist — and the

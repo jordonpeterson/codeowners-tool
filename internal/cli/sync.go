@@ -341,18 +341,28 @@ func (r *syncRun) execute() (SyncRecord, int) {
 // the raw strings would refuse every repo on a developer laptop while CI on
 // Linux stayed green; deriving .repo from the resolved path instead would break
 // every fleet lookup that keys on the argument (D6).
-func (r *syncRun) checkRepoRoot() error {
-	root, err := gitLine(r.repoArg, "rev-parse", "--show-toplevel")
+func (r *syncRun) checkRepoRoot() error { return checkRepoRoot(r.repoArg) }
+
+// checkRepoRoot is the free function behind it, shared with `audit --lint` for
+// the same reason checkBranchIsWritable is: both verbs resolve against a tree
+// git reports relative to the ROOT and then join the discovered CODEOWNERS path
+// onto --repo. Pointed one level down, discovery finds the ROOT's
+// .github/CODEOWNERS in that tree and the join addresses a DIFFERENT file of
+// the same name under the subdirectory — so the run reads one file, writes
+// another, names the first in its output, and leaves the file that actually
+// governs untouched.
+func checkRepoRoot(repoDir string) error {
+	root, err := gitLine(repoDir, "rev-parse", "--show-toplevel")
 	if err != nil {
 		return err
 	}
-	same, err := sameDir(r.repoArg, root)
+	same, err := sameDir(repoDir, root)
 	if err != nil {
 		return err
 	}
 	if !same {
 		return fmt.Errorf("--repo %s is inside the repository rooted at %s, not that root: git resolves the tracked tree against the root, so the CODEOWNERS this run would write is at a path GitHub never reads, while the file that does govern (%s) stays untouched; re-run with --repo %s",
-			r.repoArg, root, filepath.ToSlash(filepath.Join(root, gittree.CodeownersLocations[0])), root)
+			repoDir, root, filepath.ToSlash(filepath.Join(root, gittree.CodeownersLocations[0])), root)
 	}
 	return nil
 }
@@ -379,22 +389,39 @@ func (r *syncRun) checkRepoRoot() error {
 // did — as does a tag or a second branch pointing at the same commit, where the
 // tree is the same tree.
 func (r *syncRun) checkBranchIsWritable() error {
-	if r.branch == "HEAD" || r.dryRun {
+	return checkBranchIsWritable(r.repoArg, r.branch, "sync", r.dryRun)
+}
+
+// checkBranchIsWritable is the free function behind it, shared with
+// `audit --lint` — the other verb that proves against --branch's tree and
+// writes the working tree, and which therefore has exactly the same way to
+// land a change justified by a tree nobody wrote to. Sharing it is the point:
+// a second copy of this reasoning is a second chance to omit it.
+func checkBranchIsWritable(repoDir, branch, verb string, dryRun bool) error {
+	if branch == "HEAD" || dryRun {
 		return nil
 	}
 	// rev-parse has no trailing `--` for --end-of-options to swallow (unlike
 	// ls-tree — see gittree.ValidateRef), so it is free here.
-	head, err := gitLine(r.repoArg, "rev-parse", "--verify", "--end-of-options", "HEAD^{commit}")
+	head, err := gitLine(repoDir, "rev-parse", "--verify", "--end-of-options", "HEAD^{commit}")
 	if err != nil {
 		return err
 	}
-	want, err := gitLine(r.repoArg, "rev-parse", "--verify", "--end-of-options", r.branch+"^{commit}")
+	want, err := gitLine(repoDir, "rev-parse", "--verify", "--end-of-options", branch+"^{commit}")
 	if err != nil {
 		return err
 	}
 	if head != want {
-		return fmt.Errorf("--branch %s is not what this clone has checked out (HEAD is %s): sync proves the change against %s's tree but writes the working tree, so the rule would be justified by one tree and land in another; re-run with --dry-run to preview it, check out %s first, or use `plan` to produce an artifact for that ref (S-7)",
-			r.branch, head[:min(len(head), 12)], r.branch, r.branch)
+		// The `plan` escape hatch is offered only to sync, whose intent is a
+		// set of ops and so can be expressed as an artifact for another ref.
+		// A lint pass is not expressible that way, and pointing someone at a
+		// verb that cannot do what they asked is worse than saying nothing.
+		alt := ""
+		if verb == "sync" {
+			alt = ", or use `plan` to produce an artifact for that ref"
+		}
+		return fmt.Errorf("--branch %s is not what this clone has checked out (HEAD is %s): %s proves the change against %s's tree but writes the working tree, so the rule would be justified by one tree and land in another; re-run with --dry-run to preview it, check out %s first%s (S-7)",
+			branch, head[:min(len(head), 12)], verb, branch, branch, alt)
 	}
 	return nil
 }
