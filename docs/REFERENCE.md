@@ -32,8 +32,10 @@ plan     --op 'OP' ... [--on-empty error|inherit|unowned]
 apply    --plan plan.json [--repo DIR]
 audit    [--checks a1,a3,a6] [--format json|text] [--github-repo owner/name]
          [--token T | $GITHUB_TOKEN] [--api-url URL] [--cache-dir D] [--cache-ttl DUR]
-         [--repo DIR] [--branch REF]
-         [--lint [--remove-stale-paths] [--on-empty error|inherit|unowned] [--dry-run]]
+         [--repo DIR] [--branch REF] [--file PATH]
+lint     --github-repo owner/name [--token T | $GITHUB_TOKEN] [--api-url URL]
+         [--remove-stale-paths] [--on-empty error|inherit|unowned] [--dry-run]
+         [--repo DIR] [--branch REF] [--file PATH] [--format text|json]
 snapshot [--repo DIR] [--branch REF] [--out snap.json]
 verify   --before before.json --after after.json [--scope PATTERN ...]
 version  print the build this binary was stamped with
@@ -45,13 +47,14 @@ version  print the build this binary was stamped with
 |---|---|---|
 | `sync`, `plan`, `apply` | the working tree (and written back there) | the tree at `--branch` |
 | `audit`, `snapshot` | the tree at `--branch` | the tree at `--branch` |
-| `audit --lint` | the working tree (and written back there) | the tree at `--branch` |
+| `lint` (`audit --lint`) | the working tree (and written back there) | the tree at `--branch` |
 | `check` | nothing — it reads no repository | n/a |
 
 `audit` and `snapshot` ask what GitHub would do, and GitHub only ever sees committed
-files, so an uncommitted edit will not show up in either. `audit --lint` is the exception
-in its own verb, and for the same reason `sync` is: the file it is about to rewrite is the
-one on disk.
+files, so an uncommitted edit will not show up in either. `lint` is the exception, for the
+same reason `sync` is: the file it is about to rewrite is the one on disk. Its *path* is
+still discovered from `--branch`'s tree, so a CODEOWNERS that is not committed yet needs
+`--file`.
 
 ## `sync` and `check`
 
@@ -291,17 +294,19 @@ Lookups are cached in memory per run and optionally on disk (`--cache-dir`, `--c
 string defaults in its usage text, so the environment variable is read only after parsing,
 where nothing can render it into a log (CWE-532).
 
-### `audit --lint`
+### `lint`
 
-The one mode of `audit` that writes. It runs over the entire file — `--checks` is rejected
-with it, because a subset of a whole-file repair is not a smaller lint, it is an ambiguous
-one. Three stages, in this order:
+The one verb that repairs. `audit` reports twelve checks and never writes; `lint` fixes
+three of them, over the entire file. (`audit --lint` is the older spelling and still
+works — it is the same code path, so everything below applies to both. Under that
+spelling `--checks` is rejected, because a subset of a whole-file repair is not a smaller
+lint, it is an ambiguous one.) Three stages, in this order:
 
 | # | Stage | Opt-in | What it does |
 |---|---|---|---|
 | 1 | Repair owner spacing | no | Rejoins an `@`handle split by whitespace: `@ org/team`, `@org /team`, `@org/ team`, `@ org / team` → `@org/team`. GitHub skips such a line entirely, so the owner on it owns nothing. |
 | 2 | Remove dead owners | no | Drops users and teams that definitively do not exist (A-1 only — never A-2 or A-3, where the right fix may be to grant the access instead). |
-| 3 | Remove stale rules | `--remove-stale-paths` | Deletes rules matching zero tracked files. Off by default per R-11: a dead pattern may be deliberate. |
+| 3 | Remove stale rules | `--remove-stale-paths` | Deletes rules matching nothing in the committed tree *and* nothing on disk. Off by default per R-11: a dead pattern may be deliberate. A rule that misses only because of **case** (`/Src/` vs `src/`) is spared and reported — that is a typo, and deleting it would silently un-own the files it was aimed at. |
 
 **Stage 1 runs before stage 2, always.** `@` and `org/team` are not two owners that do not
 exist; they are one owner nobody has looked up yet, and verifying first would delete it.
@@ -349,9 +354,13 @@ validation, the atomic rename and the rollback. Two further claims the tree comp
 cannot make are checked against the file itself: no dead owner may appear anywhere, and no
 owner may be invented.
 
-Exit codes for `--lint` follow one rule: **0 when the file needs nothing further from a
-human, 4 when it does.** Fixes computed but not written (`--dry-run`) and lines lint
-refused to guess at are both "needs a human", which makes `--lint --dry-run` a CI gate.
+Exit codes follow one rule: **0 when the file needs nothing further from a person, 4 when
+it does.** Fixes computed but not written (`--dry-run`), lines lint refused to guess at,
+and case-only misses it spared are all "needs a person", which makes `lint --dry-run` a CI
+gate. Note that a *successful write* can also exit 4 when something is left over, so gate
+CI on the `--dry-run` run, not on the writing one. The JSON record carries `needs_human`
+and `exit_code` from the same function that produces the process status, so the gate is
+`jq -e .needs_human` rather than an expression that has to know the action-kind strings.
 
 | Code | When |
 |---|---|

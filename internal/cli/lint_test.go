@@ -572,10 +572,10 @@ func TestLint_DryRunOnACleanFileIsSuccess(t *testing.T) {
 		t.Fatalf("exit %d, want 0 — nothing is pending\nstdout: %s\nstderr: %s", code, out, errOut)
 	}
 	lintUnchanged(t, "--dry-run on a clean file", path, before)
-	lintMentions(t, "--dry-run on a clean file", out, "lint clean")
+	lintMentions(t, "--dry-run on a clean file", out, "nothing to repair")
 }
 
-// SPEC exit 0 "lint clean": a file with nothing to fix is a SUCCESS, not a
+// SPEC exit 0: a file with nothing to fix is a SUCCESS, not a
 // no-op (exit 1). Under the fleet contract exit 1 reads as "nothing to do here"
 // and, in a `set -e` script, as failure — so a repository that is already
 // correct would abort the run that was only checking on it.
@@ -593,7 +593,7 @@ func TestLint_CleanFileIsUntouched(t *testing.T) {
 	if code != cli.ExitOK {
 		t.Fatalf("exit %d, want 0\nstdout: %s\nstderr: %s", code, out, errOut)
 	}
-	lintMentions(t, "clean lint", out, "lint clean")
+	lintMentions(t, "clean lint", out, "nothing to repair")
 	lintUnchanged(t, "clean lint", path, before)
 }
 

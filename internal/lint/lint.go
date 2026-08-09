@@ -45,6 +45,7 @@ import (
 
 	"github.com/jordonpeterson/codeowners-tool/internal/file"
 	"github.com/jordonpeterson/codeowners-tool/internal/ghapi"
+	"github.com/jordonpeterson/codeowners-tool/internal/pattern"
 	"github.com/jordonpeterson/codeowners-tool/internal/plan"
 	"github.com/jordonpeterson/codeowners-tool/internal/resolve"
 )
@@ -114,6 +115,9 @@ const (
 	// ActionUnrepairable: an invalid line lint could not repair without
 	// guessing. Reported, never rewritten, never deleted.
 	ActionUnrepairable = "unrepairable-line"
+	// ActionKeptCaseMismatch: a rule that matches nothing ONLY because of
+	// case, spared from stage 3 and handed to a human instead.
+	ActionKeptCaseMismatch = "kept-case-mismatch"
 )
 
 // Action is one thing lint did — or, for ActionUnrepairable, one thing it
@@ -141,15 +145,18 @@ type Result struct {
 	Unverifiable []string `json:"unverifiable,omitempty"`
 }
 
-// CountUnrepairable is how many lines lint refused to guess at. It is the
-// difference between "this file is clean" and "this file has nothing left that
-// a machine should touch", and callers must not conflate the two: the second
-// still needs a human, and saying "lint clean" over it is the one sentence
+// NeedsHuman is how many lines lint deliberately left for a person: ones it
+// refused to guess at, and ones it spared because deleting them would have
+// destroyed the evidence of a typo.
+//
+// It is the difference between "this file is clean" and "this file has nothing
+// left that a machine should touch", and callers must not conflate the two: the
+// second still needs somebody, and "lint clean" over it is the one sentence
 // that would send nobody.
-func (r *Result) CountUnrepairable() int {
+func (r *Result) NeedsHuman() int {
 	n := 0
 	for _, a := range r.Actions {
-		if a.Kind == ActionUnrepairable {
+		if a.Kind == ActionUnrepairable || a.Kind == ActionKeptCaseMismatch {
 			n++
 		}
 	}
@@ -574,6 +581,24 @@ func Build(content []byte, tree []string, v Verifier, opts Options) (*Result, er
 		r := ln.Rule
 
 		if opts.RemoveStalePaths && !matchesTree(r, tree) && !matchesTree(r, opts.WorkTree) {
+			// A rule that misses ONLY because of case is a typo, not a dead
+			// rule, and deleting it destroys the single piece of evidence that
+			// the typo happened — `/Src/ @team` becomes no line at all, and the
+			// files under `src/` are quietly unowned by a run that reported
+			// success. This is audit's A-5, and A-5's answer is to correct the
+			// casing, which lint has no way to do safely: the tree's real
+			// casing may not be the naive lowercase. Spared and handed over.
+			if sugg, caseOnly := caseOnlyMiss(r, tree, opts.WorkTree); caseOnly {
+				msg := fmt.Sprintf("pattern %q matches nothing ONLY because of case — CODEOWNERS is case-sensitive (S-6), so this is a typo, not a dead rule; kept, because deleting it would silently un-own the files it was meant to cover", r.PatternText)
+				if sugg != "" {
+					msg += fmt.Sprintf("; %q would match", sugg)
+				}
+				res.Actions = append(res.Actions, Action{
+					Kind: ActionKeptCaseMismatch, Line: i + 1, Pattern: r.PatternText,
+					Before: f.LineText(i), Reason: msg,
+				})
+				continue
+			}
 			res.Actions = append(res.Actions, Action{
 				Kind: ActionRemoveStale, Line: i + 1, Pattern: r.PatternText, Before: f.LineText(i),
 				Reason: fmt.Sprintf("pattern %q matches nothing tracked at this ref and nothing on disk, so it cannot win any path today and deleting it changes no CURRENT ownership; a path added later that it would have matched now falls to whatever rule remains (--remove-stale-paths; R-11 keeps this off by default because a dead pattern may be deliberate)", r.PatternText),
@@ -715,7 +740,7 @@ func Build(content []byte, tree []string, v Verifier, opts Options) (*Result, er
 		// line is invalid — so a flat "every owner exists" would assert a check
 		// that never ran on precisely the lines a human still has to fix.
 		msg := "nothing to lint: no repairable owner spacing, and every owner named by a valid rule exists"
-		if n := res.CountUnrepairable(); n > 0 {
+		if n := res.NeedsHuman(); n > 0 {
 			msg = fmt.Sprintf("nothing lint can repair: %d line(s) are invalid in ways it will not guess at, and their owners were never checked — GitHub is skipping those lines", n)
 		}
 		return res, &plan.NoOpError{Msg: msg}
@@ -814,6 +839,36 @@ func distinctOwners(f *file.File) []string {
 		}
 	}
 	return out
+}
+
+// caseOnlyMiss reports whether a rule matches nothing ONLY because of case,
+// and — separately — a corrected pattern, which is non-empty only when it
+// VERIFIABLY matches real paths case-sensitively. A miss whose real casing is
+// not simply lowercase yields ("", true): the rule is still spared, but no
+// unverified suggestion is offered. Mirrors audit's A-5 (caseCorrected), over
+// both the committed tree and the checkout, because either is enough to prove
+// the pattern was aimed at something real.
+func caseOnlyMiss(r *file.Rule, trees ...[]string) (suggestion string, caseOnly bool) {
+	lowered := strings.ToLower(r.PatternText)
+	p, err := pattern.Compile(lowered)
+	if err != nil {
+		return "", false
+	}
+	for _, tree := range trees {
+		for _, path := range tree {
+			if lowered != r.PatternText && p.Match(path) {
+				return lowered, true
+			}
+		}
+	}
+	for _, tree := range trees {
+		for _, path := range tree {
+			if p.Match(strings.ToLower(path)) {
+				return "", true
+			}
+		}
+	}
+	return "", false
 }
 
 // matchesTree reports whether a rule governs at least one tracked file.

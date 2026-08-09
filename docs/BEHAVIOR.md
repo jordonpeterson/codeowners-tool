@@ -327,6 +327,26 @@ a bare line deletion.
 
 > ---------- discoverability ----------
 
+**`lint_verb_test.go`**
+
+> The `lint` verb, and the reporting contract a UX review found the flag
+> spelling was getting wrong.
+>
+> The mode outgrew being a flag on `audit`: six of audit's fourteen flags
+> changed meaning or validity on one boolean, and the exit contract had already
+> forked. `audit --lint` is kept as an alias and routed to the same code, so
+> both spellings are pinned here — a divergence between them would be invisible
+> to everyone still scripting the old one.
+>
+> SPEC R-17: exit 4 means the file still needs a PERSON. That is one rule with
+> three causes — fixes computed but not written, a line lint would not guess at,
+> and a case-only miss it deliberately spared — and the output has to make the
+> nonzero status legible next to a headline that says "applied", or a CI log
+> reads green above a red result.
+> SPEC S-6: CODEOWNERS is case-sensitive, so a rule that misses only by case is
+> a TYPO, not a dead rule. Deleting it would silently un-own the files it was
+> aimed at, which is the opposite of what --remove-stale-paths was asked to do.
+
 **`schema_test.go`**
 
 > Schema pins for the sync record (R-24).
@@ -657,6 +677,73 @@ repos with a mistyped `--out` directory that is 100 real edits reported as
 The record on stdout is the durable trace and goes first, unconditionally; a
 sink that cannot be written is a warning on stderr and nothing more.
 
+### `TestLintVerb_CaseOnlyMissIsSparedNotDeleted`
+
+A rule that misses ONLY because of case is spared by --remove-stale-paths.
+
+`/Src/` matches nothing when the directory is `src/`, so stage 3 saw a dead
+rule and deleted it — destroying the one piece of evidence that a typo ever
+happened, and quietly un-owning `src/` under a message reassuring the reader
+that nothing changed. It is audit's A-5, and A-5's answer is to fix the
+casing, which lint cannot do safely (the tree's real casing may not be the
+naive lowercase). So it is kept, reported, and the run exits 4.
+
+### `TestLintVerb_HeadlineNeverContradictsTheExitCode`
+
+"lint clean" must not be printed over a file lint would not repair.
+
+The headline came from the change count alone, so a file whose only problems
+were ones lint refuses to guess at printed "lint clean" — and then exited 4.
+A CI log that reads green above a red status is worse than either alone.
+It must also not claim to be clean in the general sense: lint covers three
+things and `audit` runs twelve checks, so a bare "clean" sends somebody away
+from a file `audit` would still flag.
+
+### `TestLintVerb_JSONCarriesTheGateDirectly`
+
+The JSON record answers "did this need a person?" in one field.
+
+A reviewer writing the obvious gate — `jq '.changes|length > 0'` — went green
+over a file with an unrepairable line, because the correct expression also
+has to know the literal action-kind strings. needs_human and exit_code come
+from the same function that produces the process status, so they cannot drift
+from it.
+
+### `TestLintVerb_MatchesTheAuditFlagSpelling`
+
+The `lint` verb does the same work as `audit --lint`, byte for byte.
+
+The alias exists so nothing that already scripts the flag has to change. If
+the two ever diverge, the people who did not migrate are the ones who find
+out, in production, from a diff.
+
+### `TestLintVerb_PreconditionNamesOnlyWhatIsMissing`
+
+A missing precondition names the thing that is missing.
+
+The message used to list both requirements whatever you had passed, so an
+operator holding a perfectly good token had to diff the sentence against
+their own command line to find the one word they needed.
+
+### `TestLintVerb_RejectsAuditOnlyFlags`
+
+The verb's flagset carries only the flags that apply to it.
+
+This is the whole reason it exists. `--checks` and `--cache-dir` are audit's;
+under the flag spelling they had to be rejected at runtime with a message
+each, and under the verb they cannot be typed at all. An unknown flag is a
+parse error, which is exit 3.
+
+### `TestLintVerb_WriteThatLeavesSomethingOverExplainsTheExitCode`
+
+A successful write that leaves something over says so, and says why the exit
+code is 4.
+
+`lint … && git commit` is the obvious script, and exit 4 after a real write
+breaks it while the headline says "applied". The code is deliberate, so the
+output has to reconcile the two: the fixes ARE written, and the nonzero
+status is about what is left, not about the write.
+
 ### `TestLint_ChecksIsRejected`
 
 SPEC exit 3: `--checks` selects a SUBSET of the audit's checks, and lint
@@ -669,7 +756,7 @@ repository is opened, keeps that from ever reaching a write.
 
 ### `TestLint_CleanFileIsUntouched`
 
-SPEC exit 0 "lint clean": a file with nothing to fix is a SUCCESS, not a
+SPEC exit 0: a file with nothing to fix is a SUCCESS, not a
 no-op (exit 1). Under the fleet contract exit 1 reads as "nothing to do here"
 and, in a `set -e` script, as failure — so a repository that is already
 correct would abort the run that was only checking on it.
@@ -3588,4 +3675,4 @@ DIFFERENT states; transitioning between them is a real ownership change.
 
 ---
 
-382 documented test cases across 13 packages.
+389 documented test cases across 13 packages.

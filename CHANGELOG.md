@@ -41,7 +41,7 @@ changes to which class a failure lands in are called out explicitly.
 
 ### Added
 
-- **`audit --lint` repairs the whole file instead of only describing it.** Three
+- **`lint` repairs the whole file instead of only describing it.** Three
   stages, in this order: rejoin `@`handles that whitespace has split
   (`/x/ @ org/team` — GitHub skips such a line entirely, so that team owns
   nothing and nobody is told); remove users and teams that definitively do not
@@ -49,9 +49,26 @@ changes to which class a failure lands in are called out explicitly.
   tracked files. The rejoin runs before any lookup on purpose: `@` and
   `org/team` are not two owners that do not exist, they are one owner nobody has
   asked about yet. `--dry-run` reports without writing and exits 4, which is the
-  CI gate. `audit` without `--lint` is unchanged and still never writes; the
-  bytes still reach disk only through `apply`, with the hash pin, the size cap,
-  the pre-write validation and the atomic rename.
+  CI gate. `audit` is unchanged and still never writes; the bytes still reach
+  disk only through `apply`, with the hash pin, the size cap, the pre-write
+  validation and the atomic rename.
+  - It is a verb, not a flag. It began as `audit --lint`, and that spelling
+    still works and routes to the same code — but six of `audit`'s fourteen
+    flags changed meaning or validity on that one boolean, three error messages
+    existed only to police the coupling, `--help` introduced `-dry-run` ("with
+    --lint, …") three entries before the flag explaining what `--lint` was, and
+    the exit contract had already forked. `lint` has ten flags and none of them
+    are mode-dependent.
+  - A rule that misses only because of CASE (`/Src/` where the directory is
+    `src/`) is spared by `--remove-stale-paths` and reported. It is audit's A-5
+    — a typo, not a dead rule — and deleting it destroys the only evidence the
+    typo happened while quietly un-owning the files it was aimed at. Lint
+    cannot correct the casing safely, because the tree's real casing may not be
+    the naive lowercase, so it hands it over.
+  - The JSON record carries `needs_human` and `exit_code`, both from the same
+    function that produces the process status. The obvious hand-written gate
+    (`jq '.changes|length > 0'`) went green over a file whose only problems were
+    ones lint refuses to guess at.
   - R-12 is applied to the WHOLE RUN rather than per owner: one inconclusive
     lookup and nothing is written at all, including the offline whitespace
     fixes. A rate-limited run therefore leaves the file byte-identical instead

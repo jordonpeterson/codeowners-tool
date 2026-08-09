@@ -3,6 +3,7 @@ package cli
 import (
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -52,6 +53,7 @@ type lintRun struct {
 	githubRepo, token      string
 	apiURL, cacheDir       string
 	cacheTTL               time.Duration
+	cacheTTLSet            bool
 	format                 string
 	checks                 string
 	removeStale            bool
@@ -62,15 +64,64 @@ type lintRun struct {
 // lintDoc is `--format json`: one object, so a CI step can gate on it without
 // parsing prose.
 type lintDoc struct {
-	Path         string        `json:"codeowners_path"`
-	Applied      bool          `json:"applied"`
-	DryRun       bool          `json:"dry_run,omitempty"`
+	Path    string `json:"codeowners_path"`
+	Applied bool   `json:"applied"`
+	DryRun  bool   `json:"dry_run,omitempty"`
+	// NeedsHuman and ExitCode come from the SAME function that produces the
+	// process status, so a CI gate is `jq -e .needs_human` rather than a
+	// two-clause expression that has to know the string "unrepairable-line" —
+	// which a reviewer got wrong on the first try, going green over rot.
+	NeedsHuman   bool          `json:"needs_human"`
+	ExitCode     int           `json:"exit_code"`
 	Actions      []lint.Action `json:"actions"`
 	Unverifiable []string      `json:"unverifiable,omitempty"`
 	Changes      []plan.Change `json:"changes"`
 	Rows         []plan.Row    `json:"ownership_rows"`
 	Diff         string        `json:"diff"`
 	Warnings     []string      `json:"warnings,omitempty"`
+}
+
+// cmdLint is the `lint` verb: the same run, with a flagset that contains only
+// the flags that apply to it.
+//
+// This exists because the mode outgrew being a flag. Under `audit --lint`, six
+// of audit's fourteen flags changed meaning or validity on one boolean, and
+// three of the error messages below exist solely to police that coupling —
+// here they are unreachable, because there is nothing to couple. `--help` is
+// also self-grouping: Go's flag package sorts alphabetically, so under audit
+// the operator met `-dry-run` ("with --lint, …") three entries before the flag
+// that explains what `--lint` is.
+//
+// `audit --lint` keeps working and routes to the same runLint, so nothing that
+// scripts it has to change.
+func cmdLint(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("lint", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	repo := fs.String("repo", ".", "path to local git repository")
+	branch := fs.String("branch", "HEAD", "ref whose tracked tree governs resolution (S-7); must be what the clone has checked out unless --dry-run")
+	filePath := fs.String("file", "", "CODEOWNERS path override (repo-relative); needed for a CODEOWNERS that is not committed yet")
+	githubRepo := fs.String("github-repo", "", "owner/name on GitHub — required: owner existence is not decidable offline")
+	token := fs.String("token", "", "GitHub token (default $GITHUB_TOKEN)")
+	apiURL := fs.String("api-url", "", "API base URL (GHES), default https://api.github.com")
+	format := fs.String("format", "text", "text|json")
+	removeStale := fs.Bool("remove-stale-paths", false, "also delete rules whose pattern matches nothing tracked and nothing on disk (R-11 keeps this off by default)")
+	onEmpty := fs.String("on-empty", "", "R-6 policy when removing a dead owner empties a set: error|inherit|unowned (no default; inherit DELETES the rule line)")
+	dryRun := fs.Bool("dry-run", false, "report the fixes and write nothing (exit 4 if any are pending)")
+	if err := fs.Parse(args); err != nil {
+		return flagParseCode(err)
+	}
+	// Same post-Parse read as cmdAudit, and for the same reason: making
+	// os.Getenv the flag's DEFAULT hands the live credential to the flag
+	// package, which prints non-empty string defaults in its usage text (CWE-532).
+	authToken := *token
+	if authToken == "" {
+		authToken = os.Getenv("GITHUB_TOKEN")
+	}
+	return runLint(lintRun{
+		repo: *repo, branch: *branch, filePath: *filePath,
+		githubRepo: *githubRepo, token: authToken, apiURL: *apiURL,
+		format: *format, removeStale: *removeStale, onEmpty: *onEmpty, dryRun: *dryRun,
+	}, stdout, stderr)
 }
 
 func runLint(r lintRun, stdout, stderr io.Writer) int {
@@ -95,8 +146,19 @@ func runLint(r lintRun, stdout, stderr io.Writer) int {
 	// R-12 before anything is read: without the ability to ask whether an owner
 	// exists, the headline stage cannot run, and a lint that quietly skipped it
 	// would report success over a file still full of owners that go nowhere.
-	if r.token == "" || r.githubRepo == "" {
-		fmt.Fprintln(stderr, "error: --lint needs both a token ($GITHUB_TOKEN or --token) and --github-repo: whether a user or team still exists is not decidable offline, and removing owners on a guess is exactly what R-12 forbids — nothing was written")
+	// Name what is MISSING, not the whole precondition. The message used to
+	// list both requirements whatever you had passed, so an operator holding a
+	// valid token had to diff the sentence against their own command line to
+	// find the one word they needed.
+	var missing []string
+	if r.token == "" {
+		missing = append(missing, "a token ($GITHUB_TOKEN or --token)")
+	}
+	if r.githubRepo == "" {
+		missing = append(missing, "--github-repo owner/name")
+	}
+	if len(missing) > 0 {
+		fmt.Fprintf(stderr, "error: lint needs %s. Whether an owner still exists is not decidable offline, and removing owners on a guess is what R-12 forbids — nothing was written.\n", strings.Join(missing, " and "))
 		return ExitInconclusive
 	}
 	if len(strings.SplitN(r.githubRepo, "/", 2)) != 2 || strings.Count(r.githubRepo, "/") != 1 {
@@ -119,6 +181,10 @@ func runLint(r lintRun, stdout, stderr io.Writer) int {
 	//
 	// Per-run memory caching still applies, so an owner named on twenty lines
 	// is still looked up once.
+	if r.cacheTTLSet {
+		fmt.Fprintln(stderr, "error: --cache-ttl has no effect with --lint: the disk cache is not used here at all (see --cache-dir below), so a TTL would govern nothing; drop it")
+		return ExitInvalid
+	}
 	if r.cacheDir != "" {
 		fmt.Fprintln(stderr, "error: --cache-dir is not available with --lint: a cached \"this owner does not exist\" is served without revalidation, and here that answer deletes an owner rather than printing a finding — a stale or tampered-with cache entry would strip ownership with no network call at all; drop --cache-dir (lookups are still cached in memory for the run)")
 		return ExitInvalid
@@ -245,20 +311,18 @@ func lintCode(res *lint.Result, pending bool) int {
 	if pending && res != nil && len(res.Plan.Changes) > 0 {
 		return ExitFindings
 	}
-	if res != nil {
-		for _, a := range res.Actions {
-			if a.Kind == lint.ActionUnrepairable {
-				return ExitFindings
-			}
-		}
+	if res != nil && res.NeedsHuman() > 0 {
+		return ExitFindings
 	}
 	return ExitOK
 }
 
 func emitLint(res *lint.Result, coPath string, applied bool, r lintRun, stdout io.Writer) {
 	if r.format == "json" {
+		code := lintCode(res, r.dryRun)
 		doc := lintDoc{
 			Path: coPath, Applied: applied, DryRun: r.dryRun,
+			NeedsHuman: code == ExitFindings, ExitCode: code,
 			Actions: res.Actions, Unverifiable: res.Unverifiable,
 			Changes: res.Plan.Changes, Rows: res.Plan.Rows,
 			Diff: res.Plan.Diff, Warnings: res.Plan.Warnings,
@@ -277,28 +341,48 @@ func emitLint(res *lint.Result, coPath string, applied bool, r lintRun, stdout i
 		return
 	}
 
-	n, stuck := len(res.Plan.Changes), res.CountUnrepairable()
+	n, stuck := len(res.Plan.Changes), res.NeedsHuman()
 	switch {
 	case n == 0 && stuck > 0:
 		// Never "lint clean" here. This run exits 4, and a headline saying the
 		// file is fine directly above a nonzero exit code is the one output
 		// that makes a CI log read green over a red result.
-		fmt.Fprintf(stdout, "lint: nothing to fix automatically in %s, but %d line(s) need a human — lint will not guess at them, and GitHub is skipping them meanwhile\n", coPath, stuck)
+		fmt.Fprintf(stdout, "lint: nothing to repair automatically in %s, but %d line(s) need a person\n", coPath, stuck)
 	case n == 0:
-		fmt.Fprintf(stdout, "lint clean: %s\n", coPath)
+		// Scoped, not "clean". Lint covers three things; `audit` runs twelve
+		// checks, and a bare "lint clean" sends somebody away from a file that
+		// `audit` would still flag — which is exactly what it did to a reviewer
+		// asked to "clean up our CODEOWNERS".
+		fmt.Fprintf(stdout, "lint: nothing to repair in %s — lint covers handle spacing, owners that do not exist, and (with --remove-stale-paths) dead patterns; run `audit` for the other checks\n", coPath)
 	case applied:
-		fmt.Fprintf(stdout, "lint: %d fix(es) applied to %s\n", n, coPath)
+		fmt.Fprintf(stdout, "lint: %d fix(es) applied to %s — the file was written\n", n, coPath)
 	default:
 		fmt.Fprintf(stdout, "lint: %d fix(es) pending in %s (--dry-run; nothing written)\n", n, coPath)
 	}
+	// What lint DID, then what it deliberately did not: a flat list made the
+	// one line that is not a fix look like one, and made the headline count
+	// disagree with the number of bullets under it.
 	for _, a := range res.Actions {
+		if a.Kind == lint.ActionUnrepairable || a.Kind == lint.ActionKeptCaseMismatch {
+			continue
+		}
 		fmt.Fprintf(stdout, "  [%s] (line %d) %s\n", a.Kind, a.Line, lintDetail(a))
+	}
+	for _, row := range res.Plan.Rows {
+		fmt.Fprintf(stdout, "  owners change: %s  %s → %s\n", row.Path, fmtOwners(row.Before), fmtOwners(row.After))
 	}
 	for _, o := range res.Unverifiable {
 		fmt.Fprintf(stdout, "  [unverifiable] %s is an email owner; existence cannot be checked via the API (R-13) — left as written\n", o)
 	}
-	for _, row := range res.Plan.Rows {
-		fmt.Fprintf(stdout, "  owners change: %s  %s → %s\n", row.Path, fmtOwners(row.Before), fmtOwners(row.After))
+	if stuck > 0 {
+		// Named as the reason for the exit code, so "applied" above and a
+		// nonzero status below stop looking like a contradiction.
+		fmt.Fprintf(stdout, "still needs a person (exit %d) — this is not a failed write:\n", ExitFindings)
+		for _, a := range res.Actions {
+			if a.Kind == lint.ActionUnrepairable || a.Kind == lint.ActionKeptCaseMismatch {
+				fmt.Fprintf(stdout, "  [%s] (line %d) %s\n", a.Kind, a.Line, lintDetail(a))
+			}
+		}
 	}
 }
 

@@ -50,7 +50,7 @@ func TestRepair_NeverFusesTwoRulesWrittenOnOneLine(t *testing.T) {
 	if got := res.Plan.AfterContent; got != before {
 		t.Errorf("file was rewritten:\n before %q\n after  %q", before, got)
 	}
-	if n := res.CountUnrepairable(); n != 1 {
+	if n := res.NeedsHuman(); n != 1 {
 		t.Errorf("unrepairable lines = %d, want 1 — the line must be REPORTED, not silently left", n)
 	}
 	// The owner that the broken merge would have invented.

@@ -58,6 +58,7 @@ anything — none of them writes (`audit` only writes when you add `--lint`):
 codeowners-tool --help                 # every command and its flags
 codeowners-tool snapshot               # who owns each tracked file, as JSON on stdout
 codeowners-tool audit                  # what's broken or rotten in the current file
+codeowners-tool lint --dry-run …       # what a repair pass would change (writes nothing)
 codeowners-tool check --policy p.json  # is this policy well-formed? (reads no repo)
 ```
 
@@ -237,10 +238,11 @@ The full check table (A-1 … A-12, which ones the API is needed for, which prop
 is in [docs/REFERENCE.md](docs/REFERENCE.md#audit-checks). Run a subset with
 `--checks a1,a3,a6`.
 
-### Fixing what it finds: `audit --lint`
+### Fixing what it finds: `lint`
 
-`--lint` repairs the whole file instead of only describing it. Three things, in this
-order:
+`lint` repairs the whole file instead of only describing it — `audit` reports twelve
+checks, `lint` fixes three of them. (`audit --lint` is the older spelling and still works.)
+Three things, in this order:
 
 1. **Rejoins `@`handles that whitespace has split.** `/x/ @ org/team` looks like a rule
    with an owner. It isn't — GitHub can't parse the line, skips it entirely, and that team
@@ -251,10 +253,12 @@ order:
    request that silently goes nowhere.
 3. **Removes rules that match no files** — only with `--remove-stale-paths`. Off by
    default, because a dead pattern is often deliberate, waiting on a directory that's
-   coming, and deleting it destroys that intent. It takes you saying so.
+   coming, and deleting it destroys that intent. It takes you saying so. A rule that
+   misses only because of *case* (`/Src/` vs `src/`) is spared and reported: that's a
+   typo, and deleting it would quietly un-own the files it was aimed at.
 
 ```console
-$ GITHUB_TOKEN=... codeowners-tool audit --lint --github-repo org/repo --dry-run
+$ GITHUB_TOKEN=... codeowners-tool lint --github-repo org/repo --dry-run
 lint: 2 fix(es) pending in .github/CODEOWNERS (--dry-run; nothing written)
   [repair-owner-spacing] (line 3) "/x/ @ acme/live" → "/x/ @acme/live"
   [remove-dead-owner] (line 5) @acme/gone removed from "/y/": team @acme/gone does not exist (deleted or renamed); review requests to it silently do nothing
@@ -263,9 +267,20 @@ $ echo $?
 4
 ```
 
-Drop `--dry-run` to write it. **Exit 4 means the file still needs a human** — fixes
-pending under `--dry-run`, or a line lint refused to guess at — which makes
-`--lint --dry-run` a CI gate that fails on rot rather than merely narrating it.
+Drop `--dry-run` to write it. **Exit 4 means the file still needs a person** — fixes
+pending under `--dry-run`, a line lint refused to guess at, or a case-only typo it spared
+— which makes `lint --dry-run` a CI gate that fails on rot rather than merely narrating
+it. A *successful write* can exit 4 too, for the same reason, so gate on the dry run:
+
+```yaml
+- run: codeowners-tool lint --dry-run --github-repo ${{ github.repository }}
+  env:
+    GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+```
+
+Scripting the JSON instead? `--format json` carries `needs_human`, straight from the same
+function that sets the exit code, so the gate is `jq -e .needs_human` and not a guess at
+which action kinds count.
 
 Four things to know:
 

@@ -420,10 +420,27 @@ func checkBranchIsWritable(repoDir, branch, verb string, dryRun bool) error {
 		if verb == "sync" {
 			alt = ", or use `plan` to produce an artifact for that ref"
 		}
-		return fmt.Errorf("--branch %s is not what this clone has checked out (HEAD is %s): %s proves the change against %s's tree but writes the working tree, so the rule would be justified by one tree and land in another; re-run with --dry-run to preview it, check out %s first%s (S-7)",
-			branch, head[:min(len(head), 12)], verb, branch, branch, alt)
+		return fmt.Errorf("--branch %s is not what this clone has checked out (HEAD is %s): %s proves the change against %s's tree but writes the working tree, so the rule would be justified by one tree and land in another; re-run with --dry-run to preview it, or check out %s first%s (S-7)",
+			branch, headLabel(repoDir, head), verb, branch, branch, alt)
 	}
 	return nil
+}
+
+// headLabel names what HEAD actually is — "main (f800559)" rather than a bare
+// abbreviated SHA. The operator has to decide whether to check out the ref they
+// asked for, and "you are not on it" is not enough to act on; they need to know
+// where they ARE. A detached HEAD keeps the SHA alone, which is the honest
+// answer there.
+func headLabel(repoDir, head string) string {
+	short := head
+	if len(short) > 7 {
+		short = short[:7]
+	}
+	name, err := gitLine(repoDir, "rev-parse", "--abbrev-ref", "--end-of-options", "HEAD")
+	if err != nil || name == "" || name == "HEAD" {
+		return short
+	}
+	return name + " (" + short + ")"
 }
 
 // gitLine runs a git command that answers with a single line.
