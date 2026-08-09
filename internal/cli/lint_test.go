@@ -106,6 +106,19 @@ func lintAPI(t *testing.T, override lintOverride, exists ...string) string {
 			lintReply(w, http.StatusOK, `{"login":"ci-bot"}`)
 		case len(seg) == 3 && seg[0] == "orgs" && (seg[2] == "teams" || seg[2] == "members"):
 			lintReply(w, http.StatusOK, `[]`)
+		// ProbeRepo: --lint establishes that the token can see the repository
+		// whose CODEOWNERS it is about to rewrite before it removes anything.
+		// A stub that omitted this would make every lint run inconclusive.
+		case len(seg) == 3 && seg[0] == "repos":
+			lintReply(w, http.StatusOK, `{"full_name":"`+seg[1]+`/`+seg[2]+`"}`)
+		// ViewerIsOrgAdmin, consulted only when a team 404s: only an org owner
+		// can tell a team that was deleted from a secret team they cannot see,
+		// and lint DELETES on that answer. The default stub says "owner" so the
+		// cases in this file stay about what they are about; the override in
+		// TestLint_TeamNotFoundIsInconclusiveForANonOwnerToken is where the
+		// other answer is exercised.
+		case len(seg) == 4 && seg[0] == "user" && seg[1] == "memberships" && seg[2] == "orgs":
+			lintReply(w, http.StatusOK, `{"state":"active","role":"admin"}`)
 		case len(seg) == 4 && seg[0] == "orgs" && seg[2] == "teams":
 			if set[seg[1]+"/"+seg[3]] {
 				lintReply(w, http.StatusOK, `{"slug":"`+seg[3]+`"}`)

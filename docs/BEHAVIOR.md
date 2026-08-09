@@ -1631,6 +1631,24 @@ an error condition for the caller, never a merge.
 
 ## internal/lint
 
+**`adversarial_test.go`**
+
+> Regressions from the adversarial review of the first `audit --lint` commit.
+>
+> Every case below is a write the tool actually performed, at exit 0, with a
+> message asserting it was safe. They are grouped here rather than folded into
+> the tables above because the shared property is not a feature — it is that
+> each one PASSED a gate. A test that only states the intended behavior would
+> have gone green against the broken code too; these state the exploit.
+>
+> SPEC R-5 (adapted): a proof that examined zero paths is not a proof. Lint
+> refuses --remove-stale-paths against an empty tree for the same reason
+> plan.Build refuses a zero-match scope.
+> SPEC R-11: staleness is judged against what exists, which is the committed
+> tree AND the checkout — not the committed tree alone.
+> SPEC R-12: a team 404 is definitive only for a token that can see every team
+> in the org. Only an org owner can.
+
 **`failclosed_test.go`**
 
 > This file is the adversarial half of the lint suite: everything lint must
@@ -1809,6 +1827,17 @@ is deleted — and deleting it must move NOBODY. That is the whole argument for
 why stage 3 is safe: a rule matching zero tracked files can never win a
 tracked path, so an empty ownership-row set is not an accident of this
 fixture but the property that makes the deletion provable.
+
+### `TestInheritEscapeHatch_IsScopedToTheDeletedRulesPaths`
+
+The inherit escape hatch is scoped to the paths the deleted rule was winning.
+
+The gate accepts a divergence from the pure owner-set transform under
+--on-empty=inherit, because deleting a rule resurrects whatever sat behind
+it. That acceptance was keyed on a whole-run counter: one inherit-delete
+anywhere disarmed the ownership comparison for EVERY path in the file, for
+any cause. plan.synthRemove narrows its equivalent to one op's scope, and its
+comment records that the broader form "weakened the gate".
 
 ### `TestLint_CRLFFileStaysCRLF`
 
@@ -2043,6 +2072,49 @@ Reported, because an implementation that treats "no owner tokens" as "a
 handle got split" would start manufacturing owners out of the pattern itself,
 and would do it on lines the file's authors were most deliberate about.
 
+### `TestRepair_LongLineDoesNotBlowUp`
+
+A long line must not take quadratic time.
+
+`joinable` accepts any token starting with "/", so a line of the shape
+`/p @ /aaa /aaa …` drove the scan to the end of the token list, doing an O(n)
+concatenation and an O(n) regex match at every step: 32k tokens took 2.8s and
+128k took 30s, all of it spent to conclude the line cannot be repaired. One
+garbage file would stall a fleet run. A handle is at most four tokens, so the
+run is capped there.
+
+### `TestRepair_NeverFusesTwoRulesWrittenOnOneLine`
+
+Two rules written on one line must never be fused into one owner.
+
+`/src @alice /docs @bob` is a line somebody meant as two rules. It is invalid
+— `/docs` is not an owner token — so lint looks at it, and the original merge
+rule accepted the join because `/docs` starts with a slash: it produced
+`/src @alice/docs @bob`, handing `@bob` every file under `/src` and quietly
+leaving `/docs` to the catch-all. Exit 0, "applied".
+
+The shape is indistinguishable from `@org /team`, a real handle with a space
+in it, which is why the fix is to repair NEITHER: a run may only begin at a
+token that is not already a valid owner. Ambiguity gets reported, not guessed.
+
+### `TestRepair_NeverFusesUsingAnOrgTheTokenCanSee`
+
+The same fusion, with an org the token really can enumerate.
+
+The first exploit was partly masked by luck: `ProbeOrg("alice")` 404s, so the
+run went inconclusive before the damage showed. With an org that exists —
+the repository's own org, the one a CI token can always see — nothing masks
+it, and the merge also manufactured a duplicate owner.
+
+### `TestRepair_RefusesAMergeThatDuplicatesAnExistingOwner`
+
+A merge that reassembles an owner the line already names is refused.
+
+`/x @ org/a @org/a` reassembles into `@org/a @org/a`: a rule naming one team
+twice. It conserves bytes and passes every other check, so only an explicit
+duplicate guard catches it. Fuzzing turned up 539 distinct inputs of this
+shape.
+
 ### `TestS4_ResultOverMaxSizeIsRefused`
 
 SPEC S-4: a result over the size cap is refused with *plan.RefusalError, not
@@ -2052,6 +2124,43 @@ GitHub silently ignores a CODEOWNERS file over 3 MB — the whole file, with no
 error anywhere in the UI. A lint pass that pushes a file over that line
 converts "some owners are stale" into "this repository has no code owners at
 all", which is the failure this tool exists to prevent.
+
+### `TestStalePaths_AnUncommittedButPresentPathIsNotStale`
+
+A directory that exists on disk but is not committed is not stale.
+
+Staleness was judged against the tree at --branch while the edit lands on the
+WORKING-TREE file. So a rule for a directory the developer just created —
+present in the checkout, not yet committed — read as "matches zero tracked
+files" and its owners were deleted, at exit 0, with the message "deleting it
+changes no ownership". The directory was sitting right there.
+
+### `TestStalePaths_RefuseWhenTheTreeIsEmpty`
+
+--remove-stale-paths against an empty tree must refuse, not empty the file.
+
+Staleness asks which rules match nothing. Over an empty tree that is every
+rule, and the gate cannot object because it iterates the tree and therefore
+iterates nothing: the run deleted every rule, reported no ownership rows, and
+exited 0. An orphan branch, an --allow-empty initial commit, or a tag on an
+empty tree all reach it.
+
+### `TestTeamNotFound_AnOrgOwnerTokenStillRemoves`
+
+...and an org-owner token still gets the removal, so the guard costs nothing
+on the path it is meant to protect.
+
+### `TestTeamNotFound_IsInconclusiveUnlessTheTokenOwnsTheOrg`
+
+A team 404 does not authorize a deletion unless the token could have seen the
+team.
+
+GET /orgs/{org}/teams/{slug} returns 404 for a team that was deleted AND for
+a SECRET team the caller is not a member of. ProbeOrg does not separate them:
+it proves the token can call the endpoint, not that it can see what is behind
+it. So a scheduled lint with an ordinary org-member token would strip every
+secret team from CODEOWNERS, and the diff would look exactly like the tidy-up
+it claimed to be. Only an org owner sees secret teams.
 
 ## internal/ops
 
@@ -3479,4 +3588,4 @@ DIFFERENT states; transitioning between them is a real ownership change.
 
 ---
 
-373 documented test cases across 13 packages.
+382 documented test cases across 13 packages.

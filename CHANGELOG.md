@@ -57,13 +57,19 @@ changes to which class a failure lands in are called out explicitly.
     fixes. A rate-limited run therefore leaves the file byte-identical instead
     of dribbling out partial repairs, and `--lint` requires a token and
     `--github-repo` rather than silently degrading to a whitespace tidy.
-  - The repair is a guess, so its boundaries are exact: the run must start with
-    a token beginning `@`, every join must sit against an `@` or a `/`, and the
-    concatenation must be a valid handle — so `@a @b` never fuses into `@a@b`
-    and an email owner is never repaired at all, since `a@b.com` + `/x`
-    concatenates into a syntactically valid address nobody wrote. A repair is
-    accepted only if the result re-parses as a rule with a byte-identical
-    pattern. Lines outside those rules are reported and left as written.
+  - The repair is a guess, so its boundaries are exact: the run must start at a
+    token that is VISIBLY BROKEN — beginning `@` and not already a valid owner —
+    every join must sit against an `@` or a `/`, and the concatenation must be a
+    valid handle. `@org /team` is therefore NOT repaired: on a CODEOWNERS line
+    everything after the pattern is an owner, so it is shaped exactly like
+    `@alice /docs`, somebody putting two rules on one line, and adversarial
+    review produced precisely that write — `@alice/docs` fused into one owner,
+    handing `/docs`'s owner every file under `/src`, at exit 0. Ambiguity is
+    reported, not guessed. An email owner is never repaired for the same reason:
+    `a@b.com` is already valid, and `a@b.com` + `/x` would concatenate into a
+    syntactically valid address nobody wrote. A repair is accepted only if it
+    conserves every non-whitespace byte and re-parses as a rule with a
+    byte-identical pattern.
   - Stale-path removal stays opt-in per R-11: a pattern matching nothing may be
     deliberate and forward-looking, and deleting it destroys that intent.
   - It carries both of `sync`'s repository guards, which adversarial review
@@ -81,7 +87,18 @@ changes to which class a failure lands in are called out explicitly.
     further from a human, 4 when it does (pending fixes under `--dry-run`, or a
     line lint would not guess at). `--remove-stale-paths`, `--on-empty` and
     `--dry-run` are rejected with exit 3 when `--lint` is absent rather than
-    ignored.
+    ignored; `--cache-dir` is rejected *with* it, because a cached "does not
+    exist" is served without revalidation and here that answer deletes an owner
+    instead of printing a finding.
+  - **`--lint` never returns 1.** The precise taxonomy maps 1 to "no-op —
+    nothing to change", and a CODEOWNERS that needs no repair is this mode's
+    SUCCESS: under `set -e` a scheduled fleet run would otherwise read every
+    healthy repository as a failure. This is the only place the precise table's
+    1 does not apply.
+  - **Removing a team requires an org-owner token.** A secret team the caller
+    cannot see returns the same 404 as a deleted one, and enumerating the org
+    does not separate them, so anyone else's 404 is inconclusive. The check only
+    runs once a team already looks gone, so it costs nothing on the common path.
 - `SECURITY.md`, `CONTRIBUTING.md`, `CHANGELOG.md`, `.github/dependabot.yml`
   (GitHub Actions only — see the file), and a `CODEOWNERS` for this repository,
   which previously failed its own A-11 check.

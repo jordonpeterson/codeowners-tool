@@ -230,6 +230,22 @@ func leadingWSLen(s string) int {
 	return n
 }
 
+// PatternToken returns the pattern token of a raw line — the bytes that decide
+// which files it governs — or "" for a blank or comment line. Escape-aware, so
+// a pattern ending in an escaped space comes back whole.
+//
+// Exported alongside SplitOwnerRegion and for the same reason: an INVALID line
+// has no Rule, so a repair has no other way to ask what pattern it started
+// with, and comparing against a locally re-derived one would compare a repair
+// to its own arithmetic.
+func PatternToken(raw string) string {
+	trimmed := strings.TrimLeft(raw, " \t")
+	if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+		return ""
+	}
+	return trimmed[:patternTokenEnd(trimmed)]
+}
+
 // SplitOwnerRegion splits a raw line into its head — leading whitespace, the
 // pattern token, and the whitespace separating pattern from owners — and the
 // owner region that follows. ok is false for blank and comment lines, which

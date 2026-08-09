@@ -12,9 +12,21 @@ import (
 
 	"github.com/jordonpeterson/codeowners-tool/internal/apply"
 	"github.com/jordonpeterson/codeowners-tool/internal/ghapi"
+	"github.com/jordonpeterson/codeowners-tool/internal/gittree"
 	"github.com/jordonpeterson/codeowners-tool/internal/lint"
 	"github.com/jordonpeterson/codeowners-tool/internal/plan"
 )
+
+// errReason unwraps ghapi's fail-closed error to the reason an operator can act
+// on, without the "inconclusive: " prefix the caller supplies its own framing
+// for.
+func errReason(err error) string {
+	var inc *ghapi.Inconclusive
+	if errors.As(err, &inc) {
+		return inc.Reason
+	}
+	return err.Error()
+}
 
 // `audit --lint` — the one mode of the read-only verb that writes.
 //
@@ -91,6 +103,26 @@ func runLint(r lintRun, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "error: --github-repo must be owner/name")
 		return ExitInvalid
 	}
+	// The disk cache is refused rather than used, and this is the one place
+	// where lint must NOT inherit audit's behavior.
+	//
+	// ghapi.cachedBool serves a cached boolean without revalidation, and a
+	// cached FALSE is "this owner does not exist" — which under audit produces
+	// a finding a human reads, and under --lint authorizes a deletion. Two ways
+	// that goes wrong, neither hypothetical: the values are trivially
+	// invertible on disk, so anything that can write to a shared cache
+	// directory (a CI runner, /tmp, a restored actions/cache artifact from
+	// another branch) can make every owner read as dead with ZERO network
+	// traffic; and with no attacker at all, a 24h TTL means a team deleted and
+	// recreated yesterday is still remembered as gone. A --dry-run would even
+	// populate the negatives that authorize tomorrow's real write.
+	//
+	// Per-run memory caching still applies, so an owner named on twenty lines
+	// is still looked up once.
+	if r.cacheDir != "" {
+		fmt.Fprintln(stderr, "error: --cache-dir is not available with --lint: a cached \"this owner does not exist\" is served without revalidation, and here that answer deletes an owner rather than printing a finding — a stale or tampered-with cache entry would strip ownership with no network call at all; drop --cache-dir (lookups are still cached in memory for the run)")
+		return ExitInvalid
+	}
 
 	// Both of `sync`'s repository guards, for the same reasons it carries them.
 	// Neither is optional here: --lint resolves against a tracked tree git
@@ -128,14 +160,37 @@ func runLint(r lintRun, stdout, stderr io.Writer) int {
 		return errExit(&plan.InvalidError{Msg: err.Error()}, stderr)
 	}
 
-	var cache ghapi.Cache = ghapi.NewMemCache()
-	if r.cacheDir != "" {
-		cache = ghapi.NewDiskCache(r.cacheDir, r.cacheTTL)
+	// Stage 3 judges staleness, and a rule is only stale if it matches nothing
+	// in the committed tree AND nothing on disk. Without the second list a
+	// directory that exists in the checkout but has not been committed yet
+	// reads as "matches zero tracked files" and its owners are deleted out from
+	// under it — while the file being rewritten is the working-tree one, where
+	// that directory is plainly visible.
+	var workTree []string
+	if r.removeStale {
+		workTree, err = gittree.ListWorkTree(r.repo)
+		if err != nil {
+			return errExit(&plan.InvalidError{Msg: err.Error()}, stderr)
+		}
 	}
-	client := ghapi.New(r.apiURL, r.token, cache)
+
+	client := ghapi.New(r.apiURL, r.token, ghapi.NewMemCache())
+	// --github-repo is a precondition, not decoration: it establishes that this
+	// token can see the repository whose CODEOWNERS is about to be rewritten.
+	// Without it the flag was required and then never used — the org for every
+	// team lookup comes from the owner token itself — so a token with no
+	// relationship to this repo ran to completion, and an operator asking "why
+	// did lint delete my team" had no signal that the credential was wrong.
+	// Fails closed, like every other lookup here.
+	owner, name, _ := strings.Cut(r.githubRepo, "/")
+	if err := client.ProbeRepo(owner, name); err != nil {
+		fmt.Fprintf(stderr, "error: cannot confirm this token can see %s (%s) — refusing to remove owners on a credential whose access to the repository is unproven (R-12); nothing was written\n", r.githubRepo, errReason(err))
+		return ExitInconclusive
+	}
 
 	res, buildErr := lint.Build(content, tree, client, lint.Options{
 		RemoveStalePaths: r.removeStale,
+		WorkTree:         workTree,
 		OnEmpty:          r.onEmpty,
 	})
 
@@ -147,6 +202,13 @@ func runLint(r lintRun, stdout, stderr io.Writer) int {
 		return ExitInconclusive
 	case errors.As(buildErr, &noop):
 		// Clean, or clean apart from lines nobody can repair mechanically.
+		//
+		// The nil guard is not defensive padding: sync.execute carries the same
+		// one, because a panic in an unattended fleet run loses the record for
+		// this repo and every line the loop would have appended after it.
+		if res == nil {
+			return errExit(&plan.InvalidError{Msg: "lint reported nothing to do without a result"}, stderr)
+		}
 		//
 		// This arm must stay ahead of errExit and must not be folded into it.
 		// errExit maps *plan.NoOpError to ExitNoOp, which is right for `plan`
@@ -215,8 +277,13 @@ func emitLint(res *lint.Result, coPath string, applied bool, r lintRun, stdout i
 		return
 	}
 
-	n := len(res.Plan.Changes)
+	n, stuck := len(res.Plan.Changes), res.CountUnrepairable()
 	switch {
+	case n == 0 && stuck > 0:
+		// Never "lint clean" here. This run exits 4, and a headline saying the
+		// file is fine directly above a nonzero exit code is the one output
+		// that makes a CI log read green over a red result.
+		fmt.Fprintf(stdout, "lint: nothing to fix automatically in %s, but %d line(s) need a human — lint will not guess at them, and GitHub is skipping them meanwhile\n", coPath, stuck)
 	case n == 0:
 		fmt.Fprintf(stdout, "lint clean: %s\n", coPath)
 	case applied:

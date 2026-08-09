@@ -63,6 +63,10 @@ type Verifier interface {
 	ProbeOrg(org string) error
 	// TeamExists reports whether @org/slug exists. Call ProbeOrg first.
 	TeamExists(org, slug string) (bool, error)
+	// ViewerIsOrgAdmin reports whether the token is an OWNER of org. Only an
+	// owner sees secret teams, so only an owner's team-404 means "deleted"
+	// rather than "invisible to me" — and lint deletes on that answer.
+	ViewerIsOrgAdmin(org string) (bool, error)
 	// UserExists reports whether @login exists.
 	UserExists(login string) (bool, error)
 }
@@ -71,9 +75,27 @@ type Verifier interface {
 type Options struct {
 	// RemoveStalePaths opts in to stage 3 (R-11). Off by default.
 	RemoveStalePaths bool
+	// WorkTree is what is on disk right now — tracked files plus untracked,
+	// non-ignored ones. Stage 3 requires a pattern to match nothing in BOTH
+	// this and the committed tree before it will delete the rule.
+	//
+	// Without it, staleness is judged against the tree at --branch while the
+	// edit lands on the working-tree file, so a directory that exists on disk
+	// but has not been committed yet reads as "matches zero tracked files" and
+	// its owners are deleted out from under it, at exit 0 (found by adversarial
+	// review). Required whenever RemoveStalePaths is set.
+	WorkTree []string
 	// OnEmpty is R-6's policy for the case where removing a dead owner would
-	// leave a rule with no owners: "" (invalid — an explicit choice is
-	// required), "error", "inherit", or "unowned".
+	// leave a rule with no owners: "error", "inherit", or "unowned". "" is the
+	// ordinary default and is perfectly valid — it becomes a *plan.InvalidError
+	// only if a removal actually empties a set, which is R-6's point: the
+	// choice is demanded where it matters, not up front.
+	//
+	// "inherit" DELETES the rule line so the preceding broader rule takes over.
+	// On a rule with nothing broader behind it, that leaves the path unowned —
+	// and on a single-rule file it empties the file. The reassignment is always
+	// disclosed in Plan.Rows (R-14), which is what makes that reviewable rather
+	// than silent.
 	OnEmpty string
 	// MaxSize / WarnSize are S-4's cliff and R-9's threshold; zero means the
 	// same defaults plan.Options uses.
@@ -119,6 +141,21 @@ type Result struct {
 	Unverifiable []string `json:"unverifiable,omitempty"`
 }
 
+// CountUnrepairable is how many lines lint refused to guess at. It is the
+// difference between "this file is clean" and "this file has nothing left that
+// a machine should touch", and callers must not conflate the two: the second
+// still needs a human, and saying "lint clean" over it is the one sentence
+// that would send nobody.
+func (r *Result) CountUnrepairable() int {
+	n := 0
+	for _, a := range r.Actions {
+		if a.Kind == ActionUnrepairable {
+			n++
+		}
+	}
+	return n
+}
+
 // InconclusiveError is R-12 applied to the whole run: at least one owner could
 // not be verified, so NOTHING is written. Exit 5.
 type InconclusiveError struct{ Reasons []string }
@@ -135,26 +172,32 @@ func (e *InconclusiveError) Error() string {
 // it is a guess, and a guess is only acceptable when its boundaries can be
 // stated exactly and tested directly. Tokens are merged only when
 //
-//   - the run starts with a token beginning "@" (an email owner is never
-//     repaired: `a@b.com` + `/x` concatenates into a syntactically VALID email
-//     owner, so a merge rule that allowed it would invent an address nobody
-//     wrote), and
+//   - the run's FIRST token begins with "@" and is NOT already a valid owner —
+//     it is VISIBLY broken, a bare "@" or a dangling "@org/". This is the load-
+//     bearing condition, and it is why `@org /team` is deliberately NOT
+//     repaired. On a CODEOWNERS line everything after the pattern is an owner,
+//     so `@org /team` — one handle a space got into — and `@alice /docs` — two
+//     rules somebody put on one line — are the same three bytes in the same
+//     three positions. Nothing distinguishes them, and guessing picks up
+//     `/docs`'s owner and hands them all of `/src`. A token that already parses
+//     as an owner is therefore never merged into anything; the line is reported
+//     unrepairable instead. An email owner is excluded by the same clause, and
+//     needs to be: `a@b.com` + `/x` concatenates into a syntactically VALID
+//     address nobody wrote.
 //   - every join sits inside a handle — the left side ends with "@" or "/", or
 //     the right side STARTS with "/", so the only bytes removed are whitespace
 //     that had a handle's own punctuation on one side of it. A right side
-//     starting with "@" does not qualify: that is where the next owner begins,
-//     and
+//     starting with "@" does not qualify: that is where the next owner begins.
 //   - the concatenation is a valid @handle.
 //
-// `/x/ @a b` therefore never merges into `/x/ @ab` — the join touches neither
-// an "@" nor a "/" — and `@a @b` never merges into `@a@b`, which the join rule
-// permits (the left side ends with... "a", so it does not, in fact) and which
-// the validity rule refuses anyway, since "@a@b" is not a handle. Both guards
-// are kept: either alone leaves a case the other catches.
+// So `/x/ @a b` never merges into `/x/ @ab`, `@a @b` never into `@a@b`, and
+// `/x @a /b @a /b` never into `/x @a/b @a/b` — which the first condition
+// refuses outright, and which the other two, on their own, did not.
 //
 // The LONGEST valid run wins, which is what carries `@ org / team` — where the
-// intermediate `@org` is itself a perfectly valid handle — all the way to
-// `@org/team` instead of stopping at the first thing that happens to parse.
+// intermediate `@org` happens to parse — all the way to `@org/team` instead of
+// stopping at the first thing that does. That is safe only because the run
+// STARTED broken: `@` is not something anyone wrote as an owner.
 func RepairHandle(tokens []string) (repaired []string, changed bool) {
 	out := make([]string, 0, len(tokens))
 	for i := 0; i < len(tokens); {
@@ -176,15 +219,35 @@ func RepairHandle(tokens []string) (repaired []string, changed bool) {
 	return out, true
 }
 
+// maxHandleTokens caps a merge run. The worst legitimate shattering of a
+// handle is four tokens — "@", "org", "/", "team" — so nothing beyond that is
+// a handle being reassembled.
+//
+// The cap is also what keeps this linear. Without it a line of the shape
+// `/p @ /aaa /aaa /aaa …` drives the scan to the end of the token list, doing
+// an O(n) concatenation and an O(n) regex match at every step: 32k tokens took
+// 2.8s and 128k took 30s, all of it spent to return "cannot repair" (found by
+// adversarial review). One hostile or merely garbage file would stall a fleet
+// run.
+const maxHandleTokens = 4
+
 // longestHandleJoin returns the index of the last token in the longest run
 // starting at i that concatenates into a valid @handle across legal join
 // points — or i itself when no merge is available.
 func longestHandleJoin(tokens []string, i int) int {
-	if !strings.HasPrefix(tokens[i], "@") {
+	// The run must start VISIBLY BROKEN. A token that already parses as an
+	// owner is never merged into anything, because `@alice /docs` (two rules on
+	// one line) and `@org /team` (one handle with a space in it) are
+	// byte-identical in shape, and guessing wrong hands `/docs`'s owner every
+	// file under `/src`. Reported unrepairable is the only honest answer to an
+	// ambiguity, and this clause is what makes that the outcome. It also
+	// excludes email owners for free: `a@b.com` is valid, so it never starts a
+	// run, and `a@b.com` + `/x` cannot fuse into an address nobody wrote.
+	if !strings.HasPrefix(tokens[i], "@") || file.ValidOwnerToken(tokens[i]) {
 		return i
 	}
 	best, acc := i, tokens[i]
-	for j := i + 1; j < len(tokens); j++ {
+	for j := i + 1; j < len(tokens) && j-i < maxHandleTokens; j++ {
 		if !joinable(acc, tokens[j]) {
 			break
 		}
@@ -239,6 +302,14 @@ func RepairLine(raw string) (fixed string, ok bool) {
 	if !changed {
 		return "", false
 	}
+	// A merge that produces an owner the line ALREADY names is not a repair of
+	// that line, it is a coincidence: `/x @ org/a @org/a` reassembles into
+	// `@org/a @org/a`, a rule listing one team twice. Refuse rather than emit
+	// it — the line goes to the operator as unrepairable, which is what an
+	// ambiguous reassembly deserves.
+	if introducesDuplicate(tokens, merged) {
+		return "", false
+	}
 
 	out := head + strings.Join(merged, " ")
 	if comment != "" {
@@ -249,16 +320,33 @@ func RepairLine(raw string) (fixed string, ok bool) {
 	}
 
 	// The structural gate for stage 1, and the reason the repair is allowed to
-	// be a guess at all: the result must be ONE line, it must parse as a rule,
-	// its pattern must be the byte-identical pattern that went in (so the set
-	// of files this line governs is untouched), and it must carry exactly the
-	// tokens the merge produced (so no owner was dropped or invented).
+	// be a guess at all. Build's tree-level gate CANNOT check stage 1 — it
+	// compares against a desired state derived from the already-repaired file,
+	// so for this stage it would be comparing the repair to itself. These four
+	// checks are therefore the whole proof, and each is independent of the
+	// merge rule that produced the candidate:
+	//
+	//  1. BYTE CONSERVATION over the owner region. The repair may remove
+	//     whitespace and nothing else. This is what "no owner was invented"
+	//     actually means here: a merge that dropped, added or altered a single
+	//     non-whitespace byte fails, whatever RepairHandle believed it was
+	//     doing.
+	//  2. The result is ONE line — a repair may not introduce a newline.
+	//  3. It parses as a RULE, so the line GitHub was skipping is now in force.
+	//  4. Its pattern is byte-identical to the pattern that went in, compared
+	//     against the ORIGINAL line. Comparing against `out`'s own prefix
+	//     instead would only ask whether concatenation works; what matters is
+	//     that re-parsing did not shift the pattern/owner boundary, which is
+	//     the one way a repair could change which files the line governs.
+	if strings.Join(merged, "") != strings.Join(tokens, "") {
+		return "", false
+	}
 	after := file.Parse([]byte(out))
 	if len(after.Lines) != 1 || after.Lines[0].Kind != file.LineRule {
 		return "", false
 	}
 	r := after.Lines[0].Rule
-	if !strings.HasPrefix(out, head) || len(r.Owners) != len(merged) {
+	if r.PatternText != file.PatternToken(raw) || len(r.Owners) != len(merged) {
 		return "", false
 	}
 	for i, o := range r.Owners {
@@ -294,9 +382,35 @@ func splitOwnerTokens(region string) (tokens []string, comment string) {
 		if ws < len(rest) && rest[ws] == '#' {
 			return tokens, rest
 		}
+		// Trailing whitespace is kept for the same reason the inline comment
+		// is: INV-5 makes byte preservation the file model's promise, and a
+		// repair that also silently reflows the end of the line makes the diff
+		// say more than the repair did.
+		if ws == len(rest) {
+			return tokens, rest
+		}
 		rest = rest[ws:]
 	}
 	return tokens, ""
+}
+
+// introducesDuplicate reports whether merging created a repeated owner token
+// that the original token list did not already have.
+func introducesDuplicate(before, after []string) bool {
+	count := func(list []string) map[string]int {
+		m := map[string]int{}
+		for _, s := range list {
+			m[s]++
+		}
+		return m
+	}
+	was, now := count(before), count(after)
+	for tok, n := range now {
+		if n > 1 && n > was[tok] {
+			return true
+		}
+	}
+	return false
 }
 
 // Build computes the lint plan. It never writes anything.
@@ -310,16 +424,36 @@ func splitOwnerTokens(region string) (tokens []string, comment string) {
 // deleting one is safe and why the gate is what proves it rather than the
 // author's say-so.
 //
+// WHAT THIS GATE DOES NOT COVER, stated plainly because an overstated proof is
+// worse than an honest one: the desired state is derived from the file AFTER
+// stage 1, so for stage 1 the comparison is against its own output. Stage 1 is
+// proven structurally instead, inside RepairLine — byte conservation over the
+// owner region, a byte-identical pattern, and a result that re-parses as one
+// rule — and those three, not this loop, are why a repair cannot invent an
+// owner or move a line's match set.
+//
 // Errors: *InconclusiveError (R-12, nothing written), *plan.NoOpError (already
 // clean — the Result is still populated), *plan.InvalidError (a removal empties
-// an owner set with no --on-empty policy, R-6), *plan.RefusalError (the gate
-// rejected the synthesized edits, or --on-empty=error, or S-4's size cap).
+// an owner set with no --on-empty policy, R-6; or RemoveStalePaths with no tree
+// to judge staleness against), *plan.RefusalError (the gate rejected the
+// synthesized edits, or --on-empty=error, or S-4's size cap).
 func Build(content []byte, tree []string, v Verifier, opts Options) (*Result, error) {
 	if opts.MaxSize == 0 {
 		opts.MaxSize = 3_000_000
 	}
 	if opts.WarnSize == 0 {
 		opts.WarnSize = 2_500_000
+	}
+	// Stage 3 decides staleness by asking which rules match nothing. Over an
+	// EMPTY tree that is every rule, and the gate cannot object because it
+	// iterates the tree and therefore iterates nothing — a vacuous proof for a
+	// run that empties the file, at exit 0, with no ownership rows to show for
+	// it (found by adversarial review; an orphan branch, an --allow-empty
+	// initial commit or a tag on an empty tree all reach it). plan.Build
+	// refuses a zero-match scope under R-5 for the same reason; this is lint's
+	// analogue.
+	if opts.RemoveStalePaths && len(tree) == 0 {
+		return nil, &plan.InvalidError{Msg: "refusing --remove-stale-paths: the tree at this ref has no files, so EVERY rule matches nothing and staleness cannot distinguish a dead rule from a tree the tool cannot see — the whole file would be deleted on a proof that examined zero paths (R-5's reasoning)"}
 	}
 
 	f := file.Parse(content)
@@ -372,6 +506,14 @@ func Build(content []byte, tree []string, v Verifier, opts Options) (*Result, er
 
 	// ---- Stage 2: which owners definitively do not exist? --------------------
 	owners := distinctOwners(f)
+	// `known` is the owner set stages 2 and 3 START from, and the gate's
+	// "nothing was invented" check is scoped to exactly that: those two stages
+	// only ever REMOVE, so any owner they leave behind must be one of these.
+	// It is deliberately NOT a check on stage 1 — stage 1 is the only stage
+	// that synthesizes a token, and it is proven in RepairLine instead, where
+	// byte conservation over the owner region makes "invented" impossible
+	// rather than merely detectable. Building this set before stage 1 and
+	// whitelisting the repairs would have been the same circle drawn wider.
 	known := make(map[string]bool, len(owners))
 	for _, o := range owners {
 		known[o] = true
@@ -412,7 +554,18 @@ func Build(content []byte, tree []string, v Verifier, opts Options) (*Result, er
 	// ---- Stages 2 and 3: synthesize the edits. ------------------------------
 	// Descending line order so a delete never invalidates an index still to be
 	// visited.
-	inheritDeletes := 0
+	// Paths whose winning rule was DELETED for emptiness under
+	// --on-empty=inherit, and only those. plan.synthRemove narrows its
+	// equivalent acceptance to one op's scope for a documented reason — a
+	// broader one "weakened the gate" — and a whole-run counter here would
+	// reproduce that mistake at file scope: one inherit-delete anywhere would
+	// disarm the ownership comparison for every path in the tree, for any
+	// cause (found by adversarial review).
+	//
+	// `repaired` is the right source even across a cascade: a second delete can
+	// only displace paths whose winner was the first deleted line, and those
+	// are already in the set.
+	inheritPaths := map[string]bool{}
 	for i := len(f.Lines) - 1; i >= 0; i-- {
 		ln := f.Lines[i]
 		if ln.Kind != file.LineRule {
@@ -420,10 +573,10 @@ func Build(content []byte, tree []string, v Verifier, opts Options) (*Result, er
 		}
 		r := ln.Rule
 
-		if opts.RemoveStalePaths && !matchesTree(r, tree) {
+		if opts.RemoveStalePaths && !matchesTree(r, tree) && !matchesTree(r, opts.WorkTree) {
 			res.Actions = append(res.Actions, Action{
 				Kind: ActionRemoveStale, Line: i + 1, Pattern: r.PatternText, Before: f.LineText(i),
-				Reason: fmt.Sprintf("pattern %q matches zero tracked files, so it can never win a path and deleting it changes no ownership (--remove-stale-paths; R-11 keeps this off by default because a dead pattern may be deliberate)", r.PatternText),
+				Reason: fmt.Sprintf("pattern %q matches nothing tracked at this ref and nothing on disk, so it cannot win any path today and deleting it changes no CURRENT ownership; a path added later that it would have matched now falls to whatever rule remains (--remove-stale-paths; R-11 keeps this off by default because a dead pattern may be deliberate)", r.PatternText),
 			})
 			res.Plan.Changes = append(res.Plan.Changes, plan.Change{
 				Action: "delete", Line: i + 1, Pattern: r.PatternText,
@@ -462,9 +615,16 @@ func Build(content []byte, tree []string, v Verifier, opts Options) (*Result, er
 			case "unowned":
 				f.SetOwners(i, nil)
 			case "inherit":
+				// Record the paths this line was winning BEFORE deleting it —
+				// they are the only ones whose divergence from the pure
+				// owner-set transform the gate may later accept.
+				for p, rr := range repaired {
+					if rr.LineIndex == i {
+						inheritPaths[p] = true
+					}
+				}
 				f.DeleteLine(i)
 				deletedLine = true
-				inheritDeletes++
 			default:
 				return nil, &plan.InvalidError{Msg: fmt.Sprintf("unknown --on-empty policy %q", opts.OnEmpty)}
 			}
@@ -509,11 +669,11 @@ func Build(content []byte, tree []string, v Verifier, opts Options) (*Result, er
 		}
 		// Under --on-empty=inherit a deleted rule legitimately resurrects the
 		// owners of whatever line sat behind it — an outcome no pure owner-set
-		// transform can predict. It is accepted only when a rule was in fact
-		// deleted for emptiness, and only when no dead owner came back with it;
-		// otherwise the divergence is a synthesis bug and accepting it here
-		// would launder that bug straight past the gate.
-		if inheritDeletes > 0 && !anyDead(got, dead) {
+		// transform can predict. Accepted only for the paths THAT rule was
+		// actually winning, and only when no dead owner came back with them;
+		// any other divergence is a synthesis bug, and accepting it here would
+		// launder that bug straight past the gate.
+		if inheritPaths[p] && !anyDead(got, dead) {
 			desired[p] = got
 			continue
 		}
@@ -539,13 +699,26 @@ func Build(content []byte, tree []string, v Verifier, opts Options) (*Result, er
 
 	res.Plan.AfterContent = string(afterBytes)
 	res.Plan.SizeAfter = len(afterBytes)
+	// Stage 1 appends ascending and stages 2/3 descending, so both lists are
+	// sorted before anyone sees them — an out-of-order diff makes a reviewer
+	// hunt for a reordering that never happened.
 	sort.SliceStable(res.Actions, func(i, j int) bool { return res.Actions[i].Line < res.Actions[j].Line })
+	sort.SliceStable(res.Plan.Changes, func(i, j int) bool { return res.Plan.Changes[i].Line < res.Plan.Changes[j].Line })
 
 	if bytes.Equal(afterBytes, content) {
 		// A populated Result, not nil: the caller still has to report the lines
 		// it could not repair, and "clean" is the modal outcome of a scheduled
 		// run.
-		return res, &plan.NoOpError{Msg: "nothing to lint: no repairable owner spacing, and every owner exists"}
+		//
+		// The message is careful about what was actually established. Owners on
+		// an UNREPAIRABLE line were never looked up — they are not owners, the
+		// line is invalid — so a flat "every owner exists" would assert a check
+		// that never ran on precisely the lines a human still has to fix.
+		msg := "nothing to lint: no repairable owner spacing, and every owner named by a valid rule exists"
+		if n := res.CountUnrepairable(); n > 0 {
+			msg = fmt.Sprintf("nothing lint can repair: %d line(s) are invalid in ways it will not guess at, and their owners were never checked — GitHub is skipping those lines", n)
+		}
+		return res, &plan.NoOpError{Msg: msg}
 	}
 
 	if res.Plan.SizeAfter > opts.MaxSize {
@@ -598,6 +771,23 @@ func ownerIsGone(v Verifier, owner string) (gone bool, reason string, err error)
 		}
 		if exists {
 			return false, "", nil
+		}
+		// A 404, which is where reporting and DELETING part company. GitHub
+		// returns exactly this for a team that was removed and for a SECRET
+		// team the caller cannot see, and ProbeOrg does not separate them: it
+		// proves the token can call the endpoint, not that it can see every
+		// team behind it. Only an org owner sees secret teams, so only an org
+		// owner's 404 is definitive. Anything else is inconclusive — which is
+		// R-12 doing its job, and costs nothing on the common path, because
+		// this is only ever reached when a team already looks gone.
+		admin, err := v.ViewerIsOrgAdmin(org)
+		if err != nil {
+			return false, "", err
+		}
+		if !admin {
+			return false, "", &ghapi.Inconclusive{Reason: fmt.Sprintf(
+				"%s was not found in %s, but this token is not an owner of that org, and a secret team returns the same 404 as a deleted one — re-run with an org-owner token to have this decided, or remove the owner by hand",
+				owner, org)}
 		}
 		return true, fmt.Sprintf("team %s does not exist (deleted or renamed); review requests to it silently do nothing", owner), nil
 	}

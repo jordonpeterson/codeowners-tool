@@ -45,16 +45,21 @@ type fakeVerifier struct {
 	users map[string]bool  // login -> exists
 	teams map[string]bool  // "org/slug" -> exists
 	orgs  map[string]error // org -> ProbeOrg result (absent = enumerable)
-	calls []string         // call log, in order
+	// notAdmin marks orgs the token does NOT own. Only consulted on a team
+	// 404, where an owner's "not found" is definitive and everyone else's is
+	// indistinguishable from a secret team.
+	notAdmin map[string]bool
+	calls    []string // call log, in order
 }
 
 var _ lint.Verifier = (*fakeVerifier)(nil)
 
 func newVerifier() *fakeVerifier {
 	return &fakeVerifier{
-		users: map[string]bool{},
-		teams: map[string]bool{},
-		orgs:  map[string]error{},
+		users:    map[string]bool{},
+		teams:    map[string]bool{},
+		orgs:     map[string]error{},
+		notAdmin: map[string]bool{},
 	}
 }
 
@@ -71,6 +76,19 @@ func (v *fakeVerifier) TeamExists(org, slug string) (bool, error) {
 func (v *fakeVerifier) UserExists(login string) (bool, error) {
 	v.calls = append(v.calls, "UserExists("+login+")")
 	return v.users[login], nil
+}
+
+// ViewerIsOrgAdmin defaults to true here so the cases in this file stay about
+// what they are about. It is only consulted when a team already 404s, and
+// failclosed_test.go owns the cases where the answer is no — a token that is
+// not an org owner cannot tell a deleted team from a secret one, and lint must
+// then refuse to delete.
+func (v *fakeVerifier) ViewerIsOrgAdmin(org string) (bool, error) {
+	v.calls = append(v.calls, "ViewerIsOrgAdmin("+org+")")
+	if v.notAdmin[org] {
+		return false, nil
+	}
+	return true, nil
 }
 
 // asked reports whether any recorded call contains sub.
@@ -138,8 +156,31 @@ func TestRepairHandle_MergeBoundary(t *testing.T) {
 			changed: true,
 		},
 		{
-			name:    "space before the slash",
+			// `@org /team` is NOT repaired, and this is the single most
+			// important entry in the table. On a CODEOWNERS line everything
+			// after the pattern is an owner, so these two tokens are shaped
+			// exactly like `@alice /docs` — somebody putting two rules on one
+			// line. Repairing the first spelling means repairing the second,
+			// and repairing the second hands `/docs`'s owner every file under
+			// `/src` while `/docs` silently keeps the catch-all. Adversarial
+			// review produced that exact write, at exit 0.
+			//
+			// The rule that prevents it: a run may only START from a token that
+			// is not already a valid owner. `@org` is one, so it is never
+			// merged into anything, and the line is reported unrepairable —
+			// which is the only honest answer to an ambiguity.
+			name:    "valid handle followed by a path-shaped token never fuses",
 			in:      []string{"@org", "/team"},
+			want:    []string{"@org", "/team"},
+			changed: false,
+		},
+		{
+			// The same two tokens reached from a run that DID start broken.
+			// `@` is not something anyone writes as an owner, so once it is
+			// seen the line is known to be shattered and continuing through the
+			// slash is reassembly rather than a guess.
+			name:    "the same join is safe once the run started broken",
+			in:      []string{"@", "org", "/team"},
 			want:    []string{"@org/team"},
 			changed: true,
 		},

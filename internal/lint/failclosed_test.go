@@ -54,6 +54,10 @@ type fcVerifier struct {
 	orgErr  map[string]error
 	teamErr map[string]error
 	userErr map[string]error
+	// notAdmin marks orgs this token does not own; adminErr makes the
+	// ownership lookup itself undecidable.
+	notAdmin map[string]bool
+	adminErr map[string]error
 }
 
 func fcNew() *fcVerifier {
@@ -63,6 +67,8 @@ func fcNew() *fcVerifier {
 		orgErr:       map[string]error{},
 		teamErr:      map[string]error{},
 		userErr:      map[string]error{},
+		notAdmin:     map[string]bool{},
+		adminErr:     map[string]error{},
 	}
 }
 
@@ -96,6 +102,16 @@ func (v *fcVerifier) UserExists(login string) (bool, error) {
 		return false, err
 	}
 	return !v.missingUsers[login], nil
+}
+
+// ViewerIsOrgAdmin is what separates "this team was deleted" from "this token
+// cannot see this team". Defaults to owner so existing cases are unaffected.
+func (v *fcVerifier) ViewerIsOrgAdmin(org string) (bool, error) {
+	v.record("ViewerIsOrgAdmin(" + org + ")")
+	if err := v.adminErr[org]; err != nil {
+		return false, err
+	}
+	return !v.notAdmin[org], nil
 }
 
 // fcCalls returns a copy of the call log.

@@ -254,15 +254,17 @@ Under `inherit`/`unowned` the resulting reassignment is shown in the plan's owne
 
 ## Audit checks
 
-Read-only. **Never writes** — where a fix is expressible it emits op strings for a human
-to review and run through `plan`/`apply`, the system's single writer path.
+Read-only **except `audit --lint`** ([below](#audit---lint)). Plain `audit` never writes —
+where a fix is expressible it emits op strings for a human to review and run through
+`plan`/`apply`. Even under `--lint` the bytes reach disk only through `apply`, which
+remains the system's single writer path.
 
 | ID | Check | API | Auto-fix |
 |---|---|---|---|
-| A-1 | Owner doesn't exist (deleted/renamed user or team) | yes | proposes `remove_owner` |
+| A-1 | Owner doesn't exist (deleted/renamed user or team) | yes | proposes `remove_owner`; **applied** by `--lint` |
 | A-2 | Owner exists but isn't in the org | yes | proposes `remove_owner` |
 | A-3 | Owner lacks **explicit write access** (org membership isn't enough) | yes | proposes `remove_owner` |
-| A-4 | Rule matches zero tracked files | no | report only, permanently — a dead pattern may be deliberate intent |
+| A-4 | Rule matches zero tracked files | no | report only by default — a dead pattern may be deliberate intent; deleted only by `--lint --remove-stale-paths` |
 | A-5 | Rule dead **only because of case** (`/Src/` vs `src/`) | no | suggests corrected pattern |
 | A-6 | Rule fully shadowed by later rules | no | report only |
 | A-7 | Duplicate pattern | no | report only |
@@ -362,7 +364,27 @@ refused to guess at are both "needs a human", which makes `--lint --dry-run` a C
 
 `--remove-stale-paths`, `--on-empty` and `--dry-run` are rejected (exit 3) without
 `--lint`, rather than ignored: `audit --remove-stale-paths` quietly reporting instead of
-deleting is the kind of mistake that only surfaces months later.
+deleting is the kind of mistake that only surfaces months later. `--cache-dir` is rejected
+*with* `--lint`: a cached "this owner does not exist" is served without revalidation, and
+under `--lint` that answer deletes an owner rather than printing a finding — a stale entry
+(the default TTL is 24h) or a tampered-with one would strip ownership with no network call
+at all. Lookups are still cached in memory for the run.
+
+**Removing a team needs an org-owner token.** `GET /orgs/{org}/teams/{slug}` returns 404
+both for a team that was deleted and for a *secret* team the caller cannot see, and
+enumerating the org does not separate them — it proves the token can call the endpoint,
+not that it can see what is behind it. Only an org owner sees secret teams, so only an org
+owner's 404 is definitive; for anyone else it is inconclusive, with a message saying so.
+This costs nothing on the common path: the ownership check only happens once a team
+already looks gone.
+
+**Three exits are worth knowing before you script this.** `--lint` never returns 1 (a file
+needing no repair is this mode's success, not a no-op — under `set -e` a fleet run would
+otherwise read every healthy repository as a failure). Hash drift lands in exit 3: lint
+reads the file, then writes it, and a concurrent edit in between is refused rather than
+clobbered. And `--remove-stale-paths` against a ref whose tree is empty is exit 3, not a
+deleted file: every rule matches nothing there, so staleness cannot tell a dead rule from
+a tree the tool cannot see.
 
 ## Exit codes
 
@@ -387,7 +409,7 @@ the policy, or about this repo?*
 | Code | Meaning |
 |---|---|
 | 0 | Success — applied, or audit found nothing |
-| 1 | No-op — nothing to change |
+| 1 | No-op — nothing to change (never returned by `audit --lint`; see below) |
 | 2 | Refused — would violate INV-1/INV-2, or exceed the 3 MB cap |
 | 3 | Invalid input — malformed op, zero-match scope, conflicting batch |
 | 4 | Audit findings present |
