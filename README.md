@@ -14,8 +14,8 @@ works out the lines. Then it checks its own work against every file in your repo
 
 It also reads: `snapshot` tells you who owns what today, and `audit` finds owners who've
 left the company, rules that match no files, and owners who don't actually have
-permission to approve. Neither writes anything — until you ask `audit` to fix what it
-found, with [`--lint`](#fixing-what-it-finds-audit---lint).
+permission to approve. Neither writes anything; `lint` is the command that repairs what
+`audit` finds — see **[docs/LINTING.md](docs/LINTING.md)**.
 
 Works with github.com and GitHub Enterprise Server.
 
@@ -42,7 +42,8 @@ $ codeowners-tool version
 | See who owns what in this repo, right now | [Find out what you have](#find-out-what-you-have) |
 | Understand `add_owner` vs `set_owners` before touching anything | [Basic concepts](#basic-concepts) |
 | Follow one small end-to-end change | [A basic example](#a-basic-example) |
-| **Lint** a CODEOWNERS file, locally or in CI — and fix it | [How to: lint](#how-to-lint-a-codeowners-file) |
+| **Lint** a CODEOWNERS file, locally or in CI | [How to: lint](#how-to-lint-a-codeowners-file) |
+| **Repair** one — dead owners, split handles, stale rules | [docs/LINTING.md](docs/LINTING.md) |
 | **Write** a CODEOWNERS file for a repo that has none | [How to: write a new file](#how-to-write-a-new-codeowners-file) |
 | **Modify** a CODEOWNERS file that already exists | [How to: modify an existing file](#how-to-modify-an-existing-codeowners-file) |
 | Roll one policy out over many repos | [docs/FLEET.md](docs/FLEET.md) |
@@ -51,8 +52,8 @@ $ codeowners-tool version
 
 ## Find out what you have
 
-Every command is discoverable from the binary, and these four are safe to run against
-anything — none of them writes (`audit` only writes when you add `--lint`):
+Every command is discoverable from the binary, and these are all safe to run against
+anything — none of them writes:
 
 ```sh
 codeowners-tool --help                 # every command and its flags
@@ -189,9 +190,10 @@ unchanged: 0 op(s) applied, 0 skipped; 0 line change(s), 0 path(s) change owners
 
 ## How to: lint a CODEOWNERS file
 
-`audit` is the linter. On its own it is read-only — where a fix is expressible it prints
-an op string for a human to run, and never applies one itself. Adding `--lint` is the one
-mode that writes; that's [below](#fixing-what-it-finds-audit---lint).
+`audit` is the linter and it is read-only — where a fix is expressible it prints an op
+string for a human to run, and never applies one itself. `lint` is the command that
+applies them; that's [below](#fixing-what-it-finds-lint), and in full in
+[docs/LINTING.md](docs/LINTING.md).
 
 ```console
 $ codeowners-tool audit
@@ -240,22 +242,18 @@ is in [docs/REFERENCE.md](docs/REFERENCE.md#audit-checks). Run a subset with
 
 ### Fixing what it finds: `lint`
 
-`lint` repairs the whole file instead of only describing it — `audit` reports twelve
-checks, `lint` fixes three of them. (`audit --lint` is the older spelling and still works.)
-Three things, in this order:
+`audit` reports twelve checks; `lint` repairs three of them, in this order:
 
-1. **Rejoins `@`handles that whitespace has split.** `/x/ @ org/team` looks like a rule
-   with an owner. It isn't — GitHub can't parse the line, skips it entirely, and that team
-   owns nothing. The handle is rejoined *before* anyone asks whether the team exists: `@`
-   and `org/team` aren't two owners that don't exist, they're one owner nobody has looked
-   up yet.
-2. **Removes users and teams that don't exist.** A deleted or renamed team is a review
-   request that silently goes nowhere.
-3. **Removes rules that match no files** — only with `--remove-stale-paths`. Off by
-   default, because a dead pattern is often deliberate, waiting on a directory that's
-   coming, and deleting it destroys that intent. It takes you saying so. A rule that
-   misses only because of *case* (`/Src/` vs `src/`) is spared and reported: that's a
-   typo, and deleting it would quietly un-own the files it was aimed at.
+1. **Rejoins `@`handles that whitespace has split** — `/x/ @ org/team` is a line GitHub
+   cannot parse and skips entirely, so that team owns nothing. Repaired *before* anyone
+   asks whether the team exists, because `@` and `org/team` are one owner nobody has
+   looked up yet, not two that are missing.
+2. **Removes users and teams that no longer exist** — a deleted team is a review request
+   that silently goes nowhere.
+3. **Removes rules matching no files** — only with `--remove-stale-paths`, because a dead
+   pattern is often deliberate.
+
+Look before you write; `--dry-run` changes nothing:
 
 ```console
 $ GITHUB_TOKEN=... codeowners-tool lint --github-repo org/repo --dry-run
@@ -267,10 +265,8 @@ $ echo $?
 4
 ```
 
-Drop `--dry-run` to write it. **Exit 4 means the file still needs a person** — fixes
-pending under `--dry-run`, a line lint refused to guess at, or a case-only typo it spared
-— which makes `lint --dry-run` a CI gate that fails on rot rather than merely narrating
-it. A *successful write* can exit 4 too, for the same reason, so gate on the dry run:
+Drop `--dry-run` to write it. **Exit 4 means the file still needs a person** — which makes
+the dry run your CI gate:
 
 ```yaml
 - run: codeowners-tool lint --dry-run --github-repo ${{ github.repository }}
@@ -278,44 +274,15 @@ it. A *successful write* can exit 4 too, for the same reason, so gate on the dry
     GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 ```
 
-Scripting the JSON instead? `--format json` carries `needs_human`, straight from the same
-function that sets the exit code, so the gate is `jq -e .needs_human` and not a guess at
-which action kinds count.
+Three things worth knowing up front. It **needs a token and `--github-repo`** — whether an
+owner exists is not decidable offline. It **fails closed for the whole run**: one lookup
+it cannot answer and nothing is written, not even the offline whitespace fixes. And it
+**refuses what it would have to guess at** — `@org /team` reads exactly like `@alice
+/docs`, so lint repairs neither and reports the line.
 
-Four things to know:
-
-- **It needs a token and `--github-repo`.** Whether an owner still exists isn't decidable
-  offline, and that's the point of the mode. Without them it exits 5 and writes nothing.
-  The repository is actually checked, not just parsed: a token that can't see it stops
-  the run before anything is removed.
-- **It fails closed for the entire run.** If *any* owner lookup is inconclusive — rate
-  limit, expired token, an org your token can't see — nothing is written, not even the
-  offline whitespace fixes. Partial knowledge doesn't earn a partial edit. Removing a
-  **team** additionally needs an org-owner token, because a secret team you can't see
-  returns the same 404 as a deleted one.
-- **It reads the working-tree file**, unlike plain `audit`, because that's the file it's
-  about to rewrite. Ownership still resolves against `--branch`'s tree — and the file's
-  *path* is still discovered there, so a CODEOWNERS you haven't committed yet needs
-  `--file`.
-- **It refuses what it can't repair.** `@org /team` reads exactly like `@alice /docs` —
-  somebody putting two rules on one line — so lint repairs neither and reports the line.
-  Only a visibly broken handle is rejoined (`@ org/team`, `@org/ team`, `@ org / team`),
-  and only until it becomes a valid owner: `@ alice /docs` assembles `@alice` and then
-  stops, because everything after that is the same ambiguity again.
-
-One thing to watch if you schedule it. `sync` adds the owners your policy names and never
-asks whether they exist; `lint` removes owners that don't and knows nothing about your
-policy. Point both at the same repo on a timer and they will undo each other forever, each
-one exiting 0. Run `lint` on a schedule *or* `sync`, not both against overlapping owners.
-
-It is not a shortcut around the invariants: the edits are proven against every tracked
-file first, then written through the same `apply` path as everything else — hash pinned,
-validated, renamed atomically, rolled back on failure. If removing a dead owner would
-leave a rule with no owners you have to say what happens, with
-[`--on-empty`](docs/REFERENCE.md#--on-empty--on_empty-r-6) — and note that `inherit`
-*deletes* the rule line, which on a file with nothing broader behind it can empty the
-file. The reassignment always shows up in the ownership rows. Lines lint can't repair
-without guessing are reported and left exactly as written.
+**[docs/LINTING.md](docs/LINTING.md)** is the rest: every stage in detail, the exit-code
+table, the errors you'll actually hit and what to do about each, the `--on-empty` choices,
+and why you shouldn't schedule `lint` and `sync` against the same owners.
 
 There's a second kind of lint that has nothing to do with a repo. If you keep your ops in
 a policy file, `check` validates the file itself:

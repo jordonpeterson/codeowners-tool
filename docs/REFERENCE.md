@@ -15,6 +15,7 @@
 - [What `declare` costs](#what-declare-costs)
 - [`--on-empty` / `on_empty` (R-6)](#--on-empty--on_empty-r-6)
 - [Audit checks](#audit-checks)
+- [`lint`](#lint)
 - [Exit codes](#exit-codes)
 - [GitHub semantics this tool encodes](#github-semantics-this-tool-encodes)
 - [Design decisions](#design-decisions)
@@ -296,104 +297,68 @@ where nothing can render it into a log (CWE-532).
 
 ### `lint`
 
-The one verb that repairs. `audit` reports twelve checks and never writes; `lint` fixes
-three of them, over the entire file. (`audit --lint` is the older spelling and still
-works — it is the same code path, so everything below applies to both. Under that
-spelling `--checks` is rejected, because a subset of a whole-file repair is not a smaller
-lint, it is an ambiguous one.) Three stages, in this order:
+Repairs three of the checks above, over the whole file. **[LINTING.md](LINTING.md)** is
+the guide — what each stage does, what it refuses to guess at, the errors and what to do
+about them. This is the lookup table.
+
+`audit --lint` is the older spelling and is the same code path; under it `--checks` is
+rejected, because a subset of a whole-file repair is ambiguous rather than smaller.
+
+| Flag | Meaning |
+|---|---|
+| `--github-repo owner/name` | **Required.** Probed, so a token that cannot see the repo stops the run. |
+| `--token` / `$GITHUB_TOKEN` | **Required.** Owner existence is not decidable offline. |
+| `--dry-run` | Compute and report; write nothing. Exit 4 if anything is pending. |
+| `--remove-stale-paths` | Stage 3. Deletes rules matching nothing tracked **and** nothing on disk. |
+| `--on-empty error\|inherit\|unowned` | R-6, required only when a removal would empty a rule. `inherit` deletes the line. |
+| `--file PATH` | The path is discovered from `--branch`'s tree, so an uncommitted CODEOWNERS needs this. |
+| `--repo`, `--branch`, `--api-url`, `--format` | As elsewhere. |
+
+`--cache-dir` and `--cache-ttl` are rejected (exit 3): a cached negative is served without
+revalidation, and here that answer deletes an owner rather than printing a finding.
+Lookups are still cached in memory per run.
 
 | # | Stage | Opt-in | What it does |
 |---|---|---|---|
-| 1 | Repair owner spacing | no | Rejoins an `@`handle split by whitespace: `@ org/team`, `@org /team`, `@org/ team`, `@ org / team` → `@org/team`. GitHub skips such a line entirely, so the owner on it owns nothing. |
-| 2 | Remove dead owners | no | Drops users and teams that definitively do not exist (A-1 only — never A-2 or A-3, where the right fix may be to grant the access instead). |
-| 3 | Remove stale rules | `--remove-stale-paths` | Deletes rules matching nothing in the committed tree *and* nothing on disk. Off by default per R-11: a dead pattern may be deliberate. A rule that misses only because of **case** (`/Src/` vs `src/`) is spared and reported — that is a typo, and deleting it would silently un-own the files it was aimed at. |
+| 1 | Repair owner spacing | no | Rejoins an `@`handle split by whitespace: `@ org/team`, `@org/ team`, `@ org / team` → `@org/team`. Runs **before** stage 2 — those are one owner nobody has looked up, not two that are missing. |
+| 2 | Remove dead owners | no | Drops users and teams that definitively do not exist (A-1 only; never A-2/A-3). |
+| 3 | Remove stale rules | `--remove-stale-paths` | Deletes rules matching nothing in the committed tree and nothing on disk. Off by default per R-11. A rule missing only by **case** is spared and reported. |
 
-**Stage 1 runs before stage 2, always.** `@` and `org/team` are not two owners that do not
-exist; they are one owner nobody has looked up yet, and verifying first would delete it.
+**Refusals are deliberate.** A merge run may only start at a token that is not already a
+valid owner, and once the accumulator is a valid owner it may absorb only a bare `/`. So
+`@org /team` is not repaired: it is shaped exactly like `@alice /docs`, two rules on one
+line, and guessing wrong hands one rule's owner the other rule's files. Byte conservation
+over the owner region and a byte-identical pattern are checked on every repair.
 
-The repair is a guess, so its boundaries are exact. Tokens are merged only when the run
-starts with a token beginning `@`, every join sits against an `@` or a `/`, and the
-concatenation is a valid handle. So `@a @b` never becomes `@a@b`, `@a b` never becomes
-`@ab`, and an email owner is never repaired at all — `a@b.com` + `/x` concatenates into a
-*syntactically valid* address nobody wrote, which is precisely the trap. A repair is
-accepted only if the result re-parses as a rule whose pattern is byte-identical: a repair
-that changed which files a line governs would not be a repair. Lines that can't be
-repaired within those rules are reported as `unrepairable-line` and left exactly as
-written — never rewritten, never deleted.
+**Fail-closed applies to the whole run.** One inconclusive lookup and nothing is written,
+including the offline stages. Removing a **team** additionally requires an org-owner
+token: a secret team returns the same 404 as a deleted one, and only an owner sees secret
+teams. Email owners are `unverifiable`, never dead (R-13), and never make a run
+inconclusive.
 
-**Fail-closed applies to the whole run, not per owner.** One inconclusive lookup and
-nothing is written at all, including the offline stages. A rate-limited run leaves the
-file byte-identical, and re-running once the lookup works produces the complete fix as one
-reviewable diff instead of a dribble of partial ones. `--lint` therefore requires both a
-token and `--github-repo`; without them it is exit 5, not a silent whitespace-only tidy.
-Email owners are `unverifiable`, never dead (R-13), and never make a run inconclusive.
+**Repository guards**, both exit 2: `--branch` must be the ref the clone has checked out
+(lifted by `--dry-run`), and `--repo` must be the repository root (not lifted). Both exist
+because lint proves against a tree and writes a file, and those are only the same document
+when the two agree.
 
-Removing a dead owner that would empty a rule's owner set needs an explicit
-[`--on-empty`](#--on-empty--on_empty-r-6), the same as `remove_owner` does.
-
-**It carries both of `sync`'s repository guards** (exit 2), because it has the same two
-ways to write a file justified by a tree nobody wrote to:
-
-- **`--branch` must be what the clone has checked out.** Lint proves against `--branch`'s
-  tree and rewrites the working-tree file. Point it elsewhere and a directory present on
-  HEAD but absent on that ref makes its rule look stale — `--remove-stale-paths` then
-  un-owns a directory sitting right there in the checkout, at exit 0. Refs are compared by
-  resolved commit, not name, so `--branch main` on a clone standing on main is fine.
-  `--dry-run` lifts the guard: nothing is written, so nothing lands in the wrong tree.
-- **`--repo` must be the repository root.** git walks up to the enclosing repository and
-  reports tracked paths relative to its ROOT, so pointed one level down, discovery finds
-  the root's `.github/CODEOWNERS` in the tree and the join addresses a *different* file of
-  the same name in the subdirectory. This guard holds even under `--dry-run`: a preview
-  computed from the wrong document is not a preview.
-
-Nothing here bypasses the invariants. The after-bytes are re-parsed and re-resolved over
-every tracked file and compared against an independently computed desired state — the
-ownership the *repaired* file would have, minus the owners proven not to exist — and the
-result is then written by `apply`, with the hash pin, the size cap, the pre-write syntax
-validation, the atomic rename and the rollback. Two further claims the tree comparison
-cannot make are checked against the file itself: no dead owner may appear anywhere, and no
-owner may be invented.
-
-Exit codes follow one rule: **0 when the file needs nothing further from a person, 4 when
-it does.** Fixes computed but not written (`--dry-run`), lines lint refused to guess at,
-and case-only misses it spared are all "needs a person", which makes `lint --dry-run` a CI
-gate. Note that a *successful write* can also exit 4 when something is left over, so gate
-CI on the `--dry-run` run, not on the writing one. The JSON record carries `needs_human`
-and `exit_code` from the same function that produces the process status, so the gate is
-`jq -e .needs_human` rather than an expression that has to know the action-kind strings.
-
-| Code | When |
+| Exit | When |
 |---|---|
-| 0 | Nothing to fix, or the fixes were written and nothing is left over |
-| 2 | Refused — `--on-empty=error`, the size cap, or a CODEOWNERS resolving outside the repo |
-| 3 | Invalid input — `--checks` with `--lint`, a lint-only flag without `--lint`, or a removal that empties an owner set with no `--on-empty` |
-| 4 | The file still needs a human — pending fixes under `--dry-run`, or an unrepairable line |
-| 5 | Inconclusive — a lookup could not be answered, or no token/`--github-repo`. Nothing written |
+| 0 | Nothing to repair, or written with nothing left over |
+| 2 | Refused — `--on-empty=error`, size cap, or either repository guard |
+| 3 | Invalid input — missing `--on-empty`, a rejected flag, an empty tree under `--remove-stale-paths`, or hash drift between read and write |
+| 4 | Still needs a person — pending fixes under `--dry-run`, an unrepairable line, or a case-only typo |
+| 5 | Inconclusive, or no token/`--github-repo`. Nothing written |
 | 6 | Post-write validation failed; rolled back |
 
-`--remove-stale-paths`, `--on-empty` and `--dry-run` are rejected (exit 3) without
-`--lint`, rather than ignored: `audit --remove-stale-paths` quietly reporting instead of
-deleting is the kind of mistake that only surfaces months later. `--cache-dir` is rejected
-*with* `--lint`: a cached "this owner does not exist" is served without revalidation, and
-under `--lint` that answer deletes an owner rather than printing a finding — a stale entry
-(the default TTL is 24h) or a tampered-with one would strip ownership with no network call
-at all. Lookups are still cached in memory for the run.
+`lint` never returns 1: a file needing no repair is its success, and "no-op" would make
+every healthy repository in a fleet read as a failure under `set -e`.
 
-**Removing a team needs an org-owner token.** `GET /orgs/{org}/teams/{slug}` returns 404
-both for a team that was deleted and for a *secret* team the caller cannot see, and
-enumerating the org does not separate them — it proves the token can call the endpoint,
-not that it can see what is behind it. Only an org owner sees secret teams, so only an org
-owner's 404 is definitive; for anyone else it is inconclusive, with a message saying so.
-This costs nothing on the common path: the ownership check only happens once a team
-already looks gone.
-
-**Three exits are worth knowing before you script this.** `--lint` never returns 1 (a file
-needing no repair is this mode's success, not a no-op — under `set -e` a fleet run would
-otherwise read every healthy repository as a failure). Hash drift lands in exit 3: lint
-reads the file, then writes it, and a concurrent edit in between is refused rather than
-clobbered. And `--remove-stale-paths` against a ref whose tree is empty is exit 3, not a
-deleted file: every rule matches nothing there, so staleness cannot tell a dead rule from
-a tree the tool cannot see.
+`--format json` emits one object: `codeowners_path`, `applied`, `dry_run`, `needs_human`,
+`exit_code`, `actions[]` (`kind`, `line`, `owner`, `pattern`, `reason`), `unverifiable[]`,
+`changes[]`, `ownership_rows[]`, `diff`, `warnings[]`. `needs_human` and `exit_code` come
+from the same function that sets the process status, so `jq -e .needs_human` is the gate.
+Unlike the `sync` record, `actions`, `changes` and `ownership_rows` are always present
+(possibly empty).
 
 ## Exit codes
 
