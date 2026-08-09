@@ -41,7 +41,7 @@ $ codeowners-tool version
 | See who owns what in this repo, right now | [Find out what you have](#find-out-what-you-have) |
 | Understand `add_owner` vs `set_owners` before touching anything | [Basic concepts](#basic-concepts) |
 | Follow one small end-to-end change | [A basic example](#a-basic-example) |
-| **Lint** a CODEOWNERS file, locally or in CI | [How to: lint](#how-to-lint-a-codeowners-file) |
+| **Lint** a CODEOWNERS file, locally or in CI — and fix it | [How to: lint](#how-to-lint-a-codeowners-file) |
 | **Write** a CODEOWNERS file for a repo that has none | [How to: write a new file](#how-to-write-a-new-codeowners-file) |
 | **Modify** a CODEOWNERS file that already exists | [How to: modify an existing file](#how-to-modify-an-existing-codeowners-file) |
 | Roll one policy out over many repos | [docs/FLEET.md](docs/FLEET.md) |
@@ -187,8 +187,9 @@ unchanged: 0 op(s) applied, 0 skipped; 0 line change(s), 0 path(s) change owners
 
 ## How to: lint a CODEOWNERS file
 
-`audit` is the linter. It is read-only, permanently — where a fix is expressible it prints
-an op string for a human to run, and never applies one itself.
+`audit` is the linter. On its own it is read-only — where a fix is expressible it prints
+an op string for a human to run, and never applies one itself. Adding `--lint` is the one
+mode that writes; that's [below](#fixing-what-it-finds-audit---lint).
 
 ```console
 $ codeowners-tool audit
@@ -234,6 +235,53 @@ thing this tool could do, so it can't. Pin the exit code you gate on accordingly
 The full check table (A-1 … A-12, which ones the API is needed for, which propose fixes)
 is in [docs/REFERENCE.md](docs/REFERENCE.md#audit-checks). Run a subset with
 `--checks a1,a3,a6`.
+
+### Fixing what it finds: `audit --lint`
+
+`--lint` repairs the whole file instead of only describing it. Three things, in this
+order:
+
+1. **Rejoins `@`handles that whitespace has split.** `/x/ @ org/team` looks like a rule
+   with an owner. It isn't — GitHub can't parse the line, skips it entirely, and that team
+   owns nothing. The handle is rejoined *before* anyone asks whether the team exists: `@`
+   and `org/team` aren't two owners that don't exist, they're one owner nobody has looked
+   up yet.
+2. **Removes users and teams that don't exist.** A deleted or renamed team is a review
+   request that silently goes nowhere.
+3. **Removes rules that match no files** — only with `--remove-stale-paths`. Off by
+   default, because a dead pattern is often deliberate, waiting on a directory that's
+   coming, and deleting it destroys that intent. It takes you saying so.
+
+```console
+$ codeowners-tool audit --lint --github-repo org/repo --dry-run
+lint: 2 fix(es) pending in .github/CODEOWNERS (--dry-run; nothing written)
+  [repair-owner-spacing] (line 3) "/x/ @ org/api" → "/x/ @org/api"
+  [remove-dead-owner] (line 5) @org/gone removed from "/y/": team @org/gone does not exist
+  owners change: x/main.go  (unowned) → {@org/api}
+$ echo $?
+4
+```
+
+Drop `--dry-run` to write it. **Exit 4 means the file still needs a human** — fixes
+pending under `--dry-run`, or a line lint refused to guess at — which makes
+`--lint --dry-run` a CI gate that fails on rot rather than merely narrating it.
+
+Three things to know:
+
+- **It needs a token and `--github-repo`.** Whether an owner still exists isn't decidable
+  offline, and that's the point of the mode. Without them it exits 5 and writes nothing.
+- **It fails closed for the entire run.** If *any* owner lookup is inconclusive — rate
+  limit, expired token, an org your token can't see — nothing is written, not even the
+  offline whitespace fixes. Partial knowledge doesn't earn a partial edit.
+- **It reads the working-tree file**, unlike plain `audit`, because that's the file it's
+  about to rewrite. Ownership still resolves against `--branch`'s tree.
+
+It is not a shortcut around the invariants: the edits are proven against every tracked
+file first, then written through the same `apply` path as everything else — hash pinned,
+validated, renamed atomically, rolled back on failure. If removing a dead owner would
+leave a rule with no owners you have to say what happens, with
+[`--on-empty`](docs/REFERENCE.md#--on-empty--on_empty-r-6). Lines it can't repair without
+guessing are reported and left exactly as written.
 
 There's a second kind of lint that has nothing to do with a repo. If you keep your ops in
 a policy file, `check` validates the file itself:

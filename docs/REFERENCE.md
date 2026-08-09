@@ -33,6 +33,7 @@ apply    --plan plan.json [--repo DIR]
 audit    [--checks a1,a3,a6] [--format json|text] [--github-repo owner/name]
          [--token T | $GITHUB_TOKEN] [--api-url URL] [--cache-dir D] [--cache-ttl DUR]
          [--repo DIR] [--branch REF]
+         [--lint [--remove-stale-paths] [--on-empty error|inherit|unowned] [--dry-run]]
 snapshot [--repo DIR] [--branch REF] [--out snap.json]
 verify   --before before.json --after after.json [--scope PATTERN ...]
 version  print the build this binary was stamped with
@@ -44,10 +45,13 @@ version  print the build this binary was stamped with
 |---|---|---|
 | `sync`, `plan`, `apply` | the working tree (and written back there) | the tree at `--branch` |
 | `audit`, `snapshot` | the tree at `--branch` | the tree at `--branch` |
+| `audit --lint` | the working tree (and written back there) | the tree at `--branch` |
 | `check` | nothing — it reads no repository | n/a |
 
 `audit` and `snapshot` ask what GitHub would do, and GitHub only ever sees committed
-files, so an uncommitted edit will not show up in either.
+files, so an uncommitted edit will not show up in either. `audit --lint` is the exception
+in its own verb, and for the same reason `sync` is: the file it is about to rewrite is the
+one on disk.
 
 ## `sync` and `check`
 
@@ -284,6 +288,66 @@ Lookups are cached in memory per run and optionally on disk (`--cache-dir`, `--c
 `--token` exists but `$GITHUB_TOKEN` is the safer habit: the flag package prints non-empty
 string defaults in its usage text, so the environment variable is read only after parsing,
 where nothing can render it into a log (CWE-532).
+
+### `audit --lint`
+
+The one mode of `audit` that writes. It runs over the entire file — `--checks` is rejected
+with it, because a subset of a whole-file repair is not a smaller lint, it is an ambiguous
+one. Three stages, in this order:
+
+| # | Stage | Opt-in | What it does |
+|---|---|---|---|
+| 1 | Repair owner spacing | no | Rejoins an `@`handle split by whitespace: `@ org/team`, `@org /team`, `@org/ team`, `@ org / team` → `@org/team`. GitHub skips such a line entirely, so the owner on it owns nothing. |
+| 2 | Remove dead owners | no | Drops users and teams that definitively do not exist (A-1 only — never A-2 or A-3, where the right fix may be to grant the access instead). |
+| 3 | Remove stale rules | `--remove-stale-paths` | Deletes rules matching zero tracked files. Off by default per R-11: a dead pattern may be deliberate. |
+
+**Stage 1 runs before stage 2, always.** `@` and `org/team` are not two owners that do not
+exist; they are one owner nobody has looked up yet, and verifying first would delete it.
+
+The repair is a guess, so its boundaries are exact. Tokens are merged only when the run
+starts with a token beginning `@`, every join sits against an `@` or a `/`, and the
+concatenation is a valid handle. So `@a @b` never becomes `@a@b`, `@a b` never becomes
+`@ab`, and an email owner is never repaired at all — `a@b.com` + `/x` concatenates into a
+*syntactically valid* address nobody wrote, which is precisely the trap. A repair is
+accepted only if the result re-parses as a rule whose pattern is byte-identical: a repair
+that changed which files a line governs would not be a repair. Lines that can't be
+repaired within those rules are reported as `unrepairable-line` and left exactly as
+written — never rewritten, never deleted.
+
+**Fail-closed applies to the whole run, not per owner.** One inconclusive lookup and
+nothing is written at all, including the offline stages. A rate-limited run leaves the
+file byte-identical, and re-running once the lookup works produces the complete fix as one
+reviewable diff instead of a dribble of partial ones. `--lint` therefore requires both a
+token and `--github-repo`; without them it is exit 5, not a silent whitespace-only tidy.
+Email owners are `unverifiable`, never dead (R-13), and never make a run inconclusive.
+
+Removing a dead owner that would empty a rule's owner set needs an explicit
+[`--on-empty`](#--on-empty--on_empty-r-6), the same as `remove_owner` does.
+
+Nothing here bypasses the invariants. The after-bytes are re-parsed and re-resolved over
+every tracked file and compared against an independently computed desired state — the
+ownership the *repaired* file would have, minus the owners proven not to exist — and the
+result is then written by `apply`, with the hash pin, the size cap, the pre-write syntax
+validation, the atomic rename and the rollback. Two further claims the tree comparison
+cannot make are checked against the file itself: no dead owner may appear anywhere, and no
+owner may be invented.
+
+Exit codes for `--lint` follow one rule: **0 when the file needs nothing further from a
+human, 4 when it does.** Fixes computed but not written (`--dry-run`) and lines lint
+refused to guess at are both "needs a human", which makes `--lint --dry-run` a CI gate.
+
+| Code | When |
+|---|---|
+| 0 | Nothing to fix, or the fixes were written and nothing is left over |
+| 2 | Refused — `--on-empty=error`, the size cap, or a CODEOWNERS resolving outside the repo |
+| 3 | Invalid input — `--checks` with `--lint`, a lint-only flag without `--lint`, or a removal that empties an owner set with no `--on-empty` |
+| 4 | The file still needs a human — pending fixes under `--dry-run`, or an unrepairable line |
+| 5 | Inconclusive — a lookup could not be answered, or no token/`--github-repo`. Nothing written |
+| 6 | Post-write validation failed; rolled back |
+
+`--remove-stale-paths`, `--on-empty` and `--dry-run` are rejected (exit 3) without
+`--lint`, rather than ignored: `audit --remove-stale-paths` quietly reporting instead of
+deleting is the kind of mistake that only surfaces months later.
 
 ## Exit codes
 

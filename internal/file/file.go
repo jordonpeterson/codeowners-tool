@@ -1,10 +1,11 @@
 // Package file is the lossless CODEOWNERS file model.
 //
 // Parsing preserves every byte: Parse followed by Bytes is always
-// byte-identical (INV-5). Mutation is restricted to the three primitives the
-// writer rules allow: amend a line's owner list, insert a new line, and —
-// solely for R-6's `inherit` policy — delete a line. Nothing here reorders
-// lines.
+// byte-identical (INV-5). Mutation is restricted to the four primitives the
+// writer rules allow: amend a line's owner list, insert a new line, delete a
+// line (solely for R-6's `inherit` policy), and replace an INVALID line with
+// its repaired text (solely for lint's owner-spacing fix, which is the one
+// edit no rule-level primitive can express). Nothing here reorders lines.
 //
 // Invalid lines are retained, reported, and skipped during resolution,
 // matching GitHub's current per-line-skip semantics.
@@ -142,20 +143,7 @@ func parseLine(raw, eol string, lineNo int) *Line {
 
 	leadingWS := raw[:len(raw)-len(trimmed)]
 
-	// Pattern token: up to first unescaped whitespace.
-	patEnd := 0
-	escaped := false
-	for patEnd < len(trimmed) {
-		c := trimmed[patEnd]
-		if escaped {
-			escaped = false
-		} else if c == '\\' {
-			escaped = true
-		} else if c == ' ' || c == '\t' {
-			break
-		}
-		patEnd++
-	}
+	patEnd := patternTokenEnd(trimmed)
 	patText := trimmed[:patEnd]
 	rest := trimmed[patEnd:]
 
@@ -167,10 +155,7 @@ func parseLine(raw, eol string, lineNo int) *Line {
 	}
 
 	// Separator whitespace after the pattern.
-	sepEnd := 0
-	for sepEnd < len(rest) && (rest[sepEnd] == ' ' || rest[sepEnd] == '\t') {
-		sepEnd++
-	}
+	sepEnd := leadingWSLen(rest)
 	sep, rest := rest[:sepEnd], rest[sepEnd:]
 
 	// Owner tokens until end of line or an inline comment token.
@@ -196,10 +181,7 @@ func parseLine(raw, eol string, lineNo int) *Line {
 		owners = append(owners, tok)
 		// Consume whitespace; if a comment follows, keep that whitespace in
 		// the suffix so amended lines preserve it.
-		wsEnd := 0
-		for wsEnd < len(rest) && (rest[wsEnd] == ' ' || rest[wsEnd] == '\t') {
-			wsEnd++
-		}
+		wsEnd := leadingWSLen(rest)
 		if wsEnd < len(rest) && rest[wsEnd] == '#' {
 			suffix = rest
 			break
@@ -216,6 +198,59 @@ func parseLine(raw, eol string, lineNo int) *Line {
 		suffix:      suffix,
 	}
 	return ln
+}
+
+// patternTokenEnd returns the length of the pattern token at the head of s.
+//
+// The scan is escape-aware because a pattern may legally contain an ESCAPED
+// space (`a\ b` — a path with a space in it), so the token does not simply end
+// at the first byte of whitespace.
+func patternTokenEnd(s string) int {
+	end, escaped := 0, false
+	for end < len(s) {
+		c := s[end]
+		if escaped {
+			escaped = false
+		} else if c == '\\' {
+			escaped = true
+		} else if c == ' ' || c == '\t' {
+			break
+		}
+		end++
+	}
+	return end
+}
+
+// leadingWSLen returns the length of the run of spaces and tabs at the head of s.
+func leadingWSLen(s string) int {
+	n := 0
+	for n < len(s) && (s[n] == ' ' || s[n] == '\t') {
+		n++
+	}
+	return n
+}
+
+// SplitOwnerRegion splits a raw line into its head — leading whitespace, the
+// pattern token, and the whitespace separating pattern from owners — and the
+// owner region that follows. ok is false for blank and comment lines, which
+// have no pattern token at all.
+//
+// Exported because an INVALID line has no Rule to interrogate: it never got
+// past parseLine's owner loop, so PatternText, prefix and Owners do not exist
+// for it. Repairing such a line (lint's owner-spacing fix) needs exactly the
+// split parseLine performs, and reimplementing the escape-aware pattern scan
+// elsewhere would let the two drift on the one input that matters — a pattern
+// ending in an escaped space.
+func SplitOwnerRegion(raw string) (head, owners string, ok bool) {
+	trimmed := strings.TrimLeft(raw, " \t")
+	if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+		return "", "", false
+	}
+	lead := raw[:len(raw)-len(trimmed)]
+	patEnd := patternTokenEnd(trimmed)
+	rest := trimmed[patEnd:]
+	sepEnd := leadingWSLen(rest)
+	return lead + trimmed[:patEnd] + rest[:sepEnd], rest[sepEnd:], true
 }
 
 // Bytes serializes the file. Untouched lines are emitted byte-identically.
@@ -346,6 +381,25 @@ func (f *File) InsertRule(i int, patternText string, owners []string) *Rule {
 	copy(f.Lines[i+1:], f.Lines[i:])
 	f.Lines[i] = ln
 	return r
+}
+
+// ReplaceLine replaces line i with raw, re-parsed, and returns the new line.
+//
+// It is the only primitive that can reach an INVALID line. Such a line has no
+// Rule, so SetOwners cannot touch it, and DeleteLine would throw away a rule
+// somebody wrote and believes is in force — neither is a repair. Its sole
+// caller is lint's owner-spacing fix, which hands back the same line with
+// whitespace removed from inside an @handle.
+//
+// The replacement text is emitted VERBATIM (the line is left clean, not
+// dirty): raw is already the exact bytes intended, and re-rendering it from
+// the parsed rule would collapse whatever column alignment the file uses.
+// The original EOL is preserved, so a repair never changes the file's line
+// endings.
+func (f *File) ReplaceLine(i int, raw string) *Line {
+	ln := parseLine(raw, f.Lines[i].EOL, i+1)
+	f.Lines[i] = ln
+	return ln
 }
 
 // DeleteLine removes line i. Exists solely for R-6's `inherit` policy.

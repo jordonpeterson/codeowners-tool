@@ -162,9 +162,16 @@ func usage(w io.Writer) {
   audit    [--checks a1,a3,a6] [--format json|text] [--github-repo owner/name]
            [--token T | $GITHUB_TOKEN] [--api-url URL] [--cache-dir D] [--cache-ttl DUR]
            [--repo DIR] [--branch REF]
+           [--lint [--remove-stale-paths] [--on-empty error|inherit|unowned] [--dry-run]]
   snapshot [--repo DIR] [--branch REF] [--out snap.json]
   verify   --before before.json --after after.json [--scope PATTERN ...]
   version  print the build this binary was stamped with
+
+audit reports and never writes. --lint is the one mode that fixes: it rejoins
+@handles that whitespace has split, then removes owners that do not exist, over
+the whole file. It reads the WORKING-TREE file (that is what it rewrites) and
+needs --token and --github-repo. Exit 4 means the file still needs a human —
+pending fixes under --dry-run, or a line lint would not guess at.
 
 Exit codes: 0 ok · 1 no-op · 2 refused (invariant/size) · 3 invalid input
             4 audit findings · 5 inconclusive (fail-closed) · 6 rolled back
@@ -561,14 +568,49 @@ func cmdAudit(args []string, stdout, stderr io.Writer) int {
 	apiURL := fs.String("api-url", "", "API base URL (GHES), default https://api.github.com")
 	cacheDir := fs.String("cache-dir", "", "disk cache directory (R-15); empty = memory only")
 	cacheTTL := fs.Duration("cache-ttl", 24*time.Hour, "disk cache TTL")
+	lintMode := fs.Bool("lint", false, "repair the whole file instead of only reporting: rejoin @handles split by whitespace, then remove owners that do not exist (needs --token and --github-repo)")
+	removeStale := fs.Bool("remove-stale-paths", false, "with --lint, also delete rules whose pattern matches zero tracked files (R-11 keeps this off by default)")
+	onEmpty := fs.String("on-empty", "", "with --lint, R-6 policy when removing a dead owner empties a set: error|inherit|unowned (no default)")
+	dryRun := fs.Bool("dry-run", false, "with --lint, compute and report the fixes but write nothing (exit 4 if any are pending)")
 	if err := fs.Parse(args); err != nil {
 		return flagParseCode(err)
+	}
+	// The three lint-only flags are rejected rather than ignored when --lint is
+	// absent. `audit --remove-stale-paths` silently reporting instead of
+	// deleting is the shape of mistake that only surfaces months later, when
+	// somebody notices the rules they believed were cleaned up are all still
+	// there.
+	if !*lintMode {
+		var only []string
+		if *removeStale {
+			only = append(only, "--remove-stale-paths")
+		}
+		if *onEmpty != "" {
+			only = append(only, "--on-empty")
+		}
+		if *dryRun {
+			only = append(only, "--dry-run")
+		}
+		if len(only) > 0 {
+			fmt.Fprintf(stderr, "error: %s only apply to `audit --lint`; without it audit reports and never writes, so there is nothing for them to govern\n", strings.Join(only, " and "))
+			return ExitInvalid
+		}
 	}
 	// $GITHUB_TOKEN remains the documented fallback; it is just resolved past
 	// the point where anything can render it. An explicit --token still wins.
 	authToken := *token
 	if authToken == "" {
 		authToken = os.Getenv("GITHUB_TOKEN")
+	}
+
+	if *lintMode {
+		return runLint(lintRun{
+			repo: *repo, branch: *branch, filePath: *filePath,
+			githubRepo: *githubRepo, token: authToken,
+			apiURL: *apiURL, cacheDir: *cacheDir, cacheTTL: *cacheTTL,
+			format: *format, checks: *checksFlag,
+			removeStale: *removeStale, onEmpty: *onEmpty, dryRun: *dryRun,
+		}, stdout, stderr)
 	}
 
 	tree, coPath, all, err := locate(*repo, *branch, *filePath)
