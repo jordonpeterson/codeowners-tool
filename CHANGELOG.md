@@ -51,6 +51,18 @@ changes to which class a failure lands in are called out explicitly.
 
 ### Changed
 
+- **The README is a front door, not the manual.** It now carries the mental model
+  (`add_owner` co-owns, `set_owners` displaces), one worked example, and three
+  task guides — lint a file, write a new one, modify an existing one — plus a
+  router table and a `snapshot`/`audit`/`check` section for finding out what a
+  repo already has. Install keeps only `brew`; every other route, and the
+  provenance verification that goes with the direct download, moved to
+  `docs/INSTALL.md`. The command, flag, policy-field, JSON, exit-code, audit and
+  GitHub-semantics tables moved to `docs/REFERENCE.md`, and the fleet script to
+  `docs/FLEET.md`. The supply-chain test that pinned `gh attestation verify` to
+  the README now pins it to `docs/INSTALL.md`, and a second test pins the
+  README's link to it, so the path from "I want to install this" to "verify what
+  you downloaded" is still enforced rather than merely intended.
 - `--out`, `--summary-out` and `plan --out` are documented in their flag help as
   trusted operator paths: overwritten, and not contained to `--repo`. Unlike
   `--file` and the discovered CODEOWNERS path, no repository can influence them.

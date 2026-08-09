@@ -13,6 +13,7 @@ import (
 const (
 	installScript = "../../install.sh"
 	readmePath    = "../../README.md"
+	installDoc    = "../../docs/INSTALL.md"
 )
 
 func readRepoFile(t *testing.T, path string) string {
@@ -54,10 +55,23 @@ func TestSupplyChain_InstallScriptHandlesAMachineWithoutGH(t *testing.T) {
 }
 
 // The direct-download path bypasses install.sh, so a reader told only about
-// checksums.txt gets the weaker check as though it were the whole story.
-func TestSupplyChain_ReadmeDocumentsVerifyingTheDirectDownload(t *testing.T) {
-	body := readRepoFile(t, readmePath)
+// checksums.txt gets the weaker check as though it were the whole story. The
+// install routes now live in docs/INSTALL.md, so the assertion follows them
+// there — the guarantee is about the page that offers the direct download, not
+// about which filename it happens to be in.
+func TestSupplyChain_InstallDocDocumentsVerifyingTheDirectDownload(t *testing.T) {
+	body := readRepoFile(t, installDoc)
 	if !strings.Contains(body, "gh attestation verify") {
-		t.Errorf("README.md documents the direct-download path but never mentions `gh attestation verify`, so the reader who skips install.sh is sent to the check that proves integrity in transit while the one that proves origin goes unmentioned.")
+		t.Errorf("docs/INSTALL.md documents the direct-download path but never mentions `gh attestation verify`, so the reader who skips install.sh is sent to the check that proves integrity in transit while the one that proves origin goes unmentioned.")
+	}
+}
+
+// A reader who never leaves the README is a reader who never reaches the
+// attestation check above. The README carries only the one-line brew install, so
+// the link out to the other routes is the whole path to it.
+func TestSupplyChain_ReadmeLinksToTheInstallDoc(t *testing.T) {
+	body := readRepoFile(t, readmePath)
+	if !strings.Contains(body, "docs/INSTALL.md") {
+		t.Errorf("README.md documents one install route and does not link to docs/INSTALL.md, so nothing points the reader at the direct-download and provenance-verification instructions that used to live in the README itself.")
 	}
 }

@@ -228,7 +228,7 @@ a bare line deletion.
 > The synthetic fleet.
 >
 > Every test in this file runs ONE policy across a set of deliberately
-> heterogeneous repositories, exactly as the README's fleet script does. The
+> heterogeneous repositories, exactly as docs/FLEET.md's script does. The
 > repos are the shapes a real 100-repo rollout meets on day one: repos that
 > converge, repos that are already correct, repos missing the directory an op
 > names, repos with no CODEOWNERS at all, repos whose file shape makes the
@@ -240,8 +240,8 @@ a bare line deletion.
 > Schema pins for the sync record (R-24).
 >
 > A SyncRecord is not a log line, it is the fleet's data plane. `sync
-> --format json` appends one object per repo to results.jsonl and the README's
-> fleet script aggregates the run with
+> --format json` appends one object per repo to results.jsonl and the fleet
+> script in docs/FLEET.md aggregates the run with
 > `jq -s 'group_by(.status)|map({status:.[0].status, n:length})'`, plus the
 > documented habit of projecting `.ops_skipped`. Those key names are the whole
 > interface between this tool and a user's shell; nothing in Go's type system
@@ -409,6 +409,13 @@ where last-match-wins hands every future workflow file back to `@org/eng` —
 100 PRs that do nothing. The rule must be appended at EOF, and it must
 actually govern its scope when a matching file finally appears.
 
+### `TestFleet_DocumentedScriptContract`
+
+SPEC R-19/R-22/R-24: the facts the copy-paste fleet script in docs/FLEET.md
+depends on, pinned one by one. Every assertion here corresponds to a line of
+that script; if this test fails, someone who pasted the script gets a halted
+rollout, a silent no-op, or an empty PR body.
+
 ### `TestFleet_DryRunChangesNothingButStillEmits`
 
 SPEC R-19/R-24: --dry-run is the fleet preview — the only granularity at
@@ -426,7 +433,7 @@ written at .github/CODEOWNERS, which is the path the README promises.
 
 SPEC R-24: `skipped` is a status of its own. A policy with a typo'd path
 prefix matches nothing in any repo; if those runs reported `unchanged`, the
-jq recipe in the README would show a wall of "already correct" and the
+jq recipe in docs/FLEET.md would show a wall of "already correct" and the
 operator would read a no-op rollout as a success.
 
 ### `TestFleet_OnePolicyAcrossHeterogeneousRepos`
@@ -436,14 +443,7 @@ repositories. This is the whole product claim in a single test — that a
 standardized policy can be pushed at a heterogeneous fleet, that each repo
 gets the outcome its own shape earns, and that the aggregate is readable
 afterwards. If any single repo's failure can change another repo's outcome,
-the fleet script in the README is a lie.
-
-### `TestFleet_ReadmeScriptContract`
-
-SPEC R-19/R-22/R-24: the facts the README's copy-paste fleet script depends
-on, pinned one by one. Every assertion here corresponds to a line of that
-script; if this test fails, someone who pasted the script gets a halted
-rollout, a silent no-op, or an empty PR body.
+the fleet script in docs/FLEET.md is a lie.
 
 ### `TestFleet_RecordRepoIsTheArgumentVerbatim`
 
@@ -451,7 +451,7 @@ SPEC R-24: the record's `.repo` is the `--repo` argument BYTE-FOR-BYTE —
 never absolutized, never symlink-resolved.
 
 Six tests in this file join records back to repos through fleetByRepo, which
-keys on exactly that field; so does the README's fleet script, which pairs
+keys on exactly that field; so does docs/FLEET.md's script, which pairs
 `needs-human` entries with the paths it passed in. Deriving `.repo` from the
 repository instead of from the argument breaks every one of them, and it
 breaks them on developer laptops only: on macOS `t.TempDir()` hands out
@@ -522,9 +522,9 @@ When the write itself failed, sync.go set status/error and cleared `created`
 but left ops, ops_applied, paths_changed and the changes array exactly as the
 planner produced them. The row then said a repo whose CODEOWNERS is
 byte-for-byte unchanged had applied N ops and changed M paths, so the
-README's `jq '[.[].ops_applied] | add'` overcounted the rollout by precisely
-the repos where nothing was written — the operator reads a total that
-includes the failures and believes more of the fleet moved than did.
+fleet report's `jq '[.[].ops_applied] | add'` overcounted the rollout by
+precisely the repos where nothing was written — the operator reads a total
+that includes the failures and believes more of the fleet moved than did.
 
 ### `TestHardening_RepoMustBeTheRepositoryRoot`
 
@@ -736,7 +736,7 @@ does.
 
 SPEC R-24 (JSONL shape): several records marshalled one per line each parse
 individually, and no single record contains a raw newline. This is what
-makes the README's `>> results.jsonl` plus `jq -s` work at all: the shell
+makes the documented `>> results.jsonl` plus `jq -s` work at all: the shell
 appends whole lines and jq slurps them line by line, so one embedded newline
 inside one record splits it into two unparseable fragments and takes the
 whole fleet report down with it — after the run, when the repos are already
@@ -767,10 +767,11 @@ Note the DELIBERATE difference between the two documents: plan.Plan renders
 this exact same []plan.OpResult under `op_results`, because Plan.Ops already
 owns `ops` there as the list of raw op strings (R-16) and must keep it. The
 sync record has no such collision, so it uses the shorter, documented name —
-`ops` is what the README's JSON output section shows and what fleet scripts
-select. This is not an inconsistency to be tidied up: renaming either one to
-match the other breaks a published contract. The test pins both names at
-once so a well-meant "fix" fails here instead of in a user's pipeline.
+`ops` is what the JSON output section of docs/REFERENCE.md shows and what
+fleet scripts select. This is not an inconsistency to be tidied up: renaming
+either one to match the other breaks a published contract. The test pins
+both names at once so a well-meant "fix" fails here instead of in a user's
+pipeline.
 
 ### `TestR24_RoundTripPreservesEveryField`
 
@@ -785,11 +786,11 @@ carry and does not.
 
 SPEC R-24 (always-present keys): `status` and the three counts are emitted
 even at their zero values, on every record, unconditionally. This is the
-single most load-bearing property of the whole document. The README's fleet
-aggregation is `jq -s 'group_by(.status)'`; on a record missing `.status`
-that expression does not error, it groups the repo under null — a silent
-fleet-wide misreport, which is exactly the failure this schema exists to
-prevent. Same for the counts: `ops_skipped,omitempty` would hide 0 and make
+single most load-bearing property of the whole document. The documented
+fleet aggregation is `jq -s 'group_by(.status)'`; on a record missing
+`.status` that expression does not error, it groups the repo under null — a
+silent fleet-wide misreport, which is exactly the failure this schema exists
+to prevent. Same for the counts: `ops_skipped,omitempty` would hide 0 and make
 the documented "project .ops_skipped too" habit read null on precisely the
 repos that were fine.
 
@@ -805,7 +806,7 @@ the exported constants and to the complete set of Status* constants declared
 in the package source. The source scan is the point: referencing the five
 constants catches a value being CHANGED, but only enumerating the
 declarations catches a sixth being ADDED. A new status shipped without a
-README update means fleet operators have a bucket in their `group_by`
+docs update means fleet operators have a bucket in their `group_by`
 output that no documentation explains, and every `case` statement written
 against the documented five silently falls through.
 
@@ -970,11 +971,11 @@ stdout.
 The alternative — `--out` emitting whatever `--format` names — quietly
 destroys the artifact the flag exists for. `sync --out records/$repo.json`
 with the default text format would leave a directory of human prose, and the
-`jq -s` aggregation the README builds over it fails on the first file with a
-parse error, after the whole rollout has already run and the CODEOWNERS
-writes are done. Making it depend on a flag nobody passed is worse than
-making it wrong: it works for the operator who happened to type `--format
-json` and fails for the one who did not.
+`jq -s` aggregation docs/FLEET.md builds over it fails on the first file
+with a parse error, after the whole rollout has already run and the
+CODEOWNERS writes are done. Making it depend on a flag nobody passed is
+worse than making it wrong: it works for the operator who happened to type
+`--format json` and fails for the one who did not.
 
 The converse guarantee matters as much: `--out` must not go on to SUPPRESS
 stdout. Someone piping `sync --format json ... | tee` while also archiving

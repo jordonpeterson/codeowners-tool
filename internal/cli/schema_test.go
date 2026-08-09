@@ -20,8 +20,8 @@ import (
 // Schema pins for the sync record (R-24).
 //
 // A SyncRecord is not a log line, it is the fleet's data plane. `sync
-// --format json` appends one object per repo to results.jsonl and the README's
-// fleet script aggregates the run with
+// --format json` appends one object per repo to results.jsonl and the fleet
+// script in docs/FLEET.md aggregates the run with
 // `jq -s 'group_by(.status)|map({status:.[0].status, n:length})'`, plus the
 // documented habit of projecting `.ops_skipped`. Those key names are the whole
 // interface between this tool and a user's shell; nothing in Go's type system
@@ -286,11 +286,11 @@ func TestR24_OmitEmptyKeysDisappear(t *testing.T) {
 
 // SPEC R-24 (always-present keys): `status` and the three counts are emitted
 // even at their zero values, on every record, unconditionally. This is the
-// single most load-bearing property of the whole document. The README's fleet
-// aggregation is `jq -s 'group_by(.status)'`; on a record missing `.status`
-// that expression does not error, it groups the repo under null — a silent
-// fleet-wide misreport, which is exactly the failure this schema exists to
-// prevent. Same for the counts: `ops_skipped,omitempty` would hide 0 and make
+// single most load-bearing property of the whole document. The documented
+// fleet aggregation is `jq -s 'group_by(.status)'`; on a record missing
+// `.status` that expression does not error, it groups the repo under null — a
+// silent fleet-wide misreport, which is exactly the failure this schema exists
+// to prevent. Same for the counts: `ops_skipped,omitempty` would hide 0 and make
 // the documented "project .ops_skipped too" habit read null on precisely the
 // repos that were fine.
 //
@@ -330,10 +330,11 @@ func TestR24_StatusAndCountsAreAlwaysPresent(t *testing.T) {
 // this exact same []plan.OpResult under `op_results`, because Plan.Ops already
 // owns `ops` there as the list of raw op strings (R-16) and must keep it. The
 // sync record has no such collision, so it uses the shorter, documented name —
-// `ops` is what the README's JSON output section shows and what fleet scripts
-// select. This is not an inconsistency to be tidied up: renaming either one to
-// match the other breaks a published contract. The test pins both names at
-// once so a well-meant "fix" fails here instead of in a user's pipeline.
+// `ops` is what the JSON output section of docs/REFERENCE.md shows and what
+// fleet scripts select. This is not an inconsistency to be tidied up: renaming
+// either one to match the other breaks a published contract. The test pins
+// both names at once so a well-meant "fix" fails here instead of in a user's
+// pipeline.
 func TestR24_PerOpResultsRenderUnderOps(t *testing.T) {
 	b, err := json.Marshal(schemaFullRecord())
 	if err != nil {
@@ -387,7 +388,7 @@ func TestR24_PerOpResultsRenderUnderOps(t *testing.T) {
 // in the package source. The source scan is the point: referencing the five
 // constants catches a value being CHANGED, but only enumerating the
 // declarations catches a sixth being ADDED. A new status shipped without a
-// README update means fleet operators have a bucket in their `group_by`
+// docs update means fleet operators have a bucket in their `group_by`
 // output that no documentation explains, and every `case` statement written
 // against the documented five silently falls through.
 func TestR24_StatusValuesAreExactlyFive(t *testing.T) {
@@ -457,7 +458,7 @@ func TestR24_RoundTripPreservesEveryField(t *testing.T) {
 
 // SPEC R-24 (JSONL shape): several records marshalled one per line each parse
 // individually, and no single record contains a raw newline. This is what
-// makes the README's `>> results.jsonl` plus `jq -s` work at all: the shell
+// makes the documented `>> results.jsonl` plus `jq -s` work at all: the shell
 // appends whole lines and jq slurps them line by line, so one embedded newline
 // inside one record splits it into two unparseable fragments and takes the
 // whole fleet report down with it — after the run, when the repos are already

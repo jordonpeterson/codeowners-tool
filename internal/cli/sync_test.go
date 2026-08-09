@@ -550,11 +550,11 @@ func TestSync_FormatJSONSeparatesDataFromLogs(t *testing.T) {
 // The alternative — `--out` emitting whatever `--format` names — quietly
 // destroys the artifact the flag exists for. `sync --out records/$repo.json`
 // with the default text format would leave a directory of human prose, and the
-// `jq -s` aggregation the README builds over it fails on the first file with a
-// parse error, after the whole rollout has already run and the CODEOWNERS
-// writes are done. Making it depend on a flag nobody passed is worse than
-// making it wrong: it works for the operator who happened to type `--format
-// json` and fails for the one who did not.
+// `jq -s` aggregation docs/FLEET.md builds over it fails on the first file
+// with a parse error, after the whole rollout has already run and the
+// CODEOWNERS writes are done. Making it depend on a flag nobody passed is
+// worse than making it wrong: it works for the operator who happened to type
+// `--format json` and fails for the one who did not.
 //
 // The converse guarantee matters as much: `--out` must not go on to SUPPRESS
 // stdout. Someone piping `sync --format json ... | tee` while also archiving
