@@ -855,10 +855,7 @@ func synthRename(f *file.File, op ops.Op, desired map[string][]string, pl *Plan)
 		}
 		old := f.LineText(i)
 		oldOwners := ln.Rule.OwnersCopy()
-		newOwners := minus(ln.Rule.Owners, op.Owner)
-		if !contains(newOwners, op.NewOwner) {
-			newOwners = append(newOwners, op.NewOwner)
-		}
+		newOwners := substituteOwner(ln.Rule.Owners, op.Owner, op.NewOwner)
 		f.SetOwners(i, newOwners)
 		pl.Changes = append(pl.Changes, Change{
 			Action: "amend", Line: i + 1, Pattern: ln.Rule.PatternText,
@@ -867,13 +864,12 @@ func synthRename(f *file.File, op ops.Op, desired map[string][]string, pl *Plan)
 			Reason: fmt.Sprintf("global rename %s → %s: pure identifier substitution cannot change any rule's match set (§4.1)", op.Owner, op.NewOwner),
 		})
 	}
+	// The desired state substitutes the same way, or the gate would compare the
+	// file's in-place order against an appended-at-the-end expectation and
+	// refuse every rename.
 	for p, own := range desired {
 		if contains(own, op.Owner) {
-			out := minus(own, op.Owner)
-			if !contains(out, op.NewOwner) {
-				out = append(out, op.NewOwner)
-			}
-			desired[p] = out
+			desired[p] = substituteOwner(own, op.Owner, op.NewOwner)
 		}
 	}
 	return nil
@@ -1217,6 +1213,51 @@ func contains(list []string, s string) bool {
 }
 
 func containsStr(list []string, s string) bool { return contains(list, s) }
+
+// substituteOwner replaces old with new IN PLACE, keeping every other owner
+// where it was.
+//
+// The obvious implementation — drop the old identifier, append the new one —
+// gives the same owner SET, and GitHub cares about nothing else. It is still
+// wrong here. `rename_owner` is documented as pure identifier substitution,
+// the one op safe as plain text replacement, and a reorg that renames one team
+// across a fleet then produces `/pipeline/ @org/b @org/renamed` where the file
+// said `@org/renamed-from @org/b`: a diff on every line that lists the renamed
+// team alongside anyone else, in which the reviewer has to work out that the
+// owner list was only permuted. This tool's claim is minimal, provable edits;
+// a permutation nobody asked for is neither.
+//
+// When new is ALREADY on the line, substitution would duplicate it, so the
+// earliest of the two positions is kept and the other dropped — `@a @b` under
+// rename(@a → @b) is `@b`, not `@b @b`, and not `@b` in @b's old slot.
+func substituteOwner(list []string, old, new string) []string {
+	if list == nil {
+		return nil
+	}
+	out := make([]string, 0, len(list))
+	done := false
+	for _, x := range list {
+		switch {
+		case x == old:
+			if done {
+				continue // old listed twice: the second is a duplicate either way
+			}
+			done = true
+			out = append(out, new)
+		case x == new && done:
+			// Already emitted at the renamed owner's position; this later copy
+			// would be a duplicate.
+		case x == new && containsStr(list, old):
+			// new appears BEFORE old on this line: keep it here, and the old
+			// identifier's slot collapses when we reach it.
+			done = true
+			out = append(out, new)
+		default:
+			out = append(out, x)
+		}
+	}
+	return out
+}
 
 func minus(list []string, s string) []string {
 	if list == nil {

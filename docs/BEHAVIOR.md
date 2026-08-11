@@ -235,6 +235,24 @@ a bare line deletion.
 > intent inexpressible. The fleet is the unit under test — no single repo's
 > outcome may change any other repo's outcome.
 
+**`ownership_scenarios_test.go`**
+
+> The three questions a rollout is actually asked.
+>
+> rollout_test.go covers the mechanics around a wave — clone shapes, the
+> commit, the CI gate. This file covers what the wave DOES to a repository,
+> under the three headings an operator gets asked about:
+>
+> 	create   — a repo with no CODEOWNERS gets its first one
+> 	add      — a repo that already has one gains an owner, losing nobody
+> 	restrain — a repo that needs nothing gets nothing
+>
+> The third is the one with teeth. CODEOWNERS is not free: every rule adds
+> required reviewers, blocks merges and pages people, so a rollout that writes
+> where it did not have to is not a tidy default, it is an incident with a
+> hundred repos in it. Several tests below assert the ABSENCE of a file, of a
+> rule, of an owner, or of a JSON key.
+
 **`rollout_test.go`**
 
 > The rollout scenarios.
@@ -976,6 +994,153 @@ not read at all: the rollout reports 100 successes and moves no ownership,
 which is the "applied, dead on arrival" outcome these verbs exist to
 prevent. A rollout cannot audit every clone by hand, so the run that touches
 the file is the one that has to say it.
+
+### `TestScenario_AddOwnerKeepsEveryoneAndReachesDeeperRules`
+
+SPEC INV-1/INV-2 (add): adding an owner to a subtree keeps every existing
+owner, reaches the deeper rules inside the scope, and grants nothing outside
+it — including leaving unowned paths unowned.
+
+The trap this exists for is that appending `/auth/ @org/security` to the end
+of a file *replaces* the owners of /auth/. The second trap is the deeper
+rule: `/auth/tokens/` sits inside the scope, and under last-match-wins an
+edit that touches only `/auth/` leaves the tokens directory without the new
+owner while reporting success.
+
+### `TestScenario_BlastRadiusCeiling`
+
+SPEC R-25 (restraint): an opt-in ceiling on how many paths one run may move,
+so "the tool put my team on 4000 files" is a decision somebody made rather
+than a diff nobody read.
+
+Over the ceiling the run refuses, writes nothing, and reports the count —
+the count IS the content of that refusal, so it is the one field a refused
+record keeps. It is exit 2, per repo: a ceiling trip is a fact about this
+repo's size, and a fleet records it and carries on. The ceiling lives in the
+policy file for a policy run, because "this wave touches dozens of files per
+repo, not thousands" is a claim about the intent that belongs in the artifact
+a reviewer approves — a ceiling in one shell line survives exactly as long as
+that shell line.
+
+### `TestScenario_CodeownersPathMeansThereIsSomethingToStage`
+
+SPEC R-24 (codeowners_path): the key is present exactly when this run
+changed the file — or, under --dry-run, would have. It is absent on every
+other outcome.
+
+The field is a staging instruction, and the documented fleet loop runs
+`git add "$(jq -r '.codeowners_path // empty' …)"`. Emitting it whenever a
+file was merely CHOSEN broke that on the two commonest fleet outcomes: an
+already-correct repo named a file with no diff, `git commit` then failed
+with "nothing to commit", and a `set -euo pipefail` rollout died at whichever
+repo happened to be converged — a failure with nothing to do with that repo.
+
+### `TestScenario_CreateSkipsWhatTheRepoDoesNotHave`
+
+SPEC R-21/R-24 (create, partial applicability): one policy over repos that
+have only some of the directories it names writes rules only for what is
+there, and says which ops reached nothing.
+
+This is what stops a fleet from needing a policy per repo shape. The repo
+below has no /docs/ and no /services/api/; the file it gets must contain no
+rule for either, and the record must say `skipped` with a reason, because a
+count alone cannot tell "this repo has no Terraform" from "the policy's
+prefix is misspelled and reached nothing anywhere".
+
+### `TestScenario_CreateWritesExactlyWhatThePolicyJustifies`
+
+SPEC R-23/R-24 (create): the first CODEOWNERS a repo ever gets contains
+exactly the rules the policy justifies, in a deterministic order, and
+nothing else.
+
+A hundred near-identical PRs are only reviewable if the artifact is
+identical for identical input — so the ordering is asserted as a guarantee
+here rather than left as an accident of iteration order, and the file is
+pinned to rule lines only: no header, no provenance comment, no timestamp.
+A generated header cannot be written once and left alone forever (the next
+wave uses a different policy, the next release a different version), and a
+tool that rewrites comments in a file it otherwise never reformats has given
+up the property the rest of this suite exists to defend.
+
+### `TestScenario_CreateWritesNothingWhenThereIsNothingToSay`
+
+SPEC R-23/R-24 (restraint): `--create` is permission to create, not an
+instruction to. A repo the policy has nothing to say about ends up with no
+CODEOWNERS, no `.github/` directory, and no `codeowners_path` in its record.
+
+The failure this prevents is invisible in a fleet summary: a hundred empty
+or near-empty files all reporting exit 0. An empty CODEOWNERS is worse than
+none, because the obvious question afterwards — "which repos still need
+ownership?" — is answered by "which repos have no CODEOWNERS file", and an
+empty one answers *yes, done* forever. The record must therefore be
+indistinguishable, to the commit step, from a repo that was never touched.
+
+### `TestScenario_FleetCommitGuardSkipsAConvergedRepo`
+
+SPEC R-24: the documented fleet commit guard skips a converged repo.
+
+This is the published recipe, run against the outcome it meets most often.
+It reproduced a live bug: the guard passed, `git add` staged an unmodified
+file, and `git commit` exited nonzero with "nothing to commit" — which under
+the `set -euo pipefail` script in docs/FLEET.md ends the rollout.
+
+### `TestScenario_HandCuratedFileChangesExactlyOneLine`
+
+SPEC INV-5 (add): a hand-curated file changes by exactly one line.
+
+Column alignment, tabs, section comments, an inline comment carrying a
+warning, and a deliberate ordering are all things a maintainer chose. A tool
+that re-flows any of them turns a one-line review into a whole-file review,
+a hundred times over.
+
+### `TestScenario_OrderDependentBatchIsRejectedEverywhere`
+
+SPEC R-8/R-20 (restraint): a batch whose order changes the outcome is
+rejected from the op strings alone — the same verdict, exit 3, on every
+repository, whatever its tree looks like.
+
+`set_owners(*, [@org/everyone])` displaces and `add_owner(/services/api/,
+@org/api-team)` co-owns; run in either order they give services/api
+different owners, so the batch has no defined meaning. Deciding that against
+a tree made it a per-repo refusal: `check` passed the policy, every repo
+exited 2, and a hundred entries landed in `needs-human` for a defect that was
+in the policy the whole time. Whether a given repo happens to HAVE a
+services/api/ is not the question — a policy whose meaning depends on which
+files a repo contains is what exit 3 is for.
+
+### `TestScenario_OwnerInTheFileIsNotOwnershipOfTheScope`
+
+SPEC INV-1 (add): an owner already named elsewhere in the file still has to
+be added to the rule that governs the scope.
+
+"They're already listed" is the eyeball check that leaves /auth/ unprotected:
+@org/security owns README.md via the catch-all and owns nothing under /auth/,
+because the narrower rule wins outright. The run must report `applied`, touch
+exactly the one rule that is wrong, and leave the rule that is already
+correct byte-identical.
+
+### `TestScenario_RenameSubstitutesInPlace`
+
+SPEC R-24 (rename): a rename substitutes the identifier IN PLACE, leaving
+every other owner where it was, and collapses rather than duplicates when the
+new name is already on the line.
+
+`rename_owner` is documented as pure identifier substitution — the one op
+safe to read as a text diff. Removing the old name and appending the new one
+preserves the owner SET and GitHub cares about nothing else, but it permutes
+every line that lists the renamed team alongside anyone else, and a reviewer
+of a hundred reorg PRs then has to work out that a reordering means nothing.
+
+### `TestScenario_UnclaimedPathsStayUnownedAndTheTwoKindsDiffer`
+
+SPEC INV-2 (add, restraint): a wave that claims two directories leaves every
+other path unowned, and the two ways of having no owner stay distinct.
+
+`null` in a snapshot means no rule matched — a gap nobody has addressed.
+`[]` means a rule matched and deliberately un-owns the path (S-9), which is
+a decision someone made and defended in review. Collapsing them would hide
+the difference between "we chose to leave vendored code unowned" and "nobody
+has looked at this yet", which is the distinction a coverage report is for.
 
 ### `TestSync_AlreadyCorrectIsZeroNotNoOp`
 
@@ -2829,4 +2994,4 @@ DIFFERENT states; transitioning between them is a real ownership change.
 
 ---
 
-321 documented test cases across 12 packages.
+333 documented test cases across 12 packages.

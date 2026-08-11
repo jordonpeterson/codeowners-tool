@@ -269,6 +269,11 @@ under `set -e` a good policy always lets the script continue.
 For a repo with no CODEOWNERS at all, `--create` writes one at `.github/CODEOWNERS`.
 It never overwrites an existing file, and it's off by default.
 
+It is permission to create a file, not an instruction to: a run with nothing to write —
+every op skipped, or none of the named directories present — creates no file and no
+`.github/` directory, and reports `skipped` at exit 0. Nothing here synthesizes ownership
+to make a repo look covered.
+
 The smallest version is one op:
 
 ```console

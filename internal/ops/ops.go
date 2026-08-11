@@ -5,6 +5,7 @@ package ops
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/jordonpeterson/codeowners-tool/internal/file"
@@ -205,4 +206,148 @@ func splitArgs(s string) []string {
 		args = args[:len(args)-1]
 	}
 	return args
+}
+
+// StaticConflict reports a pair of ops whose order changes the outcome for
+// every repository that has a file in the narrower one's scope — decided from
+// the op strings alone, with no tree.
+//
+// plan.Build already refuses order-dependent batches (R-8), but it learns the
+// overlap from the repository: it needs a concrete path that both scopes
+// match. That makes the verdict repo-shaped, so `sync` reports it as exit 2 —
+// this repo needs a human — and a fleet run files all 100 repos under
+// `needs-human` one at a time while `check`, which never opens a repo, passes
+// the policy as valid. The defect is in the policy and the operator finds out
+// a hundred times.
+//
+// The subset decidable here is the one the README already warns about:
+//
+//	set_owners(*, [@org/everyone])        # displaces
+//	add_owner(/services/api/, @org/api)   # co-owns
+//
+// Run in either order these give different owners to services/api, so the
+// batch has no defined meaning. Whether a particular repo HAS a
+// services/api/ is not the question — a policy whose meaning depends on which
+// files a repo happens to contain is exactly what exit 3 is for, and the fix
+// (run the displacing op alone, then the narrower ones) is the same edit for
+// every repo in the fleet.
+//
+// Soundness over completeness, deliberately. It reports only pairs where
+// pattern.Contains PROVES one scope covers the other, because exit 3 halts a
+// rollout and a false positive there is the expensive direction. Everything it
+// cannot prove is left to plan.Build's tree-based R-8, which still refuses per
+// repo at exit 2.
+func StaticConflict(list []Op) error {
+	for i := 0; i < len(list); i++ {
+		for j := i + 1; j < len(list); j++ {
+			a, b := list[i], list[j]
+			if !staticallyOverlapping(a, b) || commuteOnEveryOwnerSet(a, b) {
+				continue
+			}
+			displacing, other := a, b
+			if b.Kind == SetOwners && a.Kind != SetOwners {
+				displacing, other = b, a
+			}
+			return fmt.Errorf("ops %q and %q do not commute, and %q provably governs every path %q does — so the batch is order-dependent on every repository that has one (R-8); run %q on its own first and the narrower op(s) in a second run, which is two exit-0 invocations",
+				a.Raw, b.Raw, displacing.Scope, other.Scope, displacing.Raw)
+		}
+	}
+	return nil
+}
+
+// staticallyOverlapping reports whether one op's scope provably covers the
+// other's. A rename has no pattern scope at all — it derives its scope from
+// current ownership — so it is never decidable here and is left to the tree.
+func staticallyOverlapping(a, b Op) bool {
+	if a.Kind == RenameOwner || b.Kind == RenameOwner {
+		return false
+	}
+	return pattern.Contains(a.Scope, b.Scope) || pattern.Contains(b.Scope, a.Scope)
+}
+
+// commuteOnEveryOwnerSet reports whether two ops produce the same owners in
+// either order, for every owner set they could meet.
+//
+// The owner sets that matter are generated from the identifiers the two ops
+// name: an op's transform only ever tests membership of its own owners, so a
+// set built from those names plus one unrelated bystander covers every
+// distinction either op can make. The bystander is what catches
+// set_owners displacing an owner the other op never mentions.
+func commuteOnEveryOwnerSet(a, b Op) bool {
+	names := map[string]bool{"@bystander": true}
+	for _, o := range []Op{a, b} {
+		for _, n := range append([]string{o.Owner, o.NewOwner}, o.Owners...) {
+			if n != "" {
+				names[n] = true
+			}
+		}
+	}
+	var universe []string
+	for n := range names {
+		universe = append(universe, n)
+	}
+	sort.Strings(universe) // subset enumeration below must not depend on map order
+	for mask := 0; mask < 1<<len(universe); mask++ {
+		var owners []string
+		for k, n := range universe {
+			if mask&(1<<k) != 0 {
+				owners = append(owners, n)
+			}
+		}
+		if !sameOwnerSet(applyTo(b, applyTo(a, owners)), applyTo(a, applyTo(b, owners))) {
+			return false
+		}
+	}
+	return true
+}
+
+// applyTo is the owner-set transform of one op, used only for the commutation
+// question above.
+func applyTo(op Op, owners []string) []string {
+	switch op.Kind {
+	case AddOwner:
+		if containsOwner(owners, op.Owner) {
+			return owners
+		}
+		return append(append([]string{}, owners...), op.Owner)
+	case SetOwners:
+		return append([]string{}, op.Owners...)
+	case RemoveOwner:
+		out := make([]string, 0, len(owners))
+		for _, o := range owners {
+			if o != op.Owner {
+				out = append(out, o)
+			}
+		}
+		return out
+	}
+	return owners
+}
+
+func sameOwnerSet(x, y []string) bool {
+	if len(x) != len(y) {
+		return false
+	}
+	seen := map[string]int{}
+	for _, o := range x {
+		seen[o]++
+	}
+	for _, o := range y {
+		seen[o]--
+	}
+	for _, n := range seen {
+		if n != 0 {
+			return false
+		}
+	}
+	return true
+}
+
+func containsOwner(list []string, s string) bool {
+	for _, x := range list {
+		if x == s {
+			return true
+		}
+	}
+	return false
 }

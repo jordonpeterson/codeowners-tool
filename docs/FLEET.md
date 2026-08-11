@@ -151,6 +151,7 @@ repos it is all three. Every record names the file that run actually wrote, unde
 ```bash
 file=$(jq -r '.codeowners_path // empty' "records/${repo//\//__}.json")
 [ -n "$file" ] || continue                     # nothing was written; nothing to commit
+[ -f "work/$repo/$file" ] || { echo "$repo" >> bug; continue; }   # belt and braces
 
 git -C "work/$repo" checkout -b codeowners-baseline
 git -C "work/$repo" add "$file"                # exactly the one file, never -A
@@ -163,9 +164,15 @@ gh pr create --repo "$repo" --title 'chore: org baseline ownership' \
 That needs `--out "records/${repo//\//__}.json"` on the `sync` line (and a `mkdir -p
 records` beside the others), or pipe the same field out of `results.jsonl`. Staging the
 named file rather than `git add -A` is what keeps a stray build artifact — or the summary,
-if you wrote it inside the clone — out of a hundred PRs. The field is **absent** when no
-file was chosen, which is why the `// empty` guard is there: a repo that refused has
-nothing to stage, and `jq -r` would otherwise hand you the string `null` as a path.
+if you wrote it inside the clone — out of a hundred PRs.
+
+The `// empty` guard is the load-bearing line. `codeowners_path` is emitted **only when
+the run changed the file** (or, under `--dry-run`, would have), so it is absent for the
+two outcomes most of your fleet will produce on a second wave — the repo that was already
+correct, and the repo the policy had nothing to say about. Without the guard those repos
+reach `git add` with nothing staged, `git commit` exits nonzero with "nothing to commit",
+and `set -euo pipefail` ends the rollout at a repo that was perfectly fine. `jq -r` would
+also hand you the string `null` as a path.
 
 The PR body from `--summary-out` names the same file, so a reviewer looking at one of a
 hundred near-identical PRs can see where that repo keeps its ownership before the diff
@@ -208,10 +215,47 @@ file says so in `warnings`:
 - **Lines GitHub cannot parse.** It skips them individually and honors the rest (S-3), so
   the change is correct and those lines are left exactly as they were — but some paths in
   that repo are owned by nobody, and the reason is a line this run just read.
+- **A comment naming an owner you just renamed.** `rename_owner` substitutes owner tokens
+  and never edits prose, so `# @org/acq owns the pipeline` survives a rename of
+  `@org/acq` and now points at a team that no longer exists. Nothing else finds these —
+  `audit` does not read comments, and the handle is gone, so no lookup will trip on it.
 
 ```sh
 jq -r 'select(.warnings) | "\(.repo)\t\(.warnings|join("; "))"' results.jsonl
 ```
+
+They also land in the PR body under **Worth a look**, which is where they get fixed: the
+PR is the one moment somebody is already reading that file.
+
+## Owning less than you could
+
+A rollout's failure mode is not only "it didn't apply" — it is "it applied to more than
+anyone meant". Three things keep a wave narrow:
+
+**`--create` is permission, not instruction.** A repo where every op skips gets no file,
+no `.github/` directory, `"status": "skipped"`, and no `codeowners_path`. Nothing to
+commit, nothing to review, and the repo still answers "no CODEOWNERS yet" to whoever asks
+next. An empty file would answer *done* forever.
+
+**Unclaimed paths stay unclaimed.** Ownership covers exactly the scopes your ops name;
+nothing synthesizes a `*` catch-all to make coverage look complete. Afterwards
+`audit --checks a9 --fail-on never` lists what nobody owns, which is a report, not a
+failure. In a snapshot, `null` means no rule matched and `[]` means a rule matched and
+deliberately owns nobody (S-9) — the difference between a gap and a decision.
+
+**A ceiling on the blast radius.** `max_paths_changed` in the policy (or
+`--max-paths-changed N` with `--op`) refuses any repo where the wave would move more
+ownership than you expected:
+
+```json
+{ "version": 1, "max_paths_changed": 500, "ops": ["add_owner(/services/api/, @org/api-team)"] }
+```
+
+Exit 2, nothing written, and the record keeps `paths_changed` so you can see what it
+would have been. Use an absolute number and set it from the intent: a narrow wave should
+change dozens of files whether the repo has 500 files or 50,000, so a repo where it wants
+4,000 is telling you something. A `*` baseline is the wave that genuinely scales with repo
+size — give that one no ceiling, deliberately.
 
 ## What's left at the end
 

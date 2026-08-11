@@ -25,7 +25,7 @@
 ```
 sync     (--op 'OP' ... | --policy FILE) [--on-empty error|inherit|unowned]
          [--repo DIR] [--branch REF] [--file PATH] [--create] [--dry-run]
-         [--format text|json] [--out FILE] [--summary-out FILE]
+         [--max-paths-changed N] [--format text|json] [--out FILE] [--summary-out FILE]
 check    (--op 'OP' ... | --policy FILE) [--format text|json]
 plan     --op 'OP' ... [--on-empty error|inherit|unowned]
          [--repo DIR] [--branch REF] [--file PATH] [--out plan.json]
@@ -67,7 +67,8 @@ else (bad enum values, ops that can't carry the `on_zero_match` you gave them, a
 | `--branch` | Ref whose tracked tree governs resolution (S-7). Default `HEAD`. |
 | `--file` | CODEOWNERS path override, repo-relative. |
 | `--on-empty` | Policy when `remove_owner` empties an owner set. Allowed only with `--op`; with `--policy`, set `on_empty` in the file instead. |
-| `--create` | Write CODEOWNERS if the repo has none. Off by default; never overwrites an existing file. |
+| `--create` | Permission to write a CODEOWNERS if the repo has none — not an instruction to. Off by default, never overwrites, and a run with nothing to write creates nothing (no file, no `.github/`). With `--file`, the file is created at that path instead of `.github/CODEOWNERS`. |
+| `--max-paths-changed` | R-25 ceiling: refuse (exit 2) if the run would change the owners of more than N paths. Off by default. Allowed only with `--op`; with `--policy`, set `max_paths_changed` in the file. |
 | `--dry-run` | Makes no change to CODEOWNERS. `--out` and `--summary-out` still emit. |
 | `--format` | `text` (default) or `json`. Under `json`, stdout is data and stderr is logs. |
 | `--out` | Write the JSON record here instead of stdout. |
@@ -89,6 +90,7 @@ rules the tool follows.
 | `ops` | top | yes | Op strings, or objects. A bare string is shorthand for `{"op": "..."}` with everything else defaulted. |
 | `name`, `description` | top | no | Surfaced in `--summary-out`, so PR reviewers know why. |
 | `on_empty` | top | if any `remove_owner` | `error` \| `inherit` \| `unowned` |
+| `max_paths_changed` | top | no | R-25 ceiling, as a whole number of paths. Zero is legal and asserts the wave changes no ownership at all. |
 | `op` | per op | yes | Op string, same syntax as `--op`. |
 | `id` | per op | no | Short label used in JSON results and error messages. |
 | `on_zero_match` | per op | no | `require` (default) \| `skip` \| `declare` |
@@ -112,6 +114,22 @@ overlap on "services/api/main.go" and do not commute (R-8: refusing order-depend
 `add_owner` ops commute with each other, so any number of them can share a run. A
 `set_owners` on a broad scope generally cannot share a run with anything narrower — split
 it into two invocations.
+
+The conflict is caught in **two places, with two different exit codes**, and the split
+matters to a fleet:
+
+- **Provable from the op strings alone** — one op is a `set_owners` whose scope provably
+  covers another op's — is exit **3**, from `check` (with no repository at all) and from
+  `sync` (before it opens one), identically on every repo whatever its tree contains. A
+  policy whose meaning depends on which files a repo happens to have is exactly what exit
+  3 is for, and the remedy is in the error: run the displacing op alone first.
+- **Only visible against a real tree** — two scopes that neither provably contains, which
+  happen to meet on a path this repo has — stays exit **2**, per repo, so the fleet loop
+  records it and steps to the next clone.
+
+The static half is sound rather than complete: it reports only what `pattern.Contains`
+proves, because exit 3 halts a rollout and a false positive there is the expensive
+direction.
 
 ## JSON output
 
@@ -140,16 +158,34 @@ when the result was checked against real files, `structural` when it wasn't — 
 
 `codeowners_path` is the file this run wrote — one of the three locations in S-8, and
 which one differs per repo — so a fleet loop can stage exactly it instead of `git add -A`.
-It is **absent** when no file was chosen at all (an unreadable repository, or a missing
-CODEOWNERS without `--create`), so its presence means there is something to commit. Under
-`--create` and `--dry-run` it is the path that *would* be written. See
+
+It is present **exactly when `status` is `applied`**: when this run changed the file, or
+under `--dry-run` would have. It is absent on `unchanged`, `skipped`, `refused` and
+`error`, because none of those wrote a byte and staging a path they named would either
+commit nothing (failing the `git commit` that follows, and with it a `set -e` rollout) or
+name a file that does not exist. Presence means there is something to commit, and nothing
+else. A refusal instead names its file in the `error` string, which is what a triage pile
+needs — a refusal in a repo whose ownership lives in `docs/` is a different conversation
+from one in `.github/`. See
 [FLEET.md](FLEET.md#committing-the-change-and-opening-the-pr).
 
 `warnings` carries what a human should look at in a repo that nonetheless converged: a
 second CODEOWNERS file GitHub ignores (A-10), a run writing a file that is not the one
-GitHub reads, and lines GitHub cannot parse and silently skips (S-3). None of these is a
-reason to refuse a correct edit, and none of them is visible at fleet scale unless the run
-that touched the file reports it.
+GitHub reads, lines GitHub cannot parse and silently skips (S-3), and a comment still
+naming an owner a `rename_owner` renamed away. None of these is a reason to refuse a
+correct edit, and none of them is visible at fleet scale unless the run that touched the
+file reports it. They are also rendered into `--summary-out`, under **Worth a look** —
+the PR is the one moment somebody is already looking at that file and can fix it in the
+same commit.
+
+`created` reports what the run did, or under `--dry-run` what it *would* do, so a preview
+of a greenfield fleet reports `"created": true` while writing nothing — not even the
+parent directory.
+
+A refusal carries no `ops_applied`, no `changes` and no `codeowners_path`, because no byte
+moved. **R-25's ceiling is the one deliberate exception**: it keeps `paths_changed`,
+carrying the count it refused over, because a record that refuses on a number and then
+omits the number is useless.
 
 Each entry in `changes` carries the reason the edit took the shape it did, which is the
 part a reviewer wants:
@@ -193,6 +229,12 @@ A plan records `sha256_before`, `size_before`/`size_after`, `changes`, `ownershi
 `diff`, `after_content` and `op_results`. `sha256_before` is the drift gate (R-16):
 `apply` hashes the file it is about to write and refuses if it no longer matches, so a
 plan reviewed against one state cannot be applied to another.
+
+A snapshot distinguishes the **two ways a path can have no owner**, and the difference is
+the point: `null` means no rule matched it — a gap nobody has addressed — while `[]` means
+a rule matched and deliberately un-owns it (S-9), which is a decision someone made and
+defended in review. Collapsing them would hide "we chose to leave vendored code unowned"
+inside "nobody has looked at this yet".
 
 `snapshot` and `verify` are the after-the-fact version of the same question — prove in CI
 that a merged change moved nothing outside its declared scope:
@@ -248,6 +290,52 @@ narrowing pattern is derivable — amending would violate INV-2, appending would
 
 Ops that took this path report `"proven": "structural"` in the JSON and are called out in
 `--summary-out`, so a reviewer can find them without reading the diff.
+
+## Creating a file (R-23), and not creating one
+
+`--create` is permission, not instruction. A run whose ops all skip, or that has nothing
+to write, creates **no file and no `.github/` directory**, reports `"status": "skipped"`
+with `"created": false`, emits no `codeowners_path`, and exits 0. An empty CODEOWNERS
+would be worse than none: "which repos still need ownership?" is answered by "which repos
+have no CODEOWNERS", and an empty file answers *done* forever.
+
+What a created file contains is exactly one rule line per op that applied — no header, no
+provenance comment, no timestamp. The provenance belongs in the PR body (`--summary-out`
+names the policy) and in the commit message, both of which are bound to the change that
+made them and cannot go stale. A header naming the policy would be a confident lie the
+moment wave 2 ran, and a tool that rewrites comments in a file it otherwise never
+reformats has given up the guarantee everything else here rests on. A header you write by
+hand is preserved byte-for-byte forever, including across re-runs.
+
+Identical inputs produce an identical file: three fresh repos given one policy produce one
+byte sequence. A hundred near-identical PRs are only reviewable if that holds.
+
+## The blast-radius ceiling (R-25)
+
+`--max-paths-changed N`, or `max_paths_changed` in a policy, refuses a run that would
+change the owners of more than N paths:
+
+```console
+$ codeowners-tool sync --op 'add_owner(*, @org/platform)' --max-paths-changed 200
+error: refusing: this run would change the owners of 4127 path(s), over the 200-path
+ceiling set by --max-paths-changed (R-25) — nothing was written; re-run with `plan --out`
+to see which paths, raise the ceiling if the number is right, or narrow the ops if it is not
+$ echo $?
+2
+```
+
+Off by default, because a default ceiling would break every legitimate `set_owners(*, …)`
+baseline on upgrade and teach operators to pass an enormous number reflexively. Exit 2,
+not 3: how many paths a repo has is the most repo-specific fact there is, so a fleet
+records it and carries on. `--dry-run` gives the same verdict, and `--out`/`--summary-out`
+still emit — you decide whether to raise the ceiling by reading what it would have done.
+
+The flag is allowed only with `--op`, and the field only in a policy, exactly like
+`--on-empty`/`on_empty`. The ceiling is a claim about the intent ("this wave touches
+dozens of files per repo, not thousands"), so for a policy run it belongs in the artifact
+a reviewer approves; a ceiling in one shell line survives exactly as long as that shell
+line. There is no precedence rule to learn because there is no overlap: passing the flag
+with `--policy` is exit 3.
 
 ## `--on-empty` / `on_empty` (R-6)
 
@@ -331,6 +419,9 @@ the policy, or about this repo?*
 | 1 no-op | **0** | "Already correct" is the common fleet outcome; special-casing it defeats the point |
 | 2 refused | **2** | This repo's file has an awkward shape |
 | 3 zero-match scope | **2** | Whether a path exists is the most repo-specific fact there is |
+| 3 non-commuting batch, provable from the patterns | **3** | Same verdict on every repo, reached before one is opened |
+| 3 non-commuting batch, only visible in this tree | **2** | Which paths exist is this repo's fact |
+| 2 over the R-25 ceiling | **2** | How big this repo is, is this repo's fact |
 | 3 malformed op, bad policy | **3** | Will fail identically on all 100 |
 | 6 rolled back | **2** | A rolled-back write is about that one repo, not your policy |
 
