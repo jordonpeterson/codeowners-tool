@@ -5,7 +5,6 @@ package ops
 
 import (
 	"fmt"
-	"sort"
 	"strings"
 
 	"github.com/jordonpeterson/codeowners-tool/internal/file"
@@ -241,102 +240,143 @@ func StaticConflict(list []Op) error {
 	for i := 0; i < len(list); i++ {
 		for j := i + 1; j < len(list); j++ {
 			a, b := list[i], list[j]
-			if !staticallyOverlapping(a, b) || commuteOnEveryOwnerSet(a, b) {
+			if conditionalScope(a) || conditionalScope(b) {
+				// This pair's order-dependence is a fact about the TREE, so it
+				// belongs to exit 2 and to plan.Build, not here. See
+				// conditionalScope.
 				continue
 			}
-			displacing, other := a, b
-			if b.Kind == SetOwners && a.Kind != SetOwners {
-				displacing, other = b, a
+			aCoversB, bCoversA := scopeCoverage(a, b)
+			if !aCoversB && !bCoversA {
+				continue
+			}
+			if commutes(a, b) {
+				continue
+			}
+			// Which op to run first comes from the CONTAINMENT, never from the
+			// kinds: `add_owner(/services/api/, @x)` batched with
+			// `remove_owner(*, @x)` has no set_owners in it at all, and naming
+			// the op that happens to be listed first told the operator to run
+			// the narrow one before the broad one — the order that silently
+			// strips @x again, in an exit-3 message whose whole purpose is to
+			// be acted on.
+			outer, inner := a, b
+			if bCoversA && !aCoversB {
+				outer, inner = b, a
+			}
+			if aCoversB && bCoversA {
+				return fmt.Errorf("ops %q and %q do not commute, and their scopes %q and %q govern exactly the same paths — so the batch is order-dependent on every repository (R-8); state one intent per scope, or run them as separate invocations",
+					a.Raw, b.Raw, a.Scope, b.Scope)
 			}
 			return fmt.Errorf("ops %q and %q do not commute, and %q provably governs every path %q does — so the batch is order-dependent on every repository that has one (R-8); run %q on its own first and the narrower op(s) in a second run, which is two exit-0 invocations",
-				a.Raw, b.Raw, displacing.Scope, other.Scope, displacing.Raw)
+				a.Raw, b.Raw, outer.Scope, inner.Scope, outer.Raw)
 		}
 	}
 	return nil
 }
 
-// staticallyOverlapping reports whether one op's scope provably covers the
-// other's. A rename has no pattern scope at all — it derives its scope from
-// current ownership — so it is never decidable here and is left to the tree.
-func staticallyOverlapping(a, b Op) bool {
-	if a.Kind == RenameOwner || b.Kind == RenameOwner {
-		return false
-	}
-	return pattern.Contains(a.Scope, b.Scope) || pattern.Contains(b.Scope, a.Scope)
-}
-
-// commuteOnEveryOwnerSet reports whether two ops produce the same owners in
-// either order, for every owner set they could meet.
+// conditionalScope reports whether an op's on_zero_match makes its effect
+// depend on the repository — which is what decides the exit code this whole
+// function feeds.
 //
-// The owner sets that matter are generated from the identifiers the two ops
-// name: an op's transform only ever tests membership of its own owners, so a
-// set built from those names plus one unrelated bystander covers every
-// distinction either op can make. The bystander is what catches
-// set_owners displacing an owner the other op never mentions.
-func commuteOnEveryOwnerSet(a, b Op) bool {
-	names := map[string]bool{"@bystander": true}
-	for _, o := range []Op{a, b} {
-		for _, n := range append([]string{o.Owner, o.NewOwner}, o.Owners...) {
-			if n != "" {
-				names[n] = true
-			}
-		}
-	}
-	var universe []string
-	for n := range names {
-		universe = append(universe, n)
-	}
-	sort.Strings(universe) // subset enumeration below must not depend on map order
-	for mask := 0; mask < 1<<len(universe); mask++ {
-		var owners []string
-		for k, n := range universe {
-			if mask&(1<<k) != 0 {
-				owners = append(owners, n)
-			}
-		}
-		if !sameOwnerSet(applyTo(b, applyTo(a, owners)), applyTo(a, applyTo(b, owners))) {
-			return false
-		}
-	}
-	return true
+// The static verdict is exit 3, and CONTRIBUTING is explicit that exit 3 is
+// reachable only from facts independent of which repo you are standing in. A
+// pair of `require` ops earns that: in a repo that HAS the narrower scope the
+// batch is order-dependent and refuses, and in a repo that does not, the
+// narrower op matches zero files and refuses under R-5 — so the policy cannot
+// converge anywhere, whatever the tree looks like, and saying so once at repo 0
+// is strictly better than saying it a hundred times.
+//
+// `skip` and `declare` break that argument, and the first cut refused them
+// anyway. `skip` says "if this repo has Terraform" — the documented fleet
+// shape — so the batch is order-dependent exactly in the repos that have the
+// scope and is a clean no-op in the rest; refusing statically turned 100 × exit
+// 0 into a halted rollout. A `declare` rule is appended at EOF where
+// last-match-wins settles the outcome, so there is no order ambiguity to refuse
+// at all. Both are left to plan.Build, which decides them against the tree and
+// reports exit 2 per repo.
+func conditionalScope(op Op) bool {
+	return op.OnZeroMatch == ZeroMatchSkip || op.OnZeroMatch == ZeroMatchDeclare
 }
 
-// applyTo is the owner-set transform of one op, used only for the commutation
-// question above.
-func applyTo(op Op, owners []string) []string {
-	switch op.Kind {
-	case AddOwner:
-		if containsOwner(owners, op.Owner) {
-			return owners
-		}
-		return append(append([]string{}, owners...), op.Owner)
+// scopeCoverage reports, for each direction, whether one op's scope provably
+// covers the other's. A rename has no pattern scope at all — it derives its
+// scope from current ownership — so it is never decidable here and is left to
+// the tree.
+func scopeCoverage(a, b Op) (aCoversB, bCoversA bool) {
+	if a.Kind == RenameOwner || b.Kind == RenameOwner {
+		return false, false
+	}
+	return pattern.Contains(a.Scope, b.Scope), pattern.Contains(b.Scope, a.Scope)
+}
+
+// commutes reports whether two ops produce the same owners in either order, on
+// every owner set they could ever meet.
+//
+// This is the closed-form version of that question. The first implementation
+// enumerated every subset of the owner names the two ops mention, which is
+// exact but costs 2^n: a `set_owners` listing 20 teams — an ordinary baseline —
+// took 7 seconds per pair, a 400-op policy took five minutes, and every one of
+// those seconds was paid again on each of a hundred repos, before any of them
+// was even opened. The rules below are the same answer in O(owners), and they
+// are exhaustive over the three transforms that reach this point (a rename is
+// excluded above):
+//
+//	add(x)    ∘ add(y)     always — both orders give S ∪ {x, y}
+//	add(x)    ∘ remove(y)  iff x ≠ y; otherwise one order keeps x and the other drops it
+//	remove(x) ∘ remove(y)  always
+//	set(L)    ∘ set(M)     iff L and M are the same set; otherwise the last one wins
+//	set(L)    ∘ add(x)     iff x ∈ L — set-then-add yields L ∪ {x}, add-then-set yields L
+//	set(L)    ∘ remove(x)  iff x ∉ L — set-then-remove yields L \ {x}, remove-then-set yields L
+func commutes(a, b Op) bool {
+	// Order the pair so each case is written once.
+	if b.Kind == SetOwners && a.Kind != SetOwners {
+		a, b = b, a
+	}
+	switch a.Kind {
 	case SetOwners:
-		return append([]string{}, op.Owners...)
-	case RemoveOwner:
-		out := make([]string, 0, len(owners))
-		for _, o := range owners {
-			if o != op.Owner {
-				out = append(out, o)
-			}
+		switch b.Kind {
+		case SetOwners:
+			return sameOwnerSet(a.Owners, b.Owners)
+		case AddOwner:
+			return containsOwner(a.Owners, b.Owner)
+		case RemoveOwner:
+			return !containsOwner(a.Owners, b.Owner)
 		}
-		return out
+	case AddOwner:
+		if b.Kind == RemoveOwner {
+			return a.Owner != b.Owner
+		}
+		return true // add ∘ add
+	case RemoveOwner:
+		if b.Kind == AddOwner {
+			return a.Owner != b.Owner
+		}
+		return true // remove ∘ remove
 	}
-	return owners
+	// An op kind this function does not model must never be waved through as
+	// commuting: the tree-based R-8 is the backstop, and reporting "these
+	// commute" here would skip it.
+	return false
 }
 
+// sameOwnerSet compares two owner lists as SETS: order carries no meaning to
+// GitHub, and two set_owners naming the same teams in different orders are the
+// same intent.
 func sameOwnerSet(x, y []string) bool {
-	if len(x) != len(y) {
+	seen := map[string]bool{}
+	for _, o := range x {
+		seen[o] = true
+	}
+	other := map[string]bool{}
+	for _, o := range y {
+		other[o] = true
+	}
+	if len(seen) != len(other) {
 		return false
 	}
-	seen := map[string]int{}
-	for _, o := range x {
-		seen[o]++
-	}
-	for _, o := range y {
-		seen[o]--
-	}
-	for _, n := range seen {
-		if n != 0 {
+	for o := range seen {
+		if !other[o] {
 			return false
 		}
 	}

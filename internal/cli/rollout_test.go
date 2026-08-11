@@ -2,6 +2,7 @@ package cli_test
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -260,9 +261,11 @@ func TestRollout_WritingAFileGitHubWillNotReadIsWarned(t *testing.T) {
 		if rec.CodeownersPath != ".github/CODEOWNERS" {
 			t.Errorf("wrote %q, want .github/CODEOWNERS (S-8 precedence)", rec.CodeownersPath)
 		}
+		// Every governingWarnings message ends in a path spelled ...CODEOWNERS,
+		// so asserting that substring alone would pass on any warning at all.
 		got := strings.Join(rec.Warnings, "\n")
-		if !strings.Contains(got, "CODEOWNERS") || !strings.Contains(got, "A-10") {
-			t.Errorf("no warning naming the ignored file and A-10; warnings = %#v", rec.Warnings)
+		if !strings.Contains(got, "A-10") || !strings.Contains(got, "2 CODEOWNERS files") {
+			t.Errorf("no warning naming the count of files and A-10; warnings = %#v", rec.Warnings)
 		}
 		if !strings.Contains(errOut, "warning:") {
 			t.Errorf("the warning must also reach stderr, where a `--format text` operator sees it:\n%s", errOut)
@@ -287,6 +290,30 @@ func TestRollout_WritingAFileGitHubWillNotReadIsWarned(t *testing.T) {
 		got := strings.Join(rec.Warnings, "\n")
 		if !strings.Contains(got, ".github/CODEOWNERS") {
 			t.Errorf("the warning must name the file that DOES govern, or the operator cannot act on it; warnings = %#v", rec.Warnings)
+		}
+	})
+
+	t.Run("both conditions at once report both", func(t *testing.T) {
+		// The case that made the switch a bug: a --file pointed at a
+		// non-governing path in a repo that ALSO carries several CODEOWNERS.
+		// Reporting only the first left "there is more than one file here"
+		// invisible in precisely the repo that most needed it said.
+		dir := initRepo(t, map[string]string{
+			".github/CODEOWNERS":   "* @org/eng\n",
+			"CODEOWNERS":           "* @org/somebody-else\n",
+			"docs/CODEOWNERS":      "* @org/third\n",
+			"services/api/main.go": "package api\n",
+		})
+		rec, code, _ := rolloutSync(t, "--repo", dir, "--policy", policy, "--file", "docs/CODEOWNERS")
+		if code != cli.ExitOK {
+			t.Fatalf("exit %d, want 0", code)
+		}
+		got := strings.Join(rec.Warnings, "\n")
+		if !strings.Contains(got, "S-8") {
+			t.Errorf("missing the wrong-file warning; warnings = %#v", rec.Warnings)
+		}
+		if !strings.Contains(got, "A-10") {
+			t.Errorf("missing the multiple-files warning; the two conditions are independent, and a repo can be in both; warnings = %#v", rec.Warnings)
 		}
 	})
 
@@ -343,8 +370,13 @@ func TestRollout_CommitAndPullRequestRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("--summary-out: %v", err)
 	}
-	if !strings.Contains(string(b), rec.CodeownersPath) {
-		t.Errorf("the PR body does not name the file the PR changes (%q):\n%s", rec.CodeownersPath, b)
+	// The exact bullet, not a bare Contains: this fixture keeps its CODEOWNERS
+	// at the repository root, so `Contains(body, "CODEOWNERS")` is satisfied by
+	// the summary's own title line ("# CODEOWNERS sync — …") and the assertion
+	// passes with the `- file:` bullet deleted outright.
+	wantBullet := fmt.Sprintf("- file: `%s`", rec.CodeownersPath)
+	if !strings.Contains(string(b), wantBullet) {
+		t.Errorf("the PR body is missing %q:\n%s", wantBullet, b)
 	}
 	if !strings.Contains(string(b), "org baseline ownership") {
 		t.Errorf("the PR body must name the policy:\n%s", b)
@@ -402,12 +434,17 @@ func TestRollout_AuditGateAfterADeclareBaseline(t *testing.T) {
 	}
 
 	// Gating on errors: the report is identical, the verdict is not.
-	code, gated, _ := runCLI(t, "audit", "--repo", dir, "--fail-on", "error")
+	code, gated, gatedErr := runCLI(t, "audit", "--repo", dir, "--fail-on", "error")
 	if code != cli.ExitOK {
 		t.Fatalf("--fail-on error: exit %d, want 0 — the only finding is a report-only warning\n%s", code, gated)
 	}
 	if !strings.Contains(gated, "A-4") {
 		t.Errorf("--fail-on must move the gate, not suppress the report:\n%s", gated)
+	}
+	// Exiting 0 with findings on screen has to say so, or the next person to
+	// read the log concludes the checks found nothing.
+	if !strings.Contains(gatedErr, "none at or above --fail-on") {
+		t.Errorf("a gated-but-nonempty run must explain itself on stderr, got %q", gatedErr)
 	}
 
 	// An error-severity finding still fails under the same setting. A second
@@ -447,6 +484,17 @@ func TestRollout_AuditGateAfterADeclareBaseline(t *testing.T) {
 	}
 	if !strings.Contains(out, "A-9") {
 		t.Errorf("the info finding must still be reported:\n%s", out)
+	}
+
+	// Exit 5 is a different axis and no --fail-on value may touch it. A check
+	// that could not run is not a finding whose severity you can weigh, and a
+	// gate that turned "the API was unreachable" into a green build is the
+	// fail-open this tool refuses everywhere else. Requesting an API check
+	// without credentials is the reachable inconclusive case.
+	for _, level := range []string{"any", "warning", "error", "never"} {
+		if code, _, _ := runCLI(t, "audit", "--repo", dir, "--checks", "a1", "--token", "", "--fail-on", level); code != cli.ExitInconclusive {
+			t.Errorf("--fail-on %s on an inconclusive run: exit %d, want 5", level, code)
+		}
 	}
 
 	// A misspelled threshold is invalid input, never a silently wide-open

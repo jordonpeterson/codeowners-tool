@@ -71,7 +71,7 @@ else (bad enum values, ops that can't carry the `on_zero_match` you gave them, a
 | `--max-paths-changed` | R-25 ceiling: refuse (exit 2) if the run would change the owners of more than N paths. Off by default. Allowed only with `--op`; with `--policy`, set `max_paths_changed` in the file. |
 | `--dry-run` | Makes no change to CODEOWNERS. `--out` and `--summary-out` still emit. |
 | `--format` | `text` (default) or `json`. Under `json`, stdout is data and stderr is logs. |
-| `--out` | Write the JSON record here instead of stdout. |
+| `--out` | **Also** write the JSON record here — always JSON, whatever `--format` says. Stdout is unaffected, which is what lets a fleet loop append to `results.jsonl` and keep a per-repo record at the same time. (`plan --out` and `snapshot --out` do replace stdout; `sync` does not.) |
 | `--summary-out` | Markdown rendering, for a PR body. |
 
 `--out`, `--summary-out` and `plan --out` are trusted operator paths: they are overwritten
@@ -118,11 +118,17 @@ it into two invocations.
 The conflict is caught in **two places, with two different exit codes**, and the split
 matters to a fleet:
 
-- **Provable from the op strings alone** — one op is a `set_owners` whose scope provably
-  covers another op's — is exit **3**, from `check` (with no repository at all) and from
-  `sync` (before it opens one), identically on every repo whatever its tree contains. A
-  policy whose meaning depends on which files a repo happens to have is exactly what exit
-  3 is for, and the remedy is in the error: run the displacing op alone first.
+- **Provable from the op strings alone**, and only when **both ops must apply** (the
+  default `on_zero_match: require`) — is exit **3**, from `check` (with no repository at
+  all) and from `sync` (before it opens one), identically on every repo whatever its tree
+  contains. Such a policy cannot converge anywhere: a repo that has the narrower scope
+  refuses on the overlap, and a repo that does not refuses on the zero match, so saying so
+  once at repo 0 is strictly better than a hundred times. The remedy is in the error: run
+  the displacing op alone first.
+- **An op carrying `skip` or `declare`** is never decided here. `skip` means "if this repo
+  has it", so the batch is order-dependent only in the repos that do — a fact about the
+  tree, and therefore exit 2, per repo. A `declare`d rule lands at EOF where
+  last-match-wins settles the outcome, so there is no order ambiguity to refuse.
 - **Only visible against a real tree** — two scopes that neither provably contains, which
   happen to meet on a path this repo has — stays exit **2**, per repo, so the fleet loop
   records it and steps to the next clone.
@@ -163,18 +169,29 @@ It is present **exactly when `status` is `applied`**: when this run changed the 
 under `--dry-run` would have. It is absent on `unchanged`, `skipped`, `refused` and
 `error`, because none of those wrote a byte and staging a path they named would either
 commit nothing (failing the `git commit` that follows, and with it a `set -e` rollout) or
-name a file that does not exist. Presence means there is something to commit, and nothing
-else. A refusal instead names its file in the `error` string, which is what a triage pile
-needs — a refusal in a repo whose ownership lives in `docs/` is a different conversation
-from one in `.github/`. See
+name a file that does not exist.
+
+**Absent means this run wrote nothing — not that no file was chosen.** An `unchanged`
+repo has a perfectly good CODEOWNERS; it simply has nothing to stage. And **a `--dry-run`
+record reports `applied` for a run that would have written**, so a preview wave emits the
+field while the file on disk is untouched: check `dry_run` before staging anything, or
+run the commit step only over records from a real wave.
+
+A refusal that got as far as reading the file names it in the `error` string, as
+`(governing file: …)` — a refusal in a repo whose ownership lives in `docs/` is a
+different conversation from one in `.github/`. Refusals reached before a file was ever
+read (a bad `--branch`, no CODEOWNERS and no `--create`) have no file to name, and a
+`--create` run does not name a file it was about to invent. See
 [FLEET.md](FLEET.md#committing-the-change-and-opening-the-pr).
 
-`warnings` carries what a human should look at in a repo that nonetheless converged: a
+`warnings` carries what a human should look at in a repo the tool did not refuse over: a
 second CODEOWNERS file GitHub ignores (A-10), a run writing a file that is not the one
 GitHub reads, lines GitHub cannot parse and silently skips (S-3), and a comment still
 naming an owner a `rename_owner` renamed away. None of these is a reason to refuse a
 correct edit, and none of them is visible at fleet scale unless the run that touched the
-file reports it. They are also rendered into `--summary-out`, under **Worth a look** —
+file reports it. They are independent, so a run can carry several at once, and they ride
+on any record whose file was read — including a `refused` one, where the warning may be
+the more useful half of the row. They are also rendered into `--summary-out`, under **Worth a look** —
 the PR is the one moment somebody is already looking at that file and can fix it in the
 same commit.
 
@@ -182,10 +199,12 @@ same commit.
 of a greenfield fleet reports `"created": true` while writing nothing — not even the
 parent directory.
 
-A refusal carries no `ops_applied`, no `changes` and no `codeowners_path`, because no byte
-moved. **R-25's ceiling is the one deliberate exception**: it keeps `paths_changed`,
-carrying the count it refused over, because a record that refuses on a number and then
-omits the number is useless.
+A refusal reports `ops_applied` as 0 and carries no `changes` and no `codeowners_path`,
+because no byte moved. (`ops_applied` is one of the unconditional keys, so it is emitted
+as `0` rather than omitted.) **R-25's ceiling is the one deliberate exception**: it keeps
+`paths_changed`, carrying the count it refused over, because a record that refuses on a
+number and then omits the number is useless — and unlike other refusals it keeps `ops`,
+with every op reported `unchanged`, so `jq` over `.ops[]` still sees one entry per op.
 
 Each entry in `changes` carries the reason the edit took the shape it did, which is the
 part a reviewer wants:
@@ -329,6 +348,14 @@ baseline on upgrade and teach operators to pass an enormous number reflexively. 
 not 3: how many paths a repo has is the most repo-specific fact there is, so a fleet
 records it and carries on. `--dry-run` gives the same verdict, and `--out`/`--summary-out`
 still emit — you decide whether to raise the ceiling by reading what it would have done.
+The refusal also names the ops behind the number, because the per-op array reports them
+all as `unchanged` (nothing applied) and a blocked op would otherwise be indistinguishable
+from one that was already satisfied.
+
+The ceiling gates `sync`. `plan`/`apply` is the two-step path where a human reads the
+artifact before anything is written, and carries no ceiling of its own — the review *is*
+the gate there. A negative value is rejected rather than read as "no ceiling": omit the
+flag for that.
 
 The flag is allowed only with `--op`, and the field only in a policy, exactly like
 `--on-empty`/`on_empty`. The ceiling is a claim about the intent ("this wave touches
@@ -381,7 +408,7 @@ setting; the flag decides which of them make the run exit 4.
 | `--fail-on` | Exits 4 when a finding is |
 |---|---|
 | `any` *(default)* | any severity — the behavior this flag was added under |
-| `warning` | `warning` or `error`; `info` (A-9 coverage) reports only |
+| `warning` | `warning` or `error`; `info` reports only — A-9 unowned-path coverage, and A-1's `unverifiable` email owners (R-13) |
 | `error` | `error` only — A-1, A-3, A-8, A-10, and A-12 over the cliff |
 | `never` | never; findings are reported and the run exits 0 |
 
@@ -433,7 +460,7 @@ the policy, or about this repo?*
 | 1 | No-op — nothing to change |
 | 2 | Refused — would violate INV-1/INV-2, or exceed the 3 MB cap |
 | 3 | Invalid input — malformed op, zero-match scope, conflicting batch |
-| 4 | Audit findings present |
+| 4 | Audit findings present at or above `--fail-on` (default: any finding) |
 | 5 | Inconclusive — API unavailable, token insufficient, rate limited |
 | 6 | Validation failed post-write; rolled back |
 

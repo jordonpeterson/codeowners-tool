@@ -598,6 +598,31 @@ repos with a mistyped `--out` directory that is 100 real edits reported as
 The record on stdout is the durable trace and goes first, unconditionally; a
 sink that cannot be written is a warning on stderr and nothing more.
 
+### `TestR11_SeverityLadderIsTotal`
+
+SPEC R-11: the severity ladder is total and ordered — every severity the
+audit package emits has a rank, and each `--fail-on` level admits exactly the
+severities at or above it.
+
+The table is pinned rather than spot-checked because the failure mode of a
+missing rank is invisible: `auditSeverityRank` returning the zero value would
+make that severity rank BELOW `info`, so a whole class of findings would
+quietly stop gating any CI job that used the flag.
+
+### `TestR11_UnknownSeverityFailsTheGate`
+
+SPEC R-11: a finding whose severity this build does not recognize trips the
+gate at every `--fail-on` setting except `never`.
+
+This is the one branch in the gate whose failure is silent. Adding a check
+with a new severity — or reading a report produced by a newer build — must
+not hand a CI job a green build for findings it could not grade; the whole
+point of `--fail-on` is that it moves the gate deliberately, and an
+unrecognized severity is not a deliberate decision by anyone. It is tested
+from inside the package because no CLI invocation can produce a severity the
+binary does not define, which is exactly why the branch is easy to break
+without noticing: an end-to-end test cannot reach it at all.
+
 ### `TestR19_AddOwnerTwiceByteIdentical`
 
 SPEC R-19 (INV-4): add_owner run twice is byte-identical. A second append of
@@ -1022,6 +1047,16 @@ repo, not thousands" is a claim about the intent that belongs in the artifact
 a reviewer approves — a ceiling in one shell line survives exactly as long as
 that shell line.
 
+### `TestScenario_CeilingFlagIsValidated`
+
+SPEC R-25: the ceiling flag is validated, not silently ignored.
+
+`-1` is the internal "no ceiling" sentinel, so a guard written as `>= 0`
+accepted `--max-paths-changed -5` as "no ceiling at all" — on a wave the
+operator had just told to cap itself — and let it slip past the `--policy`
+exclusion while the identical value in a policy file was rejected at load
+time. A typo, or a shell arithmetic result, silently removes the guard.
+
 ### `TestScenario_CodeownersPathMeansThereIsSomethingToStage`
 
 SPEC R-24 (codeowners_path): the key is present exactly when this run
@@ -1074,6 +1109,18 @@ none, because the obvious question afterwards — "which repos still need
 ownership?" — is answered by "which repos have no CODEOWNERS file", and an
 empty one answers *yes, done* forever. The record must therefore be
 indistinguishable, to the commit step, from a repo that was never touched.
+
+### `TestScenario_FileOutsideTheThreeLocationsIsWarned`
+
+SPEC R-24 (S-8): a `--file` naming a path GitHub never loads is warned about
+even when the repository has no CODEOWNERS at all.
+
+`--file build/OWNERSFILE --create` on a greenfield repo wrote a file,
+reported `applied` at exit 0, and emitted `codeowners_path` for the fleet
+loop to stage — with no warning, because the check compared against the
+CODEOWNERS files in the tree and there were none. That is the "applied, dead
+on arrival" outcome in its purest form: a hundred PRs, a hundred green rows,
+and no ownership anywhere.
 
 ### `TestScenario_FleetCommitGuardSkipsAConvergedRepo`
 
@@ -1130,6 +1177,35 @@ safe to read as a text diff. Removing the old name and appending the new one
 preserves the owner SET and GitHub cares about nothing else, but it permutes
 every line that lists the renamed team alongside anyone else, and a reviewer
 of a hundred reorg PRs then has to work out that a reordering means nothing.
+
+### `TestScenario_StaleCommentWarningOnlyFollowsARealRename`
+
+SPEC R-24: the stale-comment warning fires only on a run that actually
+renamed something, and never on a run that wrote nothing.
+
+The first cut scanned for the old identifier regardless of whether the
+rename matched anything, so a fleet-wide rename warned about a rename that
+did not happen in every repo whose comments merely mentioned the old team —
+in the record and in the PR body — and kept warning on every later run. It
+also fired on runs that refused, describing line numbers in a file that was
+never written.
+
+### `TestScenario_StaticRejectionRespectsOnZeroMatch`
+
+SPEC R-8/R-20: the static rejection is scoped to ops that must apply. An op
+carrying `on_zero_match: skip` or `declare` is left to the tree, at exit 2.
+
+The first cut of the static check read only the op kinds and scopes, and
+refused `set_owners(*, …)` next to a `skip`-guarded narrower op — the shape
+docs/FLEET.md recommends ("*if* this repo has Terraform"). That turned a
+hundred exit-0 repos into a halted rollout, and it broke the rule the exit
+code rests on: exit 3 is reachable only from facts independent of which repo
+you are standing in. With `skip` the batch is order-dependent exactly in the
+repos that have the scope, which is the exit-2 class.
+
+Two `require` ops still earn exit 3, and the argument is that the policy
+cannot converge ANYWHERE: a repo with the narrower scope refuses on the
+overlap, and a repo without it refuses on the zero match (R-5).
 
 ### `TestScenario_UnclaimedPathsStayUnownedAndTheTwoKindsDiffer`
 
@@ -2994,4 +3070,4 @@ DIFFERENT states; transitioning between them is a real ownership change.
 
 ---
 
-333 documented test cases across 12 packages.
+339 documented test cases across 12 packages.

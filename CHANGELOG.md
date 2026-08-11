@@ -95,12 +95,15 @@ changes to which class a failure lands in are called out explicitly.
   reorg is only reviewable if that is true. When the new name is already on the line the
   result collapses to one owner at the earliest position, which is a real change of
   review requirements and shows up as such in `changes`.
-- **A non-commuting batch provable from the op strings alone is now exit 3 everywhere.**
-  `set_owners(*, [@a])` next to `add_owner(/services/api/, @b)` was decided against the
-  tree, so `check` passed the policy and every repo refused at exit 2 — a hundred entries
-  in `needs-human` for a defect that was in the policy the whole time. Both `check` and
-  `sync` now reject the provable subset before opening a repository, with the remedy in
-  the message. Overlaps only a real tree reveals are unchanged: exit 2, per repo.
+- **A non-commuting batch provable from the op strings alone is now exit 3 everywhere**,
+  when both ops carry the default `on_zero_match: require`. `set_owners(*, [@a])` next to
+  `add_owner(/services/api/, @b)` was decided against the tree, so `check` passed the
+  policy and every repo refused at exit 2 — a hundred entries in `needs-human` for a
+  defect that was in the policy the whole time. Such a policy converges nowhere (a repo
+  with the scope refuses on the overlap, one without it refuses on the zero match), which
+  is what makes the verdict repo-independent. Ops carrying `skip` or `declare` are
+  deliberately excluded — their order-dependence *is* a fact about the tree — and so are
+  overlaps only a real tree reveals: both stay exit 2, per repo.
 - **The README is a front door, not the manual.** It now carries the mental model
   (`add_owner` co-owns, `set_owners` displaces), one worked example, and three
   task guides — lint a file, write a new one, modify an existing one — plus a

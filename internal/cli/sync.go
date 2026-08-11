@@ -149,15 +149,6 @@ func cmdSync(args []string, stdout, stderr io.Writer) int {
 		// whole rollout has already written its CODEOWNERS files.
 		return exit3(stderr, fmt.Errorf("unknown --format %q; want text or json", *format))
 	}
-	if *maxPaths >= 0 && len(policyPaths) > 0 {
-		// Mirrors --on-empty exactly, and for the same reason: the ceiling is a
-		// claim about the INTENT ("this wave touches dozens of files per repo,
-		// not thousands"), so it belongs in the artifact a reviewer approves.
-		// A flag that could override the file would let one call site quietly
-		// loosen a reviewed policy, and any "lower of the two wins" scheme is a
-		// new precedence rule for operators to learn.
-		return exit3(stderr, errors.New("--max-paths-changed is not allowed with --policy: set \"max_paths_changed\" in the policy file instead, or the artifact in git is not the policy that ran (R-20/R-25)"))
-	}
 	if *onEmpty != "" && len(policyPaths) > 0 {
 		return exit3(stderr, errors.New("--on-empty is not allowed with --policy: set \"on_empty\" in the policy file instead, or the artifact in git is not the policy that ran (R-20)"))
 	}
@@ -179,9 +170,36 @@ func cmdSync(args []string, stdout, stderr io.Writer) int {
 	if err := gittree.ValidateRef(*branch); err != nil {
 		return exit3(stderr, err)
 	}
+	// Whether the ceiling flag was TYPED, not merely whether its value looks
+	// set. -1 is the internal "no ceiling" sentinel, so guarding on `>= 0` let
+	// `--max-paths-changed -5` — a typo, or a shell arithmetic result — mean
+	// "no ceiling at all" on a wave that was supposed to be capped, silently,
+	// and slip past the --policy guard below while the policy field rejected
+	// the identical value at load time.
+	maxPathsSet := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "max-paths-changed" {
+			maxPathsSet = true
+		}
+	})
+	// After opSource, so the more fundamental problems in the same command line
+	// (--op with --policy, a policy that does not parse) are reported first
+	// rather than hidden behind this one.
 	pol, opList, err := opSource(opSpecs, policyPaths)
 	if err != nil {
 		return exit3(stderr, err)
+	}
+	if maxPathsSet && *maxPaths < 0 {
+		return exit3(stderr, fmt.Errorf("--max-paths-changed %d must be zero or positive; omit the flag to set no ceiling (R-25)", *maxPaths))
+	}
+	if maxPathsSet && len(policyPaths) > 0 {
+		// Mirrors --on-empty exactly, and for the same reason: the ceiling is a
+		// claim about the INTENT ("this wave touches dozens of files per repo,
+		// not thousands"), so it belongs in the artifact a reviewer approves.
+		// A flag that could override the file would let one call site quietly
+		// loosen a reviewed policy, and any "lower of the two wins" scheme is a
+		// new precedence rule for operators to learn.
+		return exit3(stderr, errors.New("--max-paths-changed is not allowed with --policy: set \"max_paths_changed\" in the policy file instead, or the artifact in git is not the policy that ran (R-20/R-25)"))
 	}
 	if err := validateScopes(opList); err != nil {
 		return exit3(stderr, err)
@@ -301,7 +319,7 @@ func (r *syncRun) execute() (SyncRecord, int) {
 		// in a repo whose ownership lives in docs/CODEOWNERS is a different
 		// conversation from one in .github/, and the operator reading
 		// `needs-human` has only this string to go on.
-		rec.Error = fmt.Sprintf("%s (governing file: %s)", buildErr, rel)
+		rec.Error = withGoverningFile(buildErr.Error(), rel, creating)
 		return rec, ExitRefused
 	}
 
@@ -316,7 +334,6 @@ func (r *syncRun) execute() (SyncRecord, int) {
 	}
 	rec.PathsChanged = len(p.Rows)
 	rec.Warnings = append(fileWarnings, p.Warnings...)
-	rec.Warnings = append(rec.Warnings, staleCommentWarnings(p.AfterContent, r.ops, rel)...)
 
 	// R-25: the blast-radius ceiling. Opt-in, no default — a default would
 	// break every legitimate `set_owners(*, …)` baseline on upgrade, which
@@ -325,9 +342,14 @@ func (r *syncRun) execute() (SyncRecord, int) {
 	// number the record carries and the same one --dry-run previews.
 	if r.maxPaths >= 0 && rec.PathsChanged > r.maxPaths {
 		rec.Status = StatusRefused
-		rec.Error = fmt.Sprintf(
-			"refusing: this run would change the owners of %d path(s), over the %d-path ceiling set by %s (R-25) — nothing was written; re-run with `plan --out` to see which paths, raise the ceiling if the number is right, or narrow the ops if it is not",
-			rec.PathsChanged, r.maxPaths, r.maxPathsSource)
+		// The contributing ops are named because the per-op array cannot carry
+		// them: every op is rewritten to `unchanged` below (nothing applied),
+		// which is right for the counts and leaves a ceiling-blocked op
+		// indistinguishable from one that was already satisfied. The operator's
+		// next question is "which op did this", so the answer goes in the text.
+		rec.Error = withGoverningFile(fmt.Sprintf(
+			"refusing: this run would change the owners of %d path(s), over the %d-path ceiling set by %s (R-25) — nothing was written; the op(s) behind the number: %s. Re-run with `--dry-run --out preview.json` to see which paths, raise the ceiling if the number is right, or narrow the ops if it is not",
+			rec.PathsChanged, r.maxPaths, r.maxPathsSource, blockedOpLabels(rec.Ops)), rel, creating)
 		// Same normalization the failed-write path applies, and for the same
 		// reason: no byte moved, so no op may still claim it applied or a
 		// fleet's `[.[].ops_applied] | add` overcounts the rollout by exactly
@@ -378,6 +400,12 @@ func (r *syncRun) execute() (SyncRecord, int) {
 			return rec, ExitRefused
 		}
 	}
+	// Below the ceiling and below every refusal: a warning about the comments
+	// in a file this run did not write is a warning about a change that did not
+	// happen, and its line numbers come from AfterContent, which in that case
+	// describes a file nobody will ever see.
+	rec.Warnings = append(rec.Warnings, staleCommentWarnings(p.AfterContent, r.ops, p.OpResults, rel)...)
+
 	// `created` reports what this run did, or under --dry-run what it would have
 	// done — a converged repo needs no file written, so nothing is created for it
 	// even with --create.
@@ -595,13 +623,28 @@ func (r *syncRun) governing(tree []string) (rel string, content []byte, creating
 //     the operator is looking at a green `applied` row.
 func governingWarnings(tree []string, rel string, content []byte) []string {
 	var out []string
+	// Two independent facts, deliberately not an either/or. A `--file` pointed
+	// at the wrong location in a repo that ALSO has three CODEOWNERS files is
+	// the case where an operator most needs both halves: which file GitHub
+	// actually reads, and that there is more than one to clean up. Reporting
+	// only the first left the second invisible in exactly that repo.
+	// A path GitHub never loads, regardless of what the tree contains. With
+	// `--file build/OWNERSFILE --create` in a repo that has no CODEOWNERS at
+	// all, the tree check below sees nothing to compare against, so the run
+	// wrote a file governing nothing and reported `applied` with no warning —
+	// the exact "dead on arrival" outcome these verbs exist to prevent.
+	if !isCodeownersLocation(rel) {
+		out = append(out, fmt.Sprintf(
+			"this run writes %s, which is not a path GitHub loads CODEOWNERS from (S-8 reads only %s) — whatever is written there governs nothing",
+			rel, strings.Join(gittree.CodeownersLocations, ", ")))
+	}
 	if present := gittree.FindCodeownersPaths(tree); len(present) > 0 {
-		switch {
-		case rel != present[0]:
+		if rel != present[0] && isCodeownersLocation(rel) {
 			out = append(out, fmt.Sprintf(
 				"this run writes %s, but GitHub resolves ownership from %s (S-8: .github/ > root > docs/, first found wins, never merged) — the rules written here govern nothing until that is the file being edited",
 				rel, present[0]))
-		case len(present) > 1:
+		}
+		if len(present) > 1 {
 			out = append(out, fmt.Sprintf(
 				"this repository has %d CODEOWNERS files (%s); GitHub loads only %s, so the rest govern nothing and were left untouched — delete them (A-10)",
 				len(present), strings.Join(present, ", "), present[0]))
@@ -614,6 +657,32 @@ func governingWarnings(tree []string, rel string, content []byte) []string {
 			rel, len(invalid), first.Line, first.Message))
 	}
 	return out
+}
+
+// isCodeownersLocation reports whether a repo-relative path is one of the three
+// GitHub actually reads (S-8).
+func isCodeownersLocation(rel string) bool {
+	for _, loc := range gittree.CodeownersLocations {
+		if rel == loc {
+			return true
+		}
+	}
+	return false
+}
+
+// withGoverningFile appends the CODEOWNERS a refusal was about.
+//
+// A refused record carries no codeowners_path — nothing was written — so this
+// string is all a `needs-human` pile has to go on, and "which file does this
+// repo keep ownership in" is the first question triage asks. It is omitted when
+// the run was CREATING: naming .github/CODEOWNERS as the governing file of a
+// repo that has no CODEOWNERS at all answers a question nobody asked with a
+// path that does not exist.
+func withGoverningFile(msg, rel string, creating bool) string {
+	if creating || rel == "" {
+		return msg
+	}
+	return fmt.Sprintf("%s (governing file: %s)", msg, rel)
 }
 
 // staleCommentWarnings reports comments that still name an owner this run
@@ -633,15 +702,29 @@ func governingWarnings(tree []string, rel string, content []byte) []string {
 // alone. The line number is the point — the fix is a human's, and it goes in
 // the same PR they are already reviewing (which is why this reaches
 // --summary-out as well as the record).
-func staleCommentWarnings(after string, opList []ops.Op, rel string) []string {
+func staleCommentWarnings(after string, opList []ops.Op, results []plan.OpResult, rel string) []string {
 	var out []string
-	for _, op := range opList {
+	for i, op := range opList {
 		if op.Kind != ops.RenameOwner {
 			continue
 		}
+		// Only a rename that actually substituted something. A fleet-wide
+		// rename passes over repos where the old handle never appeared, and
+		// warning there claims a rename that did not happen — in the record and
+		// in the PR body — for every repo whose comments merely mention the old
+		// team.
+		if i >= len(results) || results[i].Status != "applied" {
+			continue
+		}
 		for _, line := range commentLinesNaming(after, op.Owner) {
+			// The line number is the one in the file AS THIS RUN LEAVES IT —
+			// the same file the PR diff shows — which is not necessarily where
+			// the comment sits today, because a rule inserted above it shifts
+			// it down. Saying so is the difference between a number a reviewer
+			// can act on and one that sends them to the wrong line of a
+			// --dry-run preview.
 			out = append(out, fmt.Sprintf(
-				"%s line %d: a comment still names %q, which this run renamed to %q; comments are never rewritten (the substitution is proven only over owner tokens), so this one now points at an identifier that no longer exists",
+				"%s line %d as this run leaves it: a comment still names %q, which this run renamed to %q; comments are never rewritten (the substitution is proven only over owner tokens), so this one now points at an identifier that no longer exists",
 				rel, line, op.Owner, op.NewOwner))
 		}
 	}
@@ -654,7 +737,7 @@ func staleCommentWarnings(after string, opList []ops.Op, rel string) []string {
 func commentLinesNaming(content, owner string) []int {
 	var lines []int
 	for i, line := range strings.Split(content, "\n") {
-		hash := strings.IndexByte(line, '#')
+		hash := commentStart(line)
 		if hash < 0 {
 			continue
 		}
@@ -673,6 +756,38 @@ func commentLinesNaming(content, owner string) []int {
 		}
 	}
 	return lines
+}
+
+// commentStart returns the index where a line's comment begins, or -1.
+//
+// A '#' only opens a comment at the start of a line or after whitespace. In a
+// CODEOWNERS pattern the character is literal — the pattern token runs to the
+// first unescaped space — so scanning from the first '#' anywhere reported the
+// rule line `a#@org/acq @org/other` as a comment naming @org/acq.
+func commentStart(line string) int {
+	for i := 0; i < len(line); i++ {
+		if line[i] != '#' {
+			continue
+		}
+		if i == 0 || line[i-1] == ' ' || line[i-1] == '\t' {
+			return i
+		}
+	}
+	return -1
+}
+
+// blockedOpLabels names the ops that would have applied, for R-25's refusal.
+func blockedOpLabels(results []plan.OpResult) string {
+	var labels []string
+	for i, o := range results {
+		if o.Status == "applied" || o.Status == "unchanged" && o.Reason == "" {
+			labels = append(labels, policy.OpLabel(o.ID, i))
+		}
+	}
+	if len(labels) == 0 {
+		return "(none reported)"
+	}
+	return strings.Join(labels, ", ")
 }
 
 // ownerTokenByte reports whether c can continue a GitHub owner identifier, so

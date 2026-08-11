@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -169,8 +170,18 @@ func TestScenario_CreateWritesExactlyWhatThePolicyJustifies(t *testing.T) {
 		t.Errorf("created file carries a comment it was never asked to write; every line must be derivable from an op:\n%s", content)
 	}
 	rules := fleetRuleLines(content)
-	if len(rules) != 4 {
-		t.Fatalf("created file has %d rules, want exactly one per op (4):\n%s", len(rules), content)
+	// The order itself, not merely "the same order twice": a deterministic but
+	// reshuffled file would satisfy the three-way byte comparison above while
+	// changing what every reviewer in the fleet sees. The catch-all leads, and
+	// the narrowing rules follow it — which is also what keeps INV-2 true.
+	wantRules := []string{
+		"* @org/everyone",
+		"/.github/workflows/ @org/everyone @org/ci",
+		"/docs/ @org/everyone @org/docs-team",
+		"/services/api/ @org/everyone @org/api-team",
+	}
+	if !reflect.DeepEqual(rules, wantRules) {
+		t.Fatalf("created file's rules:\n got: %#v\nwant: %#v", rules, wantRules)
 	}
 	for _, r := range rules {
 		if !strings.Contains(r, "@org/everyone") {
@@ -694,8 +705,12 @@ func TestScenario_RenameSubstitutesInPlace(t *testing.T) {
 	// The comment is not rewritten — editing prose is the one thing this op
 	// cannot prove — but the run says so, in the record and in the PR body.
 	body := filepath.Join(t.TempDir(), "body.md")
+	// The two handles sit on DIFFERENT comment lines on purpose. With both on
+	// one line, commentLinesNaming reports that line once either way, so the
+	// count below stays 1 even with the whole-identifier guard removed — the
+	// fixture, not the assertion, is what gives this teeth.
 	dir2 := initRepo(t, map[string]string{
-		".github/CODEOWNERS": "# @org/acq owns this; @org/acq-infra does not\n/pipeline/ @org/acq\n",
+		".github/CODEOWNERS": "# @org/acq owns this\n# @org/acq-infra is a different team\n/pipeline/ @org/acq\n",
 		"pipeline/p.go":      "package p\n",
 	})
 	rec2, code2, _ := scenarioSync(t, "--repo", dir2, "--op", "rename_owner(@org/acq, @org/platform-data)", "--summary-out", body)
@@ -706,15 +721,24 @@ func TestScenario_RenameSubstitutesInPlace(t *testing.T) {
 	if !strings.Contains(joined, "line 1") || !strings.Contains(joined, "@org/acq") {
 		t.Errorf("no warning naming the stale comment's line: %#v", rec2.Warnings)
 	}
-	if strings.Count(joined, "line 1") != 1 {
-		t.Errorf("the substring handle @org/acq-infra was reported as stale too: %#v", rec2.Warnings)
+	if strings.Contains(joined, "line 2") {
+		t.Errorf("the substring handle @org/acq-infra on line 2 was reported as stale; a rename of @org/acq must not match a longer identifier: %#v", rec2.Warnings)
+	}
+	if len(rec2.Warnings) != 1 {
+		t.Errorf("want exactly one stale-comment warning, got %#v", rec2.Warnings)
 	}
 	b, err := os.ReadFile(body)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(b), "@org/acq") {
-		t.Errorf("the PR body does not carry the stale-comment warning — the PR is the one moment a human can fix the prose in the same commit:\n%s", b)
+	// Assert the SECTION, not the handle: the Ops table renders the op string
+	// `rename_owner(@org/acq, …)`, so `Contains(body, "@org/acq")` passes with
+	// the whole warnings section deleted from renderSummary.
+	if !strings.Contains(string(b), "## Worth a look") {
+		t.Errorf("the PR body has no warnings section — the PR is the one moment a human can fix the prose in the same commit:\n%s", b)
+	}
+	if !strings.Contains(string(b), "line 1 as this run leaves it: a comment still names") {
+		t.Errorf("the warnings section does not carry the stale-comment warning itself:\n%s", b)
 	}
 
 	// A rename that matched nothing is a clean no-op and must not warn: a
@@ -848,7 +872,9 @@ func TestScenario_BlastRadiusCeiling(t *testing.T) {
 		if _, present := raw["codeowners_path"]; present {
 			t.Error("codeowners_path present on a refusal — nothing was written, so there is nothing to stage")
 		}
-		for _, want := range []string{"4", "2", "--max-paths-changed"} {
+		// "2" alone would be satisfied by the "R-25" in the message, so the
+		// ceiling is asserted with its unit attached.
+		for _, want := range []string{"4 path(s)", "2-path ceiling", "--max-paths-changed"} {
 			if !strings.Contains(rec.Error, want) {
 				t.Errorf("the refusal must name the count, the ceiling and where the ceiling came from; %q missing from %q", want, rec.Error)
 			}
@@ -861,6 +887,20 @@ func TestScenario_BlastRadiusCeiling(t *testing.T) {
 		// would have done, so the artifacts still have to be produced.
 		if b, err := os.ReadFile(summary); err != nil || !strings.Contains(string(b), "R-25") {
 			t.Errorf("--summary-out must still emit and explain the refusal: %v\n%s", err, b)
+		}
+	})
+
+	t.Run("exactly at the ceiling proceeds", func(t *testing.T) {
+		// The value an operator sets after reading "would change the owners of
+		// 4 path(s)" and deciding the number is right. A `>=` here would refuse
+		// them forever, and nothing else in this test distinguishes the two.
+		dir := initRepo(t, files)
+		rec, code, errOut := scenarioSync(t, "--repo", dir, "--op", "add_owner(*, @org/wide)", "--max-paths-changed", "4")
+		if code != cli.ExitOK {
+			t.Fatalf("4 paths against a ceiling of 4: exit %d, want 0 — the ceiling is a maximum, not a limit to stay under\nstderr: %s", code, errOut)
+		}
+		if rec.Status != cli.StatusApplied || rec.PathsChanged != 4 {
+			t.Errorf("status %q paths_changed %d, want applied/4", rec.Status, rec.PathsChanged)
 		}
 	})
 
@@ -877,9 +917,23 @@ func TestScenario_BlastRadiusCeiling(t *testing.T) {
 
 	t.Run("dry-run gives the same verdict", func(t *testing.T) {
 		dir := initRepo(t, files)
-		if _, code, _ := scenarioSync(t, "--repo", dir, "--op", "add_owner(*, @org/wide)",
-			"--max-paths-changed", "2", "--dry-run"); code != cli.ExitRefused {
+		before, _ := os.ReadFile(filepath.Join(dir, ".github", "CODEOWNERS"))
+		rec, raw, code := scenarioBothViews(t, "--repo", dir, "--op", "add_owner(*, @org/wide)",
+			"--max-paths-changed", "2", "--dry-run")
+		if code != cli.ExitRefused {
 			t.Errorf("dry-run exit %d, want 2 — a rehearsal that does not predict the performance is worse than none", code)
+		}
+		// The whole record has to match the real run's, not just the code: the
+		// rehearsal is what the operator reads to decide about the ceiling.
+		if rec.Status != cli.StatusRefused || rec.PathsChanged != 4 || rec.OpsApplied != 0 {
+			t.Errorf("dry-run record: status %q paths_changed %d ops_applied %d, want refused/4/0",
+				rec.Status, rec.PathsChanged, rec.OpsApplied)
+		}
+		if _, present := raw["codeowners_path"]; present {
+			t.Error("dry-run refusal names a file to stage")
+		}
+		if after, _ := os.ReadFile(filepath.Join(dir, ".github", "CODEOWNERS")); string(after) != string(before) {
+			t.Error("--dry-run wrote to the file")
 		}
 	})
 
@@ -913,4 +967,189 @@ func TestScenario_BlastRadiusCeiling(t *testing.T) {
 			t.Errorf("the error must quote the field: %s", errOut)
 		}
 	})
+}
+
+// SPEC R-8/R-20: the static rejection is scoped to ops that must apply. An op
+// carrying `on_zero_match: skip` or `declare` is left to the tree, at exit 2.
+//
+// The first cut of the static check read only the op kinds and scopes, and
+// refused `set_owners(*, …)` next to a `skip`-guarded narrower op — the shape
+// docs/FLEET.md recommends ("*if* this repo has Terraform"). That turned a
+// hundred exit-0 repos into a halted rollout, and it broke the rule the exit
+// code rests on: exit 3 is reachable only from facts independent of which repo
+// you are standing in. With `skip` the batch is order-dependent exactly in the
+// repos that have the scope, which is the exit-2 class.
+//
+// Two `require` ops still earn exit 3, and the argument is that the policy
+// cannot converge ANYWHERE: a repo with the narrower scope refuses on the
+// overlap, and a repo without it refuses on the zero match (R-5).
+func TestScenario_StaticRejectionRespectsOnZeroMatch(t *testing.T) {
+	t.Parallel()
+	withAPI := initRepo(t, map[string]string{
+		".github/CODEOWNERS":   "* @org/eng\n",
+		"services/api/main.go": "package api\n",
+	})
+	withoutAPI := initRepo(t, map[string]string{
+		".github/CODEOWNERS": "* @org/eng\n",
+		"lib/util.go":        "package lib\n",
+	})
+	policyFor := func(zeroMatch string) string {
+		narrow := `"add_owner(/services/api/, @org/api)"`
+		if zeroMatch != "" {
+			narrow = `{ "op": "add_owner(/services/api/, @org/api)", "on_zero_match": "` + zeroMatch + `" }`
+		}
+		return rolloutPolicy(t, `{"version":1,"ops":["set_owners(*, [@org/everyone])",`+narrow+`]}`)
+	}
+
+	t.Run("skip is decided per repo", func(t *testing.T) {
+		policy := policyFor("skip")
+		if code, _, errOut := runCLI(t, "check", "--policy", policy); code != cli.ExitOK {
+			t.Fatalf("check: exit %d, want 0 — a skip-guarded op may legitimately never apply\nstderr: %s", code, errOut)
+		}
+		if code, _, errOut := runCLI(t, "sync", "--repo", withoutAPI, "--policy", policy); code != cli.ExitOK {
+			t.Errorf("repo without the scope: exit %d, want 0 — the narrower op is a no-op here, so there is no order to depend on\nstderr: %s", code, errOut)
+		}
+		if code, _, _ := runCLI(t, "sync", "--repo", withAPI, "--policy", policy); code != cli.ExitRefused {
+			t.Errorf("repo with the scope: exit %d, want 2 — order-dependent here, and per repo, so the loop continues", code)
+		}
+	})
+
+	t.Run("declare is decided per repo", func(t *testing.T) {
+		policy := policyFor("declare")
+		if code, _, errOut := runCLI(t, "check", "--policy", policy); code != cli.ExitOK {
+			t.Fatalf("check: exit %d, want 0 — a declared rule lands at EOF where last-match-wins settles the outcome\nstderr: %s", code, errOut)
+		}
+		for name, dir := range map[string]string{"with the scope": withAPI, "without it": withoutAPI} {
+			if code, _, _ := runCLI(t, "sync", "--repo", dir, "--policy", policy); code == cli.ExitInvalid {
+				t.Errorf("%s: exit 3 — a declare pair is the tree's decision, at exit 2 if anything", name)
+			}
+		}
+	})
+
+	t.Run("require earns exit 3 everywhere", func(t *testing.T) {
+		policy := policyFor("")
+		for name, args := range map[string][]string{
+			"check":              {"check", "--policy", policy},
+			"sync with scope":    {"sync", "--repo", withAPI, "--policy", policy},
+			"sync without scope": {"sync", "--repo", withoutAPI, "--policy", policy},
+		} {
+			if code, _, _ := runCLI(t, args...); code != cli.ExitInvalid {
+				t.Errorf("%s: exit %d, want 3", name, code)
+			}
+		}
+	})
+}
+
+// SPEC R-25: the ceiling flag is validated, not silently ignored.
+//
+// `-1` is the internal "no ceiling" sentinel, so a guard written as `>= 0`
+// accepted `--max-paths-changed -5` as "no ceiling at all" — on a wave the
+// operator had just told to cap itself — and let it slip past the `--policy`
+// exclusion while the identical value in a policy file was rejected at load
+// time. A typo, or a shell arithmetic result, silently removes the guard.
+func TestScenario_CeilingFlagIsValidated(t *testing.T) {
+	t.Parallel()
+	dir := initRepo(t, map[string]string{
+		".github/CODEOWNERS": "* @org/eng\n",
+		"a/f.go":             "package a\n",
+	})
+	policy := rolloutPolicy(t, `{"version":1,"ops":["add_owner(*, @org/wide)"]}`)
+
+	if code, _, errOut := runCLI(t, "sync", "--repo", dir, "--op", "add_owner(*, @org/wide)",
+		"--max-paths-changed", "-5"); code != cli.ExitInvalid {
+		t.Errorf("--max-paths-changed -5: exit %d, want 3 — a negative ceiling silently meaning `no ceiling` disarms the guard the operator just asked for\nstderr: %s", code, errOut)
+	}
+	// Even the sentinel value is a typed flag, and typing it alongside a policy
+	// is the same mistake as any other value.
+	if code, _, _ := runCLI(t, "sync", "--repo", dir, "--policy", policy, "--max-paths-changed", "-1"); code != cli.ExitInvalid {
+		t.Errorf("--max-paths-changed -1 with --policy: exit %d, want 3", code)
+	}
+	// Precedence: the more fundamental problem on the same command line is
+	// reported, not this one.
+	_, _, errOut := runCLI(t, "sync", "--repo", dir, "--op", "add_owner(*, @o/x)",
+		"--policy", policy, "--max-paths-changed", "5")
+	if !strings.Contains(errOut, "mutually exclusive") {
+		t.Errorf("--op with --policy must be reported ahead of the ceiling flag's own rule:\n%s", errOut)
+	}
+}
+
+// SPEC R-24 (S-8): a `--file` naming a path GitHub never loads is warned about
+// even when the repository has no CODEOWNERS at all.
+//
+// `--file build/OWNERSFILE --create` on a greenfield repo wrote a file,
+// reported `applied` at exit 0, and emitted `codeowners_path` for the fleet
+// loop to stage — with no warning, because the check compared against the
+// CODEOWNERS files in the tree and there were none. That is the "applied, dead
+// on arrival" outcome in its purest form: a hundred PRs, a hundred green rows,
+// and no ownership anywhere.
+func TestScenario_FileOutsideTheThreeLocationsIsWarned(t *testing.T) {
+	t.Parallel()
+	dir := initRepo(t, map[string]string{"x/f.go": "package x\n"})
+	rec, code, errOut := scenarioSync(t, "--repo", dir, "--create",
+		"--file", "build/OWNERSFILE", "--op", "add_owner(/x/, @org/b)")
+	if code != cli.ExitOK {
+		t.Fatalf("exit %d, want 0 — an explicit --file is the operator's call\nstderr: %s", code, errOut)
+	}
+	got := strings.Join(rec.Warnings, "\n")
+	if !strings.Contains(got, "S-8") || !strings.Contains(got, "build/OWNERSFILE") {
+		t.Errorf("no warning that the written file is not one GitHub reads; warnings = %#v", rec.Warnings)
+	}
+}
+
+// SPEC R-24: the stale-comment warning fires only on a run that actually
+// renamed something, and never on a run that wrote nothing.
+//
+// The first cut scanned for the old identifier regardless of whether the
+// rename matched anything, so a fleet-wide rename warned about a rename that
+// did not happen in every repo whose comments merely mentioned the old team —
+// in the record and in the PR body — and kept warning on every later run. It
+// also fired on runs that refused, describing line numbers in a file that was
+// never written.
+func TestScenario_StaleCommentWarningOnlyFollowsARealRename(t *testing.T) {
+	t.Parallel()
+	files := map[string]string{
+		".github/CODEOWNERS": "# @org/acq owns the pipeline\n/pipeline/ @org/other\n",
+		"pipeline/p.go":      "package p\n",
+	}
+
+	// The comment names @org/acq; no rule does. Nothing is renamed.
+	dir := initRepo(t, files)
+	rec, code, _ := scenarioSync(t, "--repo", dir, "--op", "rename_owner(@org/acq, @org/new)")
+	if code != cli.ExitOK || rec.Status != cli.StatusUnchanged {
+		t.Fatalf("exit %d status %q, want 0/unchanged", code, rec.Status)
+	}
+	if len(rec.Warnings) != 0 {
+		t.Errorf("a rename that renamed nothing warned about a stale comment: %#v", rec.Warnings)
+	}
+
+	// A refusal writes nothing, so it has no file whose comments to describe.
+	refusing := initRepo(t, map[string]string{
+		".github/CODEOWNERS": "# @org/acq owns the pipeline\n/pipeline/ @org/acq\n",
+		"pipeline/p.go":      "package p\n",
+	})
+	rec2, code2, _ := scenarioSync(t, "--repo", refusing,
+		"--op", "rename_owner(@org/acq, @org/new)", "--max-paths-changed", "0")
+	if code2 != cli.ExitRefused {
+		t.Fatalf("exit %d, want 2", code2)
+	}
+	for _, w := range rec2.Warnings {
+		if strings.Contains(w, "comment still names") {
+			t.Errorf("a refusal warned about comments in a file it never wrote: %q", w)
+		}
+	}
+
+	// And a '#' inside a pattern is not a comment.
+	pattern := initRepo(t, map[string]string{
+		".github/CODEOWNERS": "/x/ @org/acq\na#@org/acq @org/other\n",
+		"x/f.go":             "package x\n",
+	})
+	rec3, code3, _ := scenarioSync(t, "--repo", pattern, "--op", "rename_owner(@org/acq, @org/new)")
+	if code3 != cli.ExitOK {
+		t.Fatalf("exit %d, want 0", code3)
+	}
+	for _, w := range rec3.Warnings {
+		if strings.Contains(w, "comment still names") {
+			t.Errorf("a rule line whose PATTERN contains '#' was read as a comment: %q", w)
+		}
+	}
 }

@@ -105,8 +105,8 @@ need the proof against another ref, add `--dry-run`, or use `plan`.
 set -euo pipefail
 
 codeowners-tool check --policy policy.json     # fail on repo 0, not 100 times
-mkdir -p work bodies
-touch done.txt
+mkdir -p work bodies records
+touch done.txt results.jsonl                   # jq at the end reads it even if every clone failed
 
 while read -r repo; do                         # repos.txt: one "org/name" per line
   grep -qxF "$repo" done.txt && continue       # resume: skip what already finished
@@ -149,9 +149,10 @@ repos it is all three. Every record names the file that run actually wrote, unde
 `codeowners_path`:
 
 ```bash
-file=$(jq -r '.codeowners_path // empty' "records/${repo//\//__}.json")
+# `select(.dry_run|not)`: a preview wave reports `applied` for what it WOULD write, so a
+# rehearsal's records must never reach the commit step.
+file=$(jq -r 'select(.dry_run|not) | .codeowners_path // empty' "records/${repo//\//__}.json")
 [ -n "$file" ] || continue                     # nothing was written; nothing to commit
-[ -f "work/$repo/$file" ] || { echo "$repo" >> bug; continue; }   # belt and braces
 
 git -C "work/$repo" checkout -b codeowners-baseline
 git -C "work/$repo" add "$file"                # exactly the one file, never -A
@@ -203,9 +204,10 @@ whose severity you can weigh.
 
 ## Repos the rollout should tell you about
 
-Three conditions exit 0 and report `applied` — they are not reasons to refuse a correct
-edit — but each one leaves something a human should look at, so the run that touched the
-file says so in `warnings`:
+Four conditions do not stop a run — none is a reason to refuse a correct edit — but each
+leaves something a human should look at, so the run that read the file says so in
+`warnings`. They are independent, so one repo can carry several, and they ride on any
+record whose file was read, including a `refused` one:
 
 - **A second CODEOWNERS file.** The right one was edited; the other still sits in the repo
   looking authoritative and usually says something different (A-10).
@@ -245,7 +247,9 @@ deliberately owns nobody (S-9) — the difference between a gap and a decision.
 
 **A ceiling on the blast radius.** `max_paths_changed` in the policy (or
 `--max-paths-changed N` with `--op`) refuses any repo where the wave would move more
-ownership than you expected:
+ownership than you expected. It gates `sync`, which is the verb a rollout loops over;
+`plan`/`apply` is the deliberate two-step path where a human reads the artifact before
+anything is written, and it is not ceilinged:
 
 ```json
 { "version": 1, "max_paths_changed": 500, "ops": ["add_owner(/services/api/, @org/api-team)"] }
@@ -300,8 +304,10 @@ jq -s '[.[] | (.ops // [])[]] | group_by(.op) | map({op: .[0].op, n: length,
 ```
 
 Note the `// []`. Keys with nothing in them are **omitted entirely** rather than emitted
-empty — that applies to `ops`, `warnings` and `changes`. A refused repo has no `.ops` at
-all, so the same query without the guard dies with `Cannot iterate over null` on the first
-repo that needed a human, which is the one you most wanted to see.
+empty — that applies to `ops`, `warnings` and `changes`. A repo refused before it was
+planned has no `.ops` at all, so the same query without the guard dies with `Cannot
+iterate over null` on the first repo that needed a human, which is the one you most wanted
+to see. (A repo refused by the R-25 ceiling is the exception: it was planned, so it keeps
+`.ops`, every entry reported `unchanged`.)
 
 Full JSON shape: [REFERENCE.md](REFERENCE.md#json-output).

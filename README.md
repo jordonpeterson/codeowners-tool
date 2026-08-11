@@ -269,10 +269,15 @@ under `set -e` a good policy always lets the script continue.
 For a repo with no CODEOWNERS at all, `--create` writes one at `.github/CODEOWNERS`.
 It never overwrites an existing file, and it's off by default.
 
-It is permission to create a file, not an instruction to: a run with nothing to write —
-every op skipped, or none of the named directories present — creates no file and no
+It is permission to create a file, not an instruction to. When there is nothing to write —
+every op carrying `on_zero_match: "skip"` matched nothing — it creates no file and no
 `.github/` directory, and reports `skipped` at exit 0. Nothing here synthesizes ownership
 to make a repo look covered.
+
+A scope that matches nothing under the DEFAULT `require` is the other outcome, and not a
+quiet one: that repo is refused at exit 2 and gets no file, because a path you named and
+this repo does not have is usually a typo. Which of the two you want is what
+`on_zero_match` is for — see [docs/FLEET.md](docs/FLEET.md#your-100-repos-arent-identical).
 
 The smallest version is one op:
 

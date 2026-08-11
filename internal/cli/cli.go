@@ -76,13 +76,18 @@ func flagParseCode(err error) int {
 // per repo is what lets `jq -s` aggregate a fleet without parsing stderr.
 type SyncRecord struct {
 	Repo string `json:"repo"`
-	// CodeownersPath is the repo-relative file this run wrote, or under
-	// --create/--dry-run the one it would write. A rollout has to stage and
-	// commit that file, and which of the three legal locations it is differs
-	// per repo (S-8), so a loop without this field can only `git add -A` and
-	// hope nothing else moved in the clone. It is ABSENT when no file was ever
-	// chosen — an unreadable repository, or a missing CODEOWNERS without
-	// --create — so its presence means "there is something to stage".
+	// CodeownersPath is the repo-relative file this run CHANGED, or under
+	// --dry-run would have. A rollout has to stage and commit that file, and
+	// which of the three legal locations it is differs per repo (S-8), so a
+	// loop without this field can only `git add -A` and hope nothing else moved
+	// in the clone.
+	//
+	// It is emitted only when Status is StatusApplied. Absent therefore means
+	// "this run wrote nothing", NOT "no file was chosen": an `unchanged` repo
+	// has a perfectly good CODEOWNERS and simply nothing to stage. A refusal
+	// names its file in Error instead. One caveat the fleet script has to
+	// respect: a --dry-run record reports `applied` for a run that would have
+	// written, so DryRun must be checked before anything is staged.
 	CodeownersPath string          `json:"codeowners_path,omitempty"`
 	Status         string          `json:"status"` // applied|unchanged|skipped|refused|error
 	Ops            []plan.OpResult `json:"ops,omitempty"`
@@ -162,7 +167,7 @@ func usage(w io.Writer) {
 
   sync     (--op 'OP' ... | --policy FILE) [--on-empty error|inherit|unowned]
            [--repo DIR] [--branch REF] [--file PATH] [--create] [--dry-run]
-           [--format text|json] [--out FILE] [--summary-out FILE]
+           [--max-paths-changed N] [--format text|json] [--out FILE] [--summary-out FILE]
   check    (--op 'OP' ... | --policy FILE) [--format text|json]
   plan     --op 'add_owner(/services/api, @org/team-1)' [--op ...] [--on-empty error|inherit|unowned]
            [--repo DIR] [--branch REF] [--file PATH] [--out plan.json]
