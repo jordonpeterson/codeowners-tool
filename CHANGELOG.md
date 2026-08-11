@@ -41,6 +41,27 @@ changes to which class a failure lands in are called out explicitly.
 
 ### Added
 
+- **`sync` records the file it wrote**, as `codeowners_path` in the JSON record and
+  as a bullet in `--summary-out`. Ownership lives in `.github/`, the root, or
+  `docs/` depending on the repo, so a rollout that has to commit its change could
+  only `git add -A` and hope nothing else had moved in the clone. The key is
+  absent when no file was chosen, so its presence means there is something to
+  stage. `plan` and `snapshot` already named their file; the record that drives a
+  fleet was the one document that did not.
+- **`audit --fail-on any|warning|error|never`** decides which findings exit 4.
+  Every finding is still printed under every setting — the flag moves the gate,
+  not the report. Without it, the documented rollout and the documented CI gate
+  contradicted each other: a baseline with `on_zero_match: declare` writes rules
+  that match zero files, A-4 reports each one as a report-only `warning`, and the
+  next push to every repo the rollout touched failed CI. The default is `any`, so
+  the existing exit-4 contract is unchanged. Inconclusive stays exit 5 under every
+  setting (R-12).
+- **`sync` warns about three things that converge anyway**: a second CODEOWNERS
+  file GitHub ignores (A-10), a run writing a file that is not the one GitHub
+  reads (a `--file` at the wrong location — reported `applied` while moving no
+  ownership at all), and lines GitHub cannot parse and silently skips (S-3). None
+  is a reason to refuse a correct edit, and none is visible at fleet scale unless
+  the run that touched the file says so.
 - `SECURITY.md`, `CONTRIBUTING.md`, `CHANGELOG.md`, `.github/dependabot.yml`
   (GitHub Actions only — see the file), and a `CODEOWNERS` for this repository,
   which previously failed its own A-11 check.

@@ -30,9 +30,9 @@ check    (--op 'OP' ... | --policy FILE) [--format text|json]
 plan     --op 'OP' ... [--on-empty error|inherit|unowned]
          [--repo DIR] [--branch REF] [--file PATH] [--out plan.json]
 apply    --plan plan.json [--repo DIR]
-audit    [--checks a1,a3,a6] [--format json|text] [--github-repo owner/name]
-         [--token T | $GITHUB_TOKEN] [--api-url URL] [--cache-dir D] [--cache-ttl DUR]
-         [--repo DIR] [--branch REF]
+audit    [--checks a1,a3,a6] [--fail-on any|warning|error|never] [--format json|text]
+         [--github-repo owner/name] [--token T | $GITHUB_TOKEN] [--api-url URL]
+         [--cache-dir D] [--cache-ttl DUR] [--repo DIR] [--branch REF]
 snapshot [--repo DIR] [--branch REF] [--out snap.json]
 verify   --before before.json --after after.json [--scope PATTERN ...]
 version  print the build this binary was stamped with
@@ -120,6 +120,7 @@ Real `sync --format json` output, abridged only in `changes`:
 ```json
 {
   "repo": "work/org/foo",
+  "codeowners_path": ".github/CODEOWNERS",
   "status": "applied",
   "ops": [
     {"op": "add_owner(/services/api/, @org/api-team)", "status": "applied", "proven": "tree"},
@@ -136,6 +137,19 @@ Real `sync --format json` output, abridged only in `changes`:
 `status` is `applied`, `unchanged`, `skipped`, `refused`, or `error`. `proven` is `tree`
 when the result was checked against real files, `structural` when it wasn't — see
 [below](#what-declare-costs).
+
+`codeowners_path` is the file this run wrote — one of the three locations in S-8, and
+which one differs per repo — so a fleet loop can stage exactly it instead of `git add -A`.
+It is **absent** when no file was chosen at all (an unreadable repository, or a missing
+CODEOWNERS without `--create`), so its presence means there is something to commit. Under
+`--create` and `--dry-run` it is the path that *would* be written. See
+[FLEET.md](FLEET.md#committing-the-change-and-opening-the-pr).
+
+`warnings` carries what a human should look at in a repo that nonetheless converged: a
+second CODEOWNERS file GitHub ignores (A-10), a run writing a file that is not the one
+GitHub reads, and lines GitHub cannot parse and silently skips (S-3). None of these is a
+reason to refuse a correct edit, and none of them is visible at fleet scale unless the run
+that touched the file reports it.
 
 Each entry in `changes` carries the reason the edit took the shape it did, which is the
 part a reviewer wants:
@@ -272,6 +286,23 @@ Run a subset with `--checks a1,a3,a6` (`a4`, `A4`, `a-4` and `A-4` are all accep
 unrecognized name is a hard error, because silently matching nothing would make audits
 pass vacuously). Requesting A-1/A-2/A-3 without both `--token` and `--github-repo` is exit
 5, not a silent skip.
+
+**`--fail-on` sets the gate, not the report.** Every finding is printed under every
+setting; the flag decides which of them make the run exit 4.
+
+| `--fail-on` | Exits 4 when a finding is |
+|---|---|
+| `any` *(default)* | any severity — the behavior this flag was added under |
+| `warning` | `warning` or `error`; `info` (A-9 coverage) reports only |
+| `error` | `error` only — A-1, A-3, A-8, A-10, and A-12 over the cliff |
+| `never` | never; findings are reported and the run exits 0 |
+
+The case it exists for: a fleet baseline uses `on_zero_match: declare`, a declared rule
+matches zero files by construction, and A-4 reports every one of them at severity
+`warning` — so gating CI on the default turns every repo the rollout touched red. Naming
+the other eleven checks with `--checks` would do it too, and would silently opt out of any
+check added later. Inconclusive runs are a different axis: exit 5 under every setting, as
+R-12 requires — a check that could not run is not a finding whose severity you can weigh.
 
 **Fail closed (R-12):** a 404 can mean deleted, renamed, invisible to the token, or
 rate-limited. The client probes org/repo visibility first; anything inconclusive is

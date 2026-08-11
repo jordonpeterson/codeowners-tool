@@ -80,6 +80,24 @@ That split is the whole contract: exit 3 is only ever for problems that have not
 with which repo you're standing in. `check` catches exactly that class, which is why
 running it first is worth the two seconds.
 
+## Nor are the clones
+
+The repos differ; so does the state each clone is handed to the tool in. All of these are
+ordinary, and none of them changes a verdict:
+
+| Clone | What the tool does |
+|---|---|
+| Shallow (`--depth 1`, as above) | Works. Resolution reads the tree at `--branch`, which a shallow clone has. |
+| Detached HEAD (any CI checkout) | Works, on the default `--branch HEAD`. |
+| Default branch is `master`, or anything else | Works. Nothing here knows the name of your default branch. |
+| Freshly created, **no commits at all** | Exit 2, `"status": "error"` — there is no tree to read. Recorded, stepped over. |
+
+`--branch` is the one to be careful with. It names the ref whose tree governs resolution,
+but the bytes are the working tree's, so writing while proving against a ref this clone
+does *not* have checked out is refused (exit 2, per repo). `--branch main` on a clone
+standing on `main` is fine — refs are compared by resolved commit, not by name. If you
+need the proof against another ref, add `--dry-run`, or use `plan`.
+
 ## The script that survives a real rollout
 
 ```bash
@@ -122,16 +140,99 @@ before the first clone, and there's no third case where a fine policy halts you 
 non-error reason. Re-run it whenever you edit the policy; it's the only step that catches
 a mistake before it reaches a repo.
 
+## Committing the change and opening the PR
+
+The tool never touches git, so the commit is yours to make — and *what to stage* is the
+part that differs per repo. Ownership lives in `.github/CODEOWNERS`, the root
+`CODEOWNERS`, or `docs/CODEOWNERS`, whichever GitHub would load, and across a hundred
+repos it is all three. Every record names the file that run actually wrote, under
+`codeowners_path`:
+
+```bash
+file=$(jq -r '.codeowners_path // empty' "records/${repo//\//__}.json")
+[ -n "$file" ] || continue                     # nothing was written; nothing to commit
+
+git -C "work/$repo" checkout -b codeowners-baseline
+git -C "work/$repo" add "$file"                # exactly the one file, never -A
+git -C "work/$repo" commit -m 'chore: org baseline ownership'
+git -C "work/$repo" push -u origin HEAD
+gh pr create --repo "$repo" --title 'chore: org baseline ownership' \
+  --body-file "bodies/${repo//\//__}.md"
+```
+
+That needs `--out "records/${repo//\//__}.json"` on the `sync` line (and a `mkdir -p
+records` beside the others), or pipe the same field out of `results.jsonl`. Staging the
+named file rather than `git add -A` is what keeps a stray build artifact — or the summary,
+if you wrote it inside the clone — out of a hundred PRs. The field is **absent** when no
+file was chosen, which is why the `// empty` guard is there: a repo that refused has
+nothing to stage, and `jq -r` would otherwise hand you the string `null` as a path.
+
+The PR body from `--summary-out` names the same file, so a reviewer looking at one of a
+hundred near-identical PRs can see where that repo keeps its ownership before the diff
+means anything.
+
+## The CI gate afterwards
+
+Once the baseline is merged, `audit` in each repo's CI keeps it honest — but gate it on
+severity, or the rollout you just finished turns the fleet red:
+
+```yaml
+- run: codeowners-tool audit --github-repo ${{ github.repository }} --fail-on error
+  env:
+    GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+```
+
+Every op with `on_zero_match: declare` writes a rule that matches zero files — that is what
+a baseline *is* — and `audit` reports each one as A-4, a `warning` it labels report-only.
+With the default `--fail-on any`, the next push to every repo the rollout touched fails
+CI. `--fail-on error` still fails on the findings that mean something (a dead owner, an
+owner without write access, a second CODEOWNERS file, the 3 MB cliff) and still **prints
+every** finding, including the A-4s. It moves the gate, not the report. `--fail-on never`
+is the reporting-only mode for a dashboard job.
+
+Inconclusive runs are a separate axis and `--fail-on` does not touch them: an unreachable
+API is exit 5 under every setting, because a check that could not run is not a finding
+whose severity you can weigh.
+
+## Repos the rollout should tell you about
+
+Three conditions exit 0 and report `applied` — they are not reasons to refuse a correct
+edit — but each one leaves something a human should look at, so the run that touched the
+file says so in `warnings`:
+
+- **A second CODEOWNERS file.** The right one was edited; the other still sits in the repo
+  looking authoritative and usually says something different (A-10).
+- **The file being edited is not the one GitHub reads.** Almost always a `--file` pointed
+  at the wrong location. The rules land in a file GitHub never loads, so the rollout
+  reports success and moves no ownership at all.
+- **Lines GitHub cannot parse.** It skips them individually and honors the rest (S-3), so
+  the change is correct and those lines are left exactly as they were — but some paths in
+  that repo are owned by nobody, and the reason is a line this run just read.
+
+```sh
+jq -r 'select(.warnings) | "\(.repo)\t\(.warnings|join("; "))"' results.jsonl
+```
+
 ## What's left at the end
 
 Two piles.
 
 **`clone-failed`** is infrastructure — re-run the loop against just that list.
 
-**`needs-human`** is the interesting one. For each repo, run `sync --dry-run` locally to
+**`needs-human`** is the interesting one, and it holds two different jobs. Split it on
+`.status` before you start triaging:
+
+```sh
+jq -r 'select(.status=="refused") | .repo' results.jsonl   # a CODEOWNERS decision
+jq -r 'select(.status=="error")   | .repo' results.jsonl   # a clone that could not be read
+```
+
+`refused` means the tool read the repository and declined: run `sync --dry-run` locally to
 see the refusal, then either restructure that repo's CODEOWNERS so the intent becomes
 expressible (usually: replace the over-broad rule the error names with narrower ones), or
-accept that this repo is a legitimate exception and drop it from `repos.txt`.
+accept that this repo is a legitimate exception and drop it from `repos.txt`. `error`
+means it never got that far — an empty repository, a bad `--branch`, a clone that is not a
+repository — and belongs with `clone-failed`.
 
 `--format json` prints one line per repo so `jq` can aggregate the fleet. `--summary-out`
 writes a markdown summary suitable for a PR body — keep it outside the clone, or

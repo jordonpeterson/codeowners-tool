@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/jordonpeterson/codeowners-tool/internal/apply"
+	"github.com/jordonpeterson/codeowners-tool/internal/file"
 	"github.com/jordonpeterson/codeowners-tool/internal/gittree"
 	"github.com/jordonpeterson/codeowners-tool/internal/ops"
 	"github.com/jordonpeterson/codeowners-tool/internal/pattern"
@@ -234,6 +235,15 @@ func (r *syncRun) execute() (SyncRecord, int) {
 		rec.Error = err.Error()
 		return rec, ExitRefused
 	}
+	// Recorded as soon as the file is chosen, so a refusal below still says
+	// which file it was about — and so the fleet loop that stages `git add
+	// "$(jq -r .codeowners_path)"` gets the path from the run that wrote it.
+	rec.CodeownersPath = rel
+	// Warnings about the FILE, gathered before anything is planned so a repo
+	// that goes on to refuse still reports them: the two conditions below are
+	// exactly the ones an operator wants listed across the fleet afterwards.
+	fileWarnings := governingWarnings(tree, rel, content)
+	rec.Warnings = fileWarnings
 
 	// Where the write would actually land, decided before anything is planned.
 	// The path came out of the repository itself — discovery reads the tracked
@@ -276,7 +286,7 @@ func (r *syncRun) execute() (SyncRecord, int) {
 		}
 	}
 	rec.PathsChanged = len(p.Rows)
-	rec.Warnings = p.Warnings
+	rec.Warnings = append(fileWarnings, p.Warnings...)
 	rec.Changes = p.Changes
 	rec.Status = syncStatus(rec)
 	if converged {
@@ -496,6 +506,49 @@ func (r *syncRun) governing(tree []string) (rel string, content []byte, creating
 	}
 }
 
+// governingWarnings reports what is wrong with the FILE this run is about to
+// edit, as distinct from what is wrong with the change.
+//
+// Both conditions below exit 0 and report "applied" — they have to, because
+// neither is a reason to refuse an otherwise correct edit — and both are
+// invisible at fleet scale unless the run that touched the file says so.
+//
+//   - The file being written is not the file GitHub reads. `--file
+//     docs/CODEOWNERS` on a repo whose `.github/CODEOWNERS` governs writes
+//     rules into a file GitHub never loads (S-8): a rollout reporting 100
+//     successes that moved no ownership at all, which is the "applied, dead on
+//     arrival" outcome these verbs exist to prevent.
+//   - A second CODEOWNERS file exists. The right one was edited, but the other
+//     one stays in the repository looking authoritative to every human who
+//     opens it, and usually says something different (A-10).
+//   - The file already contains lines GitHub cannot parse. It skips them
+//     individually and honors the rest (S-3), so the change is correct and the
+//     tool leaves those lines alone (INV-5) — but some paths in that repo are
+//     owned by nobody for a reason sitting on a line this run just read, while
+//     the operator is looking at a green `applied` row.
+func governingWarnings(tree []string, rel string, content []byte) []string {
+	var out []string
+	if present := gittree.FindCodeownersPaths(tree); len(present) > 0 {
+		switch {
+		case rel != present[0]:
+			out = append(out, fmt.Sprintf(
+				"this run writes %s, but GitHub resolves ownership from %s (S-8: .github/ > root > docs/, first found wins, never merged) — the rules written here govern nothing until that is the file being edited",
+				rel, present[0]))
+		case len(present) > 1:
+			out = append(out, fmt.Sprintf(
+				"this repository has %d CODEOWNERS files (%s); GitHub loads only %s, so the rest govern nothing and were left untouched — delete them (A-10)",
+				len(present), strings.Join(present, ", "), present[0]))
+		}
+	}
+	if invalid := file.Parse(content).InvalidLines(); len(invalid) > 0 {
+		first := invalid[0].Err
+		out = append(out, fmt.Sprintf(
+			"%s has %d line(s) GitHub cannot parse and silently skips (S-3), first at line %d: %s — this run left them exactly as they were; `audit --checks a8` lists them all",
+			rel, len(invalid), first.Line, first.Message))
+	}
+	return out
+}
+
 func (r *syncRun) findOnDisk() string {
 	for _, cand := range gittree.CodeownersLocations {
 		if _, err := os.Stat(filepath.Join(r.repoArg, filepath.FromSlash(cand))); err == nil {
@@ -650,6 +703,12 @@ func renderSummary(rec SyncRecord, r *syncRun) string {
 		fmt.Fprintf(&b, "%s\n\n", r.policy.Description)
 	}
 	fmt.Fprintf(&b, "- repo: `%s`\n", rec.Repo)
+	// The file the PR changes. A reviewer of one of a hundred identical PRs
+	// needs to know whether this repo's ownership lives in .github/, the root
+	// or docs/ before the diff means anything.
+	if rec.CodeownersPath != "" {
+		fmt.Fprintf(&b, "- file: `%s`\n", rec.CodeownersPath)
+	}
 	fmt.Fprintf(&b, "- status: `%s`\n", rec.Status)
 	fmt.Fprintf(&b, "- ops applied: %d, skipped: %d\n", rec.OpsApplied, rec.OpsSkipped)
 	fmt.Fprintf(&b, "- paths whose owners change: %d\n", rec.PathsChanged)

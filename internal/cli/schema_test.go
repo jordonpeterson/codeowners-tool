@@ -142,17 +142,21 @@ func schemaFullChange() plan.Change {
 // omitempty ones, so the key enumeration sees the maximal document.
 func schemaFullRecord() cli.SyncRecord {
 	return cli.SyncRecord{
-		Repo:         "work/org/foo",
-		Status:       cli.StatusApplied,
-		Ops:          []plan.OpResult{schemaFullOpResult()},
-		OpsApplied:   2,
-		OpsSkipped:   1,
-		PathsChanged: 37,
-		Created:      true,
-		DryRun:       true,
-		Warnings:     []string{"file is 2.6 MB"},
-		Changes:      []plan.Change{schemaFullChange()},
-		Error:        "would violate INV-2 at /docs",
+		Repo: "work/org/foo",
+		// Populated like every other omitempty field: a field missing HERE is a
+		// field the key enumeration below cannot see, so the pin passes and the
+		// addition goes unnoticed — which is the failure that test is for.
+		CodeownersPath: ".github/CODEOWNERS",
+		Status:         cli.StatusApplied,
+		Ops:            []plan.OpResult{schemaFullOpResult()},
+		OpsApplied:     2,
+		OpsSkipped:     1,
+		PathsChanged:   37,
+		Created:        true,
+		DryRun:         true,
+		Warnings:       []string{"file is 2.6 MB"},
+		Changes:        []plan.Change{schemaFullChange()},
+		Error:          "would violate INV-2 at /docs",
 	}
 }
 
@@ -222,6 +226,7 @@ func schemaStatusConstsFromSource(t *testing.T) map[string]string {
 func TestR24_SyncRecordTopLevelKeys(t *testing.T) {
 	schemaWantKeys(t, "cli.SyncRecord", schemaTopLevelKeys(t, schemaFullRecord()), []string{
 		"repo",
+		"codeowners_path",
 		"status",
 		"ops",
 		"ops_applied",
@@ -245,17 +250,18 @@ func TestR24_SyncRecordTopLevelKeys(t *testing.T) {
 func TestR24_SyncRecordFieldTypes(t *testing.T) {
 	got := schemaFieldKinds(t, schemaFullRecord())
 	want := map[string]string{
-		"repo":          "string",
-		"status":        "string",
-		"ops":           "array<object>",
-		"ops_applied":   "number",
-		"ops_skipped":   "number",
-		"paths_changed": "number",
-		"created":       "bool",
-		"dry_run":       "bool",
-		"warnings":      "array<string>",
-		"changes":       "array<object>",
-		"error":         "string",
+		"repo":            "string",
+		"codeowners_path": "string",
+		"status":          "string",
+		"ops":             "array<object>",
+		"ops_applied":     "number",
+		"ops_skipped":     "number",
+		"paths_changed":   "number",
+		"created":         "bool",
+		"dry_run":         "bool",
+		"warnings":        "array<string>",
+		"changes":         "array<object>",
+		"error":           "string",
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("cli.SyncRecord field types changed.\n got: %v\nwant: %v", got, want)
@@ -264,9 +270,12 @@ func TestR24_SyncRecordFieldTypes(t *testing.T) {
 
 // SPEC R-24 (omitempty): which keys DISAPPEAR from a minimal record, pinned
 // explicitly, and which are unconditional. The split is not cosmetic. The
-// optional four (ops, warnings, changes, error) are absent when there is
-// nothing to say, so a consumer reads their absence as "empty", and a clean
-// run's line stays short enough to eyeball. The unconditional six are the
+// optional five (ops, warnings, changes, error, codeowners_path) are absent
+// when there is nothing to say, so a consumer reads their absence as "empty",
+// and a clean run's line stays short enough to eyeball. `codeowners_path`
+// earns its place in that set: absent means no file was ever chosen, so
+// `git add "$(jq -r .codeowners_path)"` on such a record stages nothing rather
+// than staging a path the run never wrote. The unconditional six are the
 // aggregation keys: absence there is a malformed record, not an empty result.
 func TestR24_OmitEmptyKeysDisappear(t *testing.T) {
 	got := schemaTopLevelKeys(t, cli.SyncRecord{})
@@ -277,7 +286,7 @@ func TestR24_OmitEmptyKeysDisappear(t *testing.T) {
 	for _, k := range got {
 		present[k] = true
 	}
-	for _, k := range []string{"ops", "warnings", "changes", "error"} {
+	for _, k := range []string{"ops", "warnings", "changes", "error", "codeowners_path"} {
 		if present[k] {
 			t.Errorf("minimal record: key %q should be omitted when empty but was emitted", k)
 		}

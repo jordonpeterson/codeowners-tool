@@ -235,6 +235,21 @@ a bare line deletion.
 > intent inexpressible. The fleet is the unit under test — no single repo's
 > outcome may change any other repo's outcome.
 
+**`rollout_test.go`**
+
+> The rollout scenarios.
+>
+> fleet_test.go asks whether one policy survives seven differently-shaped
+> CODEOWNERS files. This file asks the questions that come BEFORE and AFTER
+> that: the shapes of the CLONES a runner is handed, the file the run actually
+> wrote, the commit and the PR that follow it, and the CI gate the fleet is
+> left standing on afterwards.
+>
+> Each test is one scenario from a real org-wide rollout, written as the
+> operator meets it. The requirement in each doc comment is what the tool has
+> to provide for that scenario to be survivable at 100 repos — not what is
+> convenient to assert.
+
 **`schema_test.go`**
 
 > Schema pins for the sync record (R-24).
@@ -753,9 +768,12 @@ unmarshal-based test.
 
 SPEC R-24 (omitempty): which keys DISAPPEAR from a minimal record, pinned
 explicitly, and which are unconditional. The split is not cosmetic. The
-optional four (ops, warnings, changes, error) are absent when there is
-nothing to say, so a consumer reads their absence as "empty", and a clean
-run's line stays short enough to eyeball. The unconditional six are the
+optional five (ops, warnings, changes, error, codeowners_path) are absent
+when there is nothing to say, so a consumer reads their absence as "empty",
+and a clean run's line stays short enough to eyeball. `codeowners_path`
+earns its place in that set: absent means no file was ever chosen, so
+`git add "$(jq -r .codeowners_path)"` on such a record stages nothing rather
+than staging a path the run never wrote. The unconditional six are the
 aggregation keys: absence there is a malformed record, not an empty result.
 
 ### `TestR24_PerOpResultsRenderUnderOps`
@@ -830,6 +848,134 @@ without anyone noticing that `sync --format json` now emits something new,
 and a spot-checking test can see neither. Every other cli test unmarshals
 into SyncRecord, using the same tags on both sides of its assertions, so
 this is the only place the wire names are compared to anything external.
+
+### `TestRollout_AuditGateAfterADeclareBaseline`
+
+SPEC R-11/A-4: `audit --fail-on` lets the CI gate ride on the findings that
+mean something, so a fleet can gate on audit at all.
+
+The two halves of this tool's own advice contradict each other today. A
+baseline rollout uses `on_zero_match: declare` — that is what makes 100 repos
+converge on one policy — and a declared rule matches zero files by
+construction. The README then puts `codeowners-tool audit` in CI, where exit
+4 is the gate. So the recommended rollout turns every repo it touched red on
+the next push, over an A-4 finding the tool itself labels "report-only: may
+be deliberate". The operator's only escape is `--checks` with the other
+eleven checks spelled out, which silently stops running any check added
+later.
+
+The findings are still all printed under every setting: the flag moves the
+GATE, never the report. Inconclusive (exit 5, R-12) is a different axis and
+deliberately untouched — an unreachable API is not a finding you can grade.
+
+### `TestRollout_ByteStyleSurvivesTheRollout`
+
+SPEC INV-5/R-19: a fleet is not all-Unix and not all-tidy. A CRLF file stays
+CRLF, and a file with no trailing newline does not have its last rule joined
+to the first one written.
+
+Both are invisible in a diff view and catastrophic in the file: a lone `\n`
+appended to a CRLF file gives GitHub a rule line ending in a stray `\r`, and
+appending to a file whose last byte is not a newline concatenates two
+patterns into one that matches nothing. At fleet scale nobody opens the
+files; the run's own claim to have converged is all there is.
+
+### `TestRollout_CloneShapesTheRunnerMeets`
+
+SPEC R-19/R-24: the four clone shapes a fleet runner is handed, and the
+verdict each must produce.
+
+docs/FLEET.md's loop clones with `gh repo clone -- --depth 1`, so the
+ordinary case is a SHALLOW clone; CI runners (actions/checkout among them)
+leave a DETACHED HEAD; an org always has a repo that is freshly created and
+has NO COMMITS AT ALL; and plenty of repos still default to `master`. None
+of these is about CODEOWNERS, and that is the point — a rollout that halts,
+or worse writes into a tree it could not read, because of how a clone was
+made would be unusable. Three of the four must converge normally and the
+empty one must be exit 2 with `status: error`, so the fleet script files it
+under infrastructure rather than under repos that need a CODEOWNERS decision.
+
+### `TestRollout_CommitAndPullRequestRoundTrip`
+
+SPEC R-24: the artifacts a rollout commits and reviews agree with each other
+— record, working tree, and PR body all name one file — and a second wave
+over the committed result converges.
+
+This is the whole loop docs/FLEET.md stops one step short of: sync, stage
+exactly what the record names, commit, open the PR with --summary-out as its
+body. If the summary named a different file from the record, or the second
+wave found something left to do, the fleet would open a PR per repo per run
+forever.
+
+### `TestRollout_InheritedInvalidLineIsWarnedNotSwallowed`
+
+SPEC R-24 (S-3): a repo whose CODEOWNERS already has an invalid line
+converges, keeps that line byte-for-byte, and reports it as a warning.
+
+Every org has them: a line with a typo'd owner, committed years ago. GitHub
+skips such a line and honors the rest of the file (S-3), and so does this
+tool — the ownership it proves against is the ownership GitHub computes, so
+the rollout is correct. What it must not do is stay quiet. Some paths in that
+repo are owned by nobody and the reason is on a line the tool just read,
+while the operator is looking at a green `applied` row. The rewrite is also
+exactly when someone will assume the file was validated.
+
+### `TestRollout_RecordNamesTheFileItWrote`
+
+SPEC R-24: every record names the CODEOWNERS file the run wrote, under
+`codeowners_path`.
+
+A rollout does not end at sync: the loop has to commit the change and open a
+PR. Which file to `git add` differs per repo — .github/, the root, or docs/,
+whichever GitHub would load (S-8) — and the operator cannot know which
+without opening every clone. Without this field the only workable recipe is
+`git add -A`, which is how a stray build artifact or a summary written into
+the clone ends up in 100 PRs. `plan` and `snapshot` have named their file
+since v1; the record that drives the fleet is the one document that did not.
+
+Under --create the path is where the file WOULD be written, so `--dry-run
+--create` previews it too.
+
+### `TestRollout_SecondWaveReorgVerifiesOutOfScope`
+
+SPEC R-19/R-18: the second wave of a reorg — rename one team, retire
+another — converges, and `verify` proves from raw snapshots that nothing
+outside the declared scope moved.
+
+Wave 1 is the baseline everyone runs. Wave 2 is the one that scares people:
+a team was renamed in an acquisition and another was dissolved, so the
+rollout both substitutes an identifier everywhere and removes an owner from
+one scope. The removal empties a rule, which is where R-6 stops and demands
+a decision — and the fleet has to make that decision once, in the policy
+file, not per repo. Afterwards the proof is done the hard way: snapshot
+before, snapshot after, compare, with no trust in the planner that produced
+the change.
+
+### `TestRollout_UnusualTrackedPathsAreStillProven`
+
+SPEC R-24/S-6: tracked paths with spaces and non-ASCII characters resolve
+like any other, and are proven against, not skipped.
+
+`git ls-tree` quotes such paths unless it is asked for NUL-terminated output,
+and a tool that mis-splits them does not fail — it silently believes the
+repository has fewer files than it does, and then "proves" INV-2 over the
+subset it can see. Every org has a repo with a `docs/Über guide.md` in it.
+
+### `TestRollout_WritingAFileGitHubWillNotReadIsWarned`
+
+SPEC R-24 (S-8/A-10): when the file this run writes is not the file GitHub
+will read, the record says so — every time, on stderr and in `warnings`.
+
+Two spellings of one failure, and both report "applied", exit 0 today. A
+repo carrying both `.github/CODEOWNERS` and a root `CODEOWNERS` gets the
+.github one edited, correctly, while the root file — which GitHub never
+loads and which usually says something different — sits there looking
+authoritative to every human who opens the repo. And `--file docs/CODEOWNERS`
+on a repo whose .github/ file governs writes a rule into a file GitHub does
+not read at all: the rollout reports 100 successes and moves no ownership,
+which is the "applied, dead on arrival" outcome these verbs exist to
+prevent. A rollout cannot audit every clone by hand, so the run that touches
+the file is the one that has to say it.
 
 ### `TestSync_AlreadyCorrectIsZeroNotNoOp`
 
@@ -2683,4 +2829,4 @@ DIFFERENT states; transitioning between them is a real ownership change.
 
 ---
 
-312 documented test cases across 12 packages.
+321 documented test cases across 12 packages.

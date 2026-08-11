@@ -75,13 +75,21 @@ func flagParseCode(err error) int {
 // SyncRecord is one `sync` run, rendered as one JSON object (R-24). One line
 // per repo is what lets `jq -s` aggregate a fleet without parsing stderr.
 type SyncRecord struct {
-	Repo         string          `json:"repo"`
-	Status       string          `json:"status"` // applied|unchanged|skipped|refused|error
-	Ops          []plan.OpResult `json:"ops,omitempty"`
-	OpsApplied   int             `json:"ops_applied"`
-	OpsSkipped   int             `json:"ops_skipped"`
-	PathsChanged int             `json:"paths_changed"`
-	Created      bool            `json:"created"`
+	Repo string `json:"repo"`
+	// CodeownersPath is the repo-relative file this run wrote, or under
+	// --create/--dry-run the one it would write. A rollout has to stage and
+	// commit that file, and which of the three legal locations it is differs
+	// per repo (S-8), so a loop without this field can only `git add -A` and
+	// hope nothing else moved in the clone. It is ABSENT when no file was ever
+	// chosen — an unreadable repository, or a missing CODEOWNERS without
+	// --create — so its presence means "there is something to stage".
+	CodeownersPath string          `json:"codeowners_path,omitempty"`
+	Status         string          `json:"status"` // applied|unchanged|skipped|refused|error
+	Ops            []plan.OpResult `json:"ops,omitempty"`
+	OpsApplied     int             `json:"ops_applied"`
+	OpsSkipped     int             `json:"ops_skipped"`
+	PathsChanged   int             `json:"paths_changed"`
+	Created        bool            `json:"created"`
 	// DryRun marks a record produced under --dry-run. Without it a preview row
 	// and a row from a real rollout are byte-identical, so an operator holding
 	// results.jsonl cannot tell whether the fleet was changed or only modelled —
@@ -159,9 +167,9 @@ func usage(w io.Writer) {
   plan     --op 'add_owner(/services/api, @org/team-1)' [--op ...] [--on-empty error|inherit|unowned]
            [--repo DIR] [--branch REF] [--file PATH] [--out plan.json]
   apply    --plan plan.json [--repo DIR]
-  audit    [--checks a1,a3,a6] [--format json|text] [--github-repo owner/name]
-           [--token T | $GITHUB_TOKEN] [--api-url URL] [--cache-dir D] [--cache-ttl DUR]
-           [--repo DIR] [--branch REF]
+  audit    [--checks a1,a3,a6] [--fail-on any|warning|error|never] [--format json|text]
+           [--github-repo owner/name] [--token T | $GITHUB_TOKEN] [--api-url URL]
+           [--cache-dir D] [--cache-ttl DUR] [--repo DIR] [--branch REF]
   snapshot [--repo DIR] [--branch REF] [--out snap.json]
   verify   --before before.json --after after.json [--scope PATTERN ...]
   version  print the build this binary was stamped with
@@ -548,6 +556,7 @@ func cmdAudit(args []string, stdout, stderr io.Writer) int {
 	branch := fs.String("branch", "HEAD", "ref to audit")
 	filePath := fs.String("file", "", "CODEOWNERS path override")
 	checksFlag := fs.String("checks", "", "comma-separated subset, e.g. a1,a3,a6 (default: all)")
+	failOn := fs.String("fail-on", auditFailOnAny, "lowest severity that exits 4: any|warning|error|never (report is unaffected)")
 	format := fs.String("format", "text", "text|json")
 	githubRepo := fs.String("github-repo", "", "owner/name on GitHub, for A-1..A-3")
 	// The default is "" and the environment is read AFTER Parse, never before.
@@ -563,6 +572,14 @@ func cmdAudit(args []string, stdout, stderr io.Writer) int {
 	cacheTTL := fs.Duration("cache-ttl", 24*time.Hour, "disk cache TTL")
 	if err := fs.Parse(args); err != nil {
 		return flagParseCode(err)
+	}
+	gate, ok := auditFailOnLevel(*failOn)
+	if !ok {
+		// Never a fallback to the permissive end: `--fail-on eror` quietly
+		// meaning "never" is a CI gate that reports green while checking
+		// nothing, on every repo, until someone reads the workflow file.
+		fmt.Fprintf(stderr, "error: unknown --fail-on %q; want any, warning, error or never\n", *failOn)
+		return ExitInvalid
 	}
 	// $GITHUB_TOKEN remains the documented fallback; it is just resolved past
 	// the point where anything can render it. An explicit --token still wins.
@@ -650,10 +667,65 @@ func cmdAudit(args []string, stdout, stderr io.Writer) int {
 		return ExitInconclusive
 	}
 	if len(rep.Findings) > 0 {
-		return ExitFindings
+		if auditGateTripped(rep.Findings, gate) {
+			return ExitFindings
+		}
+		// Exiting 0 with findings on screen needs saying out loud, or the next
+		// person to read the log concludes the checks found nothing.
+		fmt.Fprintf(stderr, "note: %d finding(s) reported, none at or above --fail-on %s; exiting 0\n",
+			len(rep.Findings), *failOn)
+		return ExitOK
 	}
 	fmt.Fprintln(stdout, "audit clean")
 	return ExitOK
+}
+
+// The --fail-on thresholds, and the severity ladder they are compared on.
+//
+// A fleet that rolls out a baseline with `on_zero_match: declare` writes a rule
+// matching zero files into every repo — that is what a baseline IS — and A-4
+// then reports it forever, at severity `warning` and explicitly "report-only".
+// With exit 4 as the only verdict, the documented rollout and the documented CI
+// gate contradict each other: every repo the rollout touched goes red on its
+// next push. `--checks` is not the answer, because spelling out the other
+// eleven checks silently opts out of any check added later.
+//
+// The flag moves the GATE and never the report: every finding is printed under
+// every setting, so `--fail-on error` is a decision about what fails CI, not a
+// way to stop looking. Inconclusive (exit 5, R-12) is untouched by it — an API
+// that could not be reached is not a finding whose severity you can weigh.
+const (
+	auditFailOnAny = "any"
+)
+
+var auditFailOnLevels = map[string]int{
+	auditFailOnAny: 1,
+	"warning":      2,
+	"error":        3,
+	"never":        4, // above every severity, so nothing ever reaches it
+}
+
+var auditSeverityRank = map[string]int{"info": 1, "warning": 2, "error": 3}
+
+func auditFailOnLevel(name string) (int, bool) {
+	level, ok := auditFailOnLevels[name]
+	return level, ok
+}
+
+// auditGateTripped reports whether any finding is at or above the threshold.
+// A severity this build does not know ranks as `error`: a new, unrecognized
+// severity must fail a gate rather than slip under one.
+func auditGateTripped(findings []audit.Finding, level int) bool {
+	for _, f := range findings {
+		rank, known := auditSeverityRank[f.Severity]
+		if !known {
+			rank = auditSeverityRank["error"]
+		}
+		if rank >= level {
+			return true
+		}
+	}
+	return false
 }
 
 func fmtOwners(o []string) string {
