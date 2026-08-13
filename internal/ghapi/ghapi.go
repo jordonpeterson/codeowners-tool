@@ -148,6 +148,25 @@ func New(baseURL, token string, cache Cache) *Client {
 
 func (c *Client) key(k string) string { return c.scope + ":" + k }
 
+// redactURL strips userinfo before a base URL reaches a message.
+//
+// `--api-url https://svc:hunter2@ghes.example/api/v3` is a legal thing to type,
+// and the "base URL looks wrong" path is the single most likely error a GHES
+// operator hits — so the credential landed in stderr, and from there into a CI
+// log (CWE-532). Go's own transport redacts userinfo in its error strings; the
+// tool was leaking what its runtime deliberately hides. Unparseable input is
+// returned as-is: it is not a URL, so it has no userinfo to expose, and
+// dropping the string entirely would cost the operator the very detail the
+// message exists to give them.
+func redactURL(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || u.User == nil {
+		return raw
+	}
+	u.User = url.User("REDACTED")
+	return u.String()
+}
+
 // pathSeg encodes one value as exactly one URL path segment.
 //
 // `@org/..` is a legal owner, so TeamExists gets the slug ".." and
@@ -276,7 +295,7 @@ func (c *Client) ProbeAPI() error {
 	}
 	if status == 404 {
 		return &Inconclusive{Reason: fmt.Sprintf(
-			"GET %s/user returned 404 — the API base URL looks wrong (GHES needs /api/v3)", c.BaseURL)}
+			"GET %s/user returned 404 — the API base URL looks wrong (GHES needs /api/v3)", redactURL(c.BaseURL))}
 	}
 	c.cache.Set(c.key("probe-api"), []byte("1"))
 	return nil
@@ -310,6 +329,43 @@ func (c *Client) TeamExists(org, slug string) (bool, error) {
 			return false, err
 		}
 		return status != 404, nil
+	})
+}
+
+// ViewerIsOrgAdmin reports whether the authenticated token is an OWNER of org.
+//
+// It exists for one question that only a destructive caller has to ask: does a
+// team 404 mean "deleted", or "invisible to me"? GET /orgs/{org}/teams lists
+// only the teams the caller can see, and GET /orgs/{org}/teams/{slug} 404s for
+// a SECRET team the caller is not a member of — so ProbeOrg succeeding proves
+// the token can enumerate the endpoint, not that it can see every team. An org
+// member who is not an owner, a fine-grained token, or a GitHub App with a
+// narrow grant all get a 404 that is indistinguishable at the HTTP layer from
+// a team that no longer exists.
+//
+// Org owners see every team including secret ones, so this is the one cheap
+// answer that makes a 404 definitive. `audit` does not need it — it reports,
+// and a false "does not exist" finding costs a human one lookup. `lint` deletes,
+// so it does.
+//
+// A 404 here means "no membership visible", which is itself a definitive no.
+func (c *Client) ViewerIsOrgAdmin(org string) (bool, error) {
+	return c.cachedBool("viewer-admin:"+org, func() (bool, error) {
+		status, body, err := c.get("/user/memberships/orgs/"+pathSeg(org), "")
+		if err != nil {
+			return false, err
+		}
+		if status == 404 {
+			return false, nil
+		}
+		var out struct {
+			State string `json:"state"`
+			Role  string `json:"role"`
+		}
+		if json.Unmarshal(body, &out) != nil {
+			return false, &Inconclusive{Reason: "unparseable org membership response for " + org}
+		}
+		return out.State == "active" && out.Role == "admin", nil
 	})
 }
 

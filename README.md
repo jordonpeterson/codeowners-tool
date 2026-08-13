@@ -14,7 +14,8 @@ works out the lines. Then it checks its own work against every file in your repo
 
 It also reads: `snapshot` tells you who owns what today, and `audit` finds owners who've
 left the company, rules that match no files, and owners who don't actually have
-permission to approve. Neither writes anything.
+permission to approve. Neither writes anything; `lint` is the command that repairs what
+`audit` finds — see **[docs/LINTING.md](docs/LINTING.md)**.
 
 Works with github.com and GitHub Enterprise Server.
 
@@ -42,6 +43,7 @@ $ codeowners-tool version
 | Understand `add_owner` vs `set_owners` before touching anything | [Basic concepts](#basic-concepts) |
 | Follow one small end-to-end change | [A basic example](#a-basic-example) |
 | **Lint** a CODEOWNERS file, locally or in CI | [How to: lint](#how-to-lint-a-codeowners-file) |
+| **Repair** one — dead owners, split handles, stale rules | [docs/LINTING.md](docs/LINTING.md) |
 | **Write** a CODEOWNERS file for a repo that has none | [How to: write a new file](#how-to-write-a-new-codeowners-file) |
 | **Modify** a CODEOWNERS file that already exists | [How to: modify an existing file](#how-to-modify-an-existing-codeowners-file) |
 | Roll one policy out over many repos | [docs/FLEET.md](docs/FLEET.md) |
@@ -50,13 +52,14 @@ $ codeowners-tool version
 
 ## Find out what you have
 
-Every command is discoverable from the binary, and the three read-only ones are safe to
-run against anything:
+Every command is discoverable from the binary, and these are all safe to run against
+anything — none of them writes:
 
 ```sh
 codeowners-tool --help                 # every command and its flags
 codeowners-tool snapshot               # who owns each tracked file, as JSON on stdout
 codeowners-tool audit                  # what's broken or rotten in the current file
+codeowners-tool lint --dry-run …       # what a repair pass would change (writes nothing)
 codeowners-tool check --policy p.json  # is this policy well-formed? (reads no repo)
 ```
 
@@ -187,8 +190,9 @@ unchanged: 0 op(s) applied, 0 skipped; 0 line change(s), 0 path(s) change owners
 
 ## How to: lint a CODEOWNERS file
 
-`audit` is the linter. It is read-only, permanently — where a fix is expressible it prints
-an op string for a human to run, and never applies one itself.
+`audit` is the linter and it is read-only — where a fix is expressible it prints an op
+string for a human to run, and never applies one itself. `lint`
+([below](#fixing-what-it-finds-lint)) is the command that applies them.
 
 ```console
 $ codeowners-tool audit
@@ -234,6 +238,19 @@ thing this tool could do, so it can't. Pin the exit code you gate on accordingly
 The full check table (A-1 … A-12, which ones the API is needed for, which propose fixes)
 is in [docs/REFERENCE.md](docs/REFERENCE.md#audit-checks). Run a subset with
 `--checks a1,a3,a6`.
+
+### Fixing what it finds: `lint`
+
+`lint` repairs what `audit` reports: handles whitespace has broken, owners that no longer
+exist, and — with `--remove-stale-paths` — rules matching no files. Exit 4 means the file
+still needs a person, so the dry run is your CI gate.
+
+```console
+$ GITHUB_TOKEN=... codeowners-tool lint --github-repo org/repo --dry-run
+```
+
+Drop `--dry-run` to write it. **[docs/LINTING.md](docs/LINTING.md)** has the flags, the
+exit codes, and what to do about every error it can print.
 
 There's a second kind of lint that has nothing to do with a repo. If you keep your ops in
 a policy file, `check` validates the file itself:

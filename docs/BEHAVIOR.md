@@ -235,6 +235,118 @@ a bare line deletion.
 > intent inexpressible. The fleet is the unit under test — no single repo's
 > outcome may change any other repo's outcome.
 
+**`lint_guards_test.go`**
+
+> The two repository guards `audit --lint` shares with `sync`, found by
+> adversarial review of the feature after it was written and green.
+>
+> Both are the same failure in two spellings, and it is the failure the whole
+> tool exists to prevent: a run that resolves ownership against ONE tree and
+> writes the file governed by ANOTHER, then reports "applied", exit 0. Nothing
+> about it looks wrong from inside — the plan is proven, the invariants hold,
+> the write succeeds — because every one of those statements is true about the
+> wrong tree.
+>
+> SPEC S-7: CODEOWNERS is per-branch; resolution runs against a specific ref's
+> tree. What is on disk is whatever is checked out, and the two are only the
+> same tree when the clone is standing on that ref.
+> SPEC S-8: GitHub loads the CODEOWNERS at the repository ROOT. A file of the
+> same name one directory down governs nothing.
+>
+> `plan` is deliberately exempt from both: it emits an artifact and writes no
+> CODEOWNERS, so proving against another ref is exactly its job.
+
+**`lint_test.go`**
+
+> `audit --lint` is the first verb in this tool that EDITS a file on the basis
+> of what a remote API said. Everything else either reports (audit) or acts on
+> an operator's explicit intent (plan/apply/sync, where the ops are typed out by
+> a human). Lint's instructions come from GitHub: "this team 404s, so drop it".
+>
+> That inverts the risk. A `sync` that misreads its input writes a rule nobody
+> asked for and a human sees it in the diff; a `lint` that misreads the network
+> DELETES owners across every rule in the file, and the diff looks like exactly
+> the tidy-up it claims to be. The three ways that goes wrong are the three
+> things this file spends most of its lines on:
+>
+>   - An expired or under-scoped token turns every lookup into a 404-shaped
+>     answer, and a lint pass that treats those as negatives strips the whole
+>     file's owners in one commit. R-12 says the run fails closed AS A WHOLE —
+>     one undecidable lookup and nothing is written, not even the parts that
+>     were decided. TestLint_InconclusiveWritesNothing and its mixed case pin
+>     that: a definitively dead owner sitting next to an undecidable one must
+>     still leave the file byte-identical.
+>   - Stage 1 must run before stage 2. `/x/ @ org/live` is ONE owner with a
+>     space in it, not two owners that happen not to exist. An implementation
+>     that checks existence first looks up `@` and `org/live`, finds neither,
+>     and deletes a live team while reporting a successful repair.
+>     TestLint_RepairRunsBeforeExistenceChecks is the guard.
+>   - Deleting a rule whose pattern matches nothing is not obviously safe: a
+>     forward-looking rule for a directory that lands next week is indis-
+>     tinguishable from a dead one. R-11 keeps it opt-in, so
+>     TestLint_StalePathsAreOptIn asserts the DEFAULT leaves it alone.
+>
+> SPEC R-17: `--lint` reuses the exit-code contract — 0 clean or written,
+> 4 pending fixes under --dry-run (the CI gate), 5 inconclusive, 3 invalid
+> input, 2 refused, 6 rolled back after a failed post-write validation.
+>
+> SPEC R-12: no token or no --github-repo is exit 5, never a partial offline
+> lint. Owner existence is not decidable offline, and a lint that silently
+> skipped stage 2 would report "clean" for a file full of dead teams.
+>
+> SPEC S-7: `--lint` reads the WORKING-TREE bytes (they are what gets written)
+> while resolving ownership against `--branch`'s tracked tree. Plain `audit`
+> still reads the file committed at `--branch`. The two verbs deliberately
+> disagree about which bytes they are looking at, so
+> TestLint_ReadsWorkingTreeWhileAuditReadsTheCommit pins the difference rather
+> than leaving it to be discovered by whoever's uncommitted edit vanished.
+
+> ---------- stub GitHub ----------
+
+> ---------- repo and invocation ----------
+
+> ---------- JSON helpers ----------
+
+> ---------- stage 1: repair ----------
+
+> ---------- stage 2: dead owners ----------
+
+> ---------- --dry-run ----------
+
+> ---------- argument-class rejections ----------
+
+> ---------- stage 3: stale paths ----------
+
+> ---------- R-6: emptying an owner set ----------
+
+> ---------- JSON record ----------
+
+> ---------- working tree vs committed ----------
+
+> ---------- byte preservation ----------
+
+> ---------- discoverability ----------
+
+**`lint_verb_test.go`**
+
+> The `lint` verb, and the reporting contract a UX review found the flag
+> spelling was getting wrong.
+>
+> The mode outgrew being a flag on `audit`: six of audit's fourteen flags
+> changed meaning or validity on one boolean, and the exit contract had already
+> forked. `audit --lint` is kept as an alias and routed to the same code, so
+> both spellings are pinned here — a divergence between them would be invisible
+> to everyone still scripting the old one.
+>
+> SPEC R-17: exit 4 means the file still needs a PERSON. That is one rule with
+> three causes — fixes computed but not written, a line lint would not guess at,
+> and a case-only miss it deliberately spared — and the output has to make the
+> nonzero status legible next to a headline that says "applied", or a CI log
+> reads green above a red result.
+> SPEC S-6: CODEOWNERS is case-sensitive, so a rule that misses only by case is
+> a TYPO, not a dead rule. Deleting it would silently un-own the files it was
+> aimed at, which is the opposite of what --remove-stale-paths was asked to do.
+
 **`schema_test.go`**
 
 > Schema pins for the sync record (R-24).
@@ -564,6 +676,353 @@ repos with a mistyped `--out` directory that is 100 real edits reported as
 
 The record on stdout is the durable trace and goes first, unconditionally; a
 sink that cannot be written is a warning on stderr and nothing more.
+
+### `TestLintVerb_CaseOnlyMissIsSparedNotDeleted`
+
+A rule that misses ONLY because of case is spared by --remove-stale-paths.
+
+`/Src/` matches nothing when the directory is `src/`, so stage 3 saw a dead
+rule and deleted it — destroying the one piece of evidence that a typo ever
+happened, and quietly un-owning `src/` under a message reassuring the reader
+that nothing changed. It is audit's A-5, and A-5's answer is to fix the
+casing, which lint cannot do safely (the tree's real casing may not be the
+naive lowercase). So it is kept, reported, and the run exits 4.
+
+### `TestLintVerb_HeadlineNeverContradictsTheExitCode`
+
+"lint clean" must not be printed over a file lint would not repair.
+
+The headline came from the change count alone, so a file whose only problems
+were ones lint refuses to guess at printed "lint clean" — and then exited 4.
+A CI log that reads green above a red status is worse than either alone.
+It must also not claim to be clean in the general sense: lint covers three
+things and `audit` runs twelve checks, so a bare "clean" sends somebody away
+from a file `audit` would still flag.
+
+### `TestLintVerb_JSONCarriesTheGateDirectly`
+
+The JSON record answers "did this need a person?" in one field.
+
+A reviewer writing the obvious gate — `jq '.changes|length > 0'` — went green
+over a file with an unrepairable line, because the correct expression also
+has to know the literal action-kind strings. needs_human and exit_code come
+from the same function that produces the process status, so they cannot drift
+from it.
+
+### `TestLintVerb_MatchesTheAuditFlagSpelling`
+
+The `lint` verb does the same work as `audit --lint`, byte for byte.
+
+The alias exists so nothing that already scripts the flag has to change. If
+the two ever diverge, the people who did not migrate are the ones who find
+out, in production, from a diff.
+
+### `TestLintVerb_PreconditionNamesOnlyWhatIsMissing`
+
+A missing precondition names the thing that is missing.
+
+The message used to list both requirements whatever you had passed, so an
+operator holding a perfectly good token had to diff the sentence against
+their own command line to find the one word they needed.
+
+### `TestLintVerb_RejectsAuditOnlyFlags`
+
+The verb's flagset carries only the flags that apply to it.
+
+This is the whole reason it exists. `--checks` and `--cache-dir` are audit's;
+under the flag spelling they had to be rejected at runtime with a message
+each, and under the verb they cannot be typed at all. An unknown flag is a
+parse error, which is exit 3.
+
+### `TestLintVerb_WriteThatLeavesSomethingOverExplainsTheExitCode`
+
+A successful write that leaves something over says so, and says why the exit
+code is 4.
+
+`lint … && git commit` is the obvious script, and exit 4 after a real write
+breaks it while the headline says "applied". The code is deliberate, so the
+output has to reconcile the two: the fixes ARE written, and the nonzero
+status is about what is left, not about the write.
+
+### `TestLint_ChecksIsRejected`
+
+SPEC exit 3: `--checks` selects a SUBSET of the audit's checks, and lint
+covers the whole file by construction — there is no subset of a repair pass.
+
+Accepting the combination and ignoring the flag is the dangerous version: an
+operator who wrote `--checks a1 --lint` believing they had scoped the run to
+one check would get a whole-file rewrite. Refusing at the argument, before the
+repository is opened, keeps that from ever reaching a write.
+
+### `TestLint_CleanFileIsUntouched`
+
+SPEC exit 0: a file with nothing to fix is a SUCCESS, not a
+no-op (exit 1). Under the fleet contract exit 1 reads as "nothing to do here"
+and, in a `set -e` script, as failure — so a repository that is already
+correct would abort the run that was only checking on it.
+
+### `TestLint_DryRunAgainstAnotherRefIsAllowed`
+
+--dry-run against another ref stays allowed: it writes nothing, so there is
+no file to land in the wrong tree, and previewing what a rollout would do on
+another branch is a legitimate thing to want.
+
+### `TestLint_DryRunOnACleanFileIsSuccess`
+
+A clean file exits 0 under --dry-run as well, or the gate above is a gate
+that never opens.
+
+### `TestLint_DryRunReportsPendingFixesAndWritesNothing`
+
+SPEC exit 4 under --dry-run: this is the CI gate. A repository whose
+CODEOWNERS needs repair must FAIL the check, and a clean one must pass, so
+that `codeowners-tool audit --lint --dry-run` can sit in a required workflow
+exactly the way `gofmt -l` does.
+
+Exit 0 with the fixes printed would be the natural-looking mistake and would
+make the gate decorative: every repository would pass forever while the
+output nobody reads listed the problems.
+
+The byte-identity assertion is the other half. A preview that writes is not a
+preview, and the CI runner's checkout is a place where a stray write is
+especially easy not to notice.
+
+### `TestLint_EmailOwnersAreLeftAlone`
+
+SPEC R-13: an email owner cannot be looked up, so it is never dead. It stays
+exactly where it is and is reported in `unverifiable`.
+
+Without the carve-out the only consistent alternatives are both bad: treat an
+unlookupable owner as dead (and strip every mailing-list owner in the file) or
+treat it as inconclusive (and make R-12 abort every run on a file that
+contains one).
+
+### `TestLint_HelpDocumentsTheFlag`
+
+SPEC: `audit --help` documents `--lint`, and exits 0 doing it (flagParseCode:
+--help is a request, not a broken invocation).
+
+An undocumented repair flag is one nobody uses, and a lint pass nobody runs is
+a lint pass that never prevents anything.
+
+### `TestLint_InconclusiveWritesNothing`
+
+SPEC R-12, the whole point of this feature having a fail-closed contract at
+all: an owner lookup that could not be DECIDED must never be read as "does
+not exist".
+
+A 403 with X-RateLimit-Remaining: 0 is the everyday version — a scheduled
+fleet job burns the hourly budget partway through and every remaining lookup
+comes back looking like a negative. If lint acted on those it would open a PR
+stripping owners from every rule it had not yet reached, with a diff that
+looks exactly like the tidy-up it was asked for.
+
+The mixed case below is the one that separates "fails closed" from "fails
+closed for the whole run": one owner is DEFINITIVELY dead and one lookup is
+undecidable. The tempting behaviour — apply what was decided, report the rest
+— is wrong, because the operator's `git diff` then shows a real edit produced
+by a run that could not see the whole file, and there is no second run that
+tells them which parts were skipped.
+
+### `TestLint_JSONDryRunRecordSaysSo`
+
+The preview's record must say so, for the same reason sync's does: a file of
+records collected by one `>>` cannot be told apart afterwards otherwise.
+
+### `TestLint_JSONRecordShape`
+
+SPEC --format json: one object on stdout carrying enough to review the run
+without re-running it — which file was touched, whether anything was written,
+whether this was a preview, what was done and why, and the plan artifacts
+(changes / ownership_rows / diff) that make the edit auditable.
+
+`dry_run` is omitted when false rather than emitted as false for the same
+reason SyncRecord.DryRun is: a preview record and a real record must not be
+byte-identical, and the field only ever needs to be present on the one that
+requires the warning. `applied` carries the other half — a script gating on a
+lint run needs a single boolean for "did this repository change".
+
+### `TestLint_LintOnlyFlagsRequireLint`
+
+SPEC exit 3: the lint-only flags are meaningless without --lint, and
+accepting them silently is how an operator ends up believing a plain `audit`
+deleted their stale rules (it cannot write at all) or previewed something
+(`--dry-run` on a verb that never writes describes nothing).
+
+Each is asserted separately so a regression names the flag that regressed.
+
+### `TestLint_MalformedGitHubRepoIsInvalidInput`
+
+SPEC exit 3: a malformed --github-repo is decidable from the argument alone.
+Under --lint it is worse than usual to get this wrong, because the fallback
+for "no usable repo" is exit 5 — and a run that exits 5 on a TYPO looks like
+a rate limit, which operators retry rather than fix.
+
+### `TestLint_NamedBranchAtTheSameCommitStillWrites`
+
+A --branch naming a DIFFERENT ref that points at the same commit still
+writes. The guard compares resolved commits rather than ref names for the
+reason sync documents: `--branch main` on a clone standing on main is an
+entirely ordinary invocation, and rejecting it by string comparison would
+break every caller that spells HEAD out.
+
+### `TestLint_PreservesCRLF`
+
+SPEC: a CRLF file stays CRLF.
+
+Re-normalizing line endings rewrites every line in the file. On a repository
+with `* text=auto` or a Windows contributor that is a whole-file diff attached
+to a one-owner fix, and on the next checkout it comes back — so the linter
+produces a diff on every run forever, which is exactly how a required check
+gets disabled.
+
+### `TestLint_PreservesEverythingItDidNotName`
+
+SPEC: lint edits the lines it names and nothing else.
+
+A repair pass that reformats is a repair pass nobody will run twice. The
+review cost of a diff is proportional to its size, so a linter that also
+normalizes blank lines, re-wraps comments or re-indents unrelated rules turns
+a two-line safety fix into a file-wide diff that gets rubber-stamped — and
+the one line that mattered is invisible inside it.
+
+The comment lines, the blank lines, the odd spacing on the untouched rule and
+the trailing newline are all asserted by comparing the whole file.
+
+### `TestLint_ReadsWorkingTreeWhileAuditReadsTheCommit`
+
+SPEC S-7 and the write target: `--lint` reads the WORKING-TREE bytes because
+those are the bytes it will overwrite, while resolving ownership against
+`--branch`'s tracked tree. Plain `audit` reads the file COMMITTED at
+`--branch`.
+
+The difference is not an accident to be smoothed over. Linting the committed
+copy and writing the working copy would overwrite uncommitted edits with a
+repair computed from bytes the author had already changed — silent data loss
+in the one directory a developer is most likely to have unsaved work in.
+Auditing the working copy, conversely, would make `audit` report on a state
+no reviewer can see.
+
+This is exercised with a rule that matches nothing (A-4's territory), so the
+two verbs' disagreement shows up in the EXIT CODE and does not depend on how
+either one happens to parse a broken owner token.
+
+### `TestLint_RefusesRepoBelowTheRepositoryRoot`
+
+A --repo one level below the repository root must refuse.
+
+git walks UP to the enclosing repository rather than refusing, and reports
+tracked paths relative to that ROOT. So discovery pointed at repo/sub finds
+the ROOT's `.github/CODEOWNERS` in the tree, and joining that repo-relative
+path back onto `--repo sub` addresses `sub/.github/CODEOWNERS` — a DIFFERENT
+file that happens to share the name. The run then reads one file, rewrites
+another, prints the first one's path, and leaves the file GitHub actually
+loads untouched (S-8). A fleet whose clone layout carries one extra
+directory level does that to every repository and reports every one a
+success.
+
+### `TestLint_RefusesWritingWhileProvingAgainstAnotherRef`
+
+A --branch that is not what the clone has checked out must refuse to write.
+
+This is not a hypothetical ordering nicety. `--branch` selects the tree lint
+proves against, but the bytes come from — and go back to — the working tree.
+Point it at a ref where a directory does not exist and every rule governing
+that directory looks stale; with --remove-stale-paths those lines are
+deleted, and the file that lands on disk has just un-owned a directory
+sitting right there in the checkout, at exit 0 with "applied" on stdout.
+Before this guard existed the run below deleted `/y/ @org/live` while
+`y/b.go` was present on HEAD.
+
+Refusing is chosen over quietly implying --dry-run for the reason sync
+documents: a run that exits 0 having written nothing reads, to the script
+running it, as "this repo was already clean".
+
+### `TestLint_RemovesDeadOwner`
+
+SPEC stage 2 (remove-dead-owner, A-1): a deleted or renamed team on a rule is
+a review request routed to nobody. GitHub does not warn; the PR simply sits
+with one fewer reviewer than the file claims.
+
+The surviving owner is asserted explicitly: "removed the dead one" and
+"removed both" produce the same exit code and very similar output.
+
+### `TestLint_RepairRunsBeforeExistenceChecks`
+
+SPEC stage 1 before stage 2 — the ordering the package doc calls out and the
+single most damaging way to implement this feature wrong.
+
+`@ org/live` is ONE owner with whitespace in it. An implementation that runs
+existence checks over the raw tokens asks GitHub about `@` and about
+`org/live`, gets nothing back for either, and removes them — deleting a LIVE
+team from a rule while reporting a clean, successful lint. The file that
+results parses, resolves, and is wrong: the directory is now owned by
+whatever broader rule precedes it, silently.
+
+So this asserts the positive outcome (the owner is still there) AND the
+absence of the removal, because a run that deleted the owner and re-added it
+would pass the first check alone.
+
+### `TestLint_RepairsSplitOwnerHandle`
+
+SPEC stage 1 (repair-owner-spacing): `/x/ @ org/live` is a line GitHub throws
+away wholesale, so the team owns nothing and is never asked to review — and
+nothing in the UI says so. Lint rejoins the handle and writes the file.
+
+Getting this wrong is invisible by construction: the broken line looks
+plausible in review, and the only symptom is review requests that never
+arrive. That is why a repair is worth writing at all rather than merely
+reporting.
+
+### `TestLint_RequiresTokenAndGitHubRepo`
+
+SPEC R-12: owner existence is not decidable offline, so `--lint` without
+credentials is inconclusive (exit 5) and writes nothing.
+
+The alternative — quietly running stage 1 and skipping stage 2 — would report
+"lint clean" for a file full of deleted teams, which is worse than not running
+at all: it is a green check that means nothing. Exit 5 keeps a credential-less
+CI job red until someone gives it a token.
+
+### `TestLint_RootGuardAppliesUnderDryRun`
+
+The root guard holds under --dry-run too, unlike the branch guard.
+
+The two are asymmetric on purpose. --dry-run makes the branch mismatch
+harmless — nothing is written, so nothing lands in the wrong tree — but it
+does NOT make a wrong --repo harmless: the preview would be computed from
+the bytes of a file that governs nothing, so every line of it is a claim
+about the wrong document. A preview nobody can act on is worse than a
+refusal, because it looks like an answer.
+
+### `TestLint_SoleOwnerRemovalNeedsAnExplicitOnEmptyPolicy`
+
+SPEC R-6: removing a dead owner that happens to be a rule's ONLY owner is a
+different decision from removing one of several, and it has no safe default.
+
+The three outcomes are genuinely different repositories. `unowned` keeps the
+pattern with no owners, which is a real and deliberate statement ("this path
+is explicitly nobody's"). `inherit` deletes the rule so the preceding broader
+rule takes over, silently transferring the path to another team. `error`
+refuses. Guessing between them is guessing who reviews a directory, so the
+absence of the flag is invalid input (exit 3) rather than any of them.
+
+Note the exit codes are deliberately distinct: 3 for "you did not tell me"
+and 2 for "you told me to refuse". A script can retry the first with an added
+flag; the second is a decision that has already been made.
+
+### `TestLint_StalePathsAreOptIn`
+
+SPEC R-11: a rule whose pattern matches zero tracked files is REPORTED by
+default and deleted only when a human asks with --remove-stale-paths.
+
+The asymmetry is deliberate. A pattern matching nothing today is often a
+pattern for a directory that lands next week, or for one that exists on
+another branch; deleting it destroys an intent nothing else in the repository
+records. The other two stages fix things that are unambiguously broken, so
+they are on by default and this one is not — and the default must be pinned
+here, because a lint pass that quietly pruned "dead" rules across a fleet
+would be discovered only when the directory finally arrives unowned.
 
 ### `TestR19_AddOwnerTwiceByteIdentical`
 
@@ -1256,6 +1715,620 @@ SPEC S-7: untracked files are invisible — resolution must not see them.
 FindCodeownersPaths reports every CODEOWNERS file present in the tree, in
 GitHub's precedence order (.github/, root, docs/) — S-8: more than one is
 an error condition for the caller, never a merge.
+
+## internal/lint
+
+**`adversarial_test.go`**
+
+> Regressions from the adversarial review of the first `audit --lint` commit.
+>
+> Every case below is a write the tool actually performed, at exit 0, with a
+> message asserting it was safe. They are grouped here rather than folded into
+> the tables above because the shared property is not a feature — it is that
+> each one PASSED a gate. A test that only states the intended behavior would
+> have gone green against the broken code too; these state the exploit.
+>
+> SPEC R-5 (adapted): a proof that examined zero paths is not a proof. Lint
+> refuses --remove-stale-paths against an empty tree for the same reason
+> plan.Build refuses a zero-match scope.
+> SPEC R-11: staleness is judged against what exists, which is the committed
+> tree AND the checkout — not the committed tree alone.
+> SPEC R-12: a team 404 is definitive only for a token that can see every team
+> in the org. Only an org owner can.
+
+**`failclosed_test.go`**
+
+> This file is the adversarial half of the lint suite: everything lint must
+> REFUSE to do. The sibling file proves lint fixes what it should; this one
+> proves it never fixes anything on a guess, on a partial view of the file, or
+> on an answer the network could not give.
+>
+> SPEC R-12: the fail-closed contract, applied to the WHOLE RUN. One
+> inconclusive owner lookup — a rate limit, a 401 from an expired token, an
+> org this token cannot enumerate — and Build returns *lint.InconclusiveError
+> having planned nothing at all. Not the repairs, not the removals it WAS sure
+> about, not the stale-path deletions that never touched the network. A lint
+> pass that cannot see the whole file does not get to edit part of it: an
+> expired token quietly stripping owners from CODEOWNERS is the worst outcome
+> this tool has, because the file keeps working, the reviews keep merging, and
+> nobody finds out until an unreviewed change ships.
+>
+> SPEC R-13: email owners are unverifiable, never dead. No API call is made
+> for them, they are reported in Result.Unverifiable, and their presence alone
+> never makes a run inconclusive.
+>
+> The rest is the boundary of lint's one guess — RepairHandle rejoining a
+> handle that whitespace split in two. A merge rule that reached one token too
+> far would invent an owner nobody wrote, and an invented owner in CODEOWNERS
+> is a review request routed to a stranger (or to nobody). The cases below are
+> the ones where a plausible implementation invents one.
+
+> ---------- R-12: the whole run fails closed ----------
+
+> ---------- R-13: email owners ----------
+
+> ---------- RepairHandle: the boundary of lint's one guess ----------
+
+> ---------- RepairLine: a repair that changes the pattern is not a repair ----------
+
+> ---------- whole-file integrity ----------
+
+**`lint_test.go`**
+
+> Package lint_test defines the whole-file repair pass behind `audit --lint`.
+>
+> `audit` reports; lint FIXES — which makes it the one Engine B path that can
+> destroy ownership, so every guarantee here is about what it is NOT allowed to
+> do while fixing. The three stages run in a fixed order, and the order is the
+> product: a handle split by whitespace is rejoined BEFORE anybody asks the
+> network whether it exists, because `@ org/team` is one owner nobody has
+> looked up yet, not two owners that are missing.
+>
+> SPEC R-0: lint never writes. Build returns a *plan.Plan for apply.Apply,
+> which remains the system's single writer.
+> SPEC R-6: a removal that would empty a rule's owner set requires an explicit
+> --on-empty policy; there is deliberately no default.
+> SPEC R-11: deleting a rule that matches zero tracked files is OPT-IN. A dead
+> pattern may be deliberate and forward-looking, and deleting it destroys
+> intent that no other record holds.
+> SPEC R-13: email owners are unverifiable, never dead — reported in
+> Result.Unverifiable and left exactly where they are.
+> SPEC INV-5: every byte lint did not decide to change survives — comments,
+> blank lines, column alignment and CRLF line endings included.
+>
+> Stage-1-before-stage-2 is the requirement with teeth: repair first, then
+> verify the REPAIRED handle. Verifying first would ask about tokens nobody
+> wrote, get "does not exist" for both halves, and delete a live team's
+> ownership under the banner of cleanup.
+
+> ---------- stage 1: RepairHandle ----------
+
+> ---------- stage 1: RepairLine ----------
+
+> ---------- stage 2: dead owners ----------
+
+> ---------- stage 3: stale rules ----------
+
+> ---------- R-6: emptying an owner set ----------
+
+> ---------- no-op, byte preservation, reporting ----------
+
+### `TestBuild_ActionsCarryLineAndReason`
+
+SPEC R-16 (reporting): every action carries the 1-based line it happened on
+and a non-empty reason. The reason is not decoration — it is the only thing
+standing between a reviewer and approving a diff on trust, and the line
+number is what lets them find the edit in a file with a thousand rules.
+
+### `TestBuild_AfterContentResolvesToTheReportedOwnership`
+
+SPEC (the gate, restated for lint): Build proves its own output. Whatever it
+synthesized, the after-bytes are re-parsed and re-resolved over the tree, so
+a plan that survives is one whose ownership claims hold against a fresh read
+of the file — never against the author's model of it. This test re-runs that
+resolution independently, which is the same check a `verify` run makes.
+
+### `TestBuild_AlreadyCleanIsNoOpWithPopulatedResult`
+
+SPEC (exit 1, and the modal outcome): a file with nothing wrong with it must
+come back as a no-op WITH a populated Result. A scheduled fleet run over
+hundreds of repos is mostly this case, and a nil result would leave the sync
+record unable to say a repo was checked and found clean — indistinguishable
+from never having run.
+
+### `TestBuild_DeadTeamRemovedFromEveryRuleLiveTeamUntouched`
+
+SPEC A-1 (stage 2): an owner proven not to exist is removed from EVERY rule
+that lists it, and only from those rules. A deleted or renamed team is a
+review request that goes nowhere and tells nobody, which is why removal is
+worth the risk at all; a live team sharing the line is the thing that risk
+must never touch.
+
+### `TestBuild_EmailOwnersAreUnverifiableAndKept`
+
+SPEC R-13: an email owner cannot be verified against the GitHub API at all,
+so it is UNVERIFIABLE, not dead. Treating "cannot check" as "does not exist"
+is the single worst failure mode available to this package, and the rule is
+absolute: report the address, ask nobody about it, leave it on the line.
+
+### `TestBuild_IsIdempotent`
+
+Idempotency, as a property rather than an example.
+
+Three stages where stage 1 changes what stages 2 and 3 see is exactly the
+shape that fails to converge, and the README promises it does. A second run
+over the first run's output must be a no-op, and so must a third.
+
+### `TestBuild_OnEmptyPolicies`
+
+SPEC R-6: removing the last owner of a rule is a reassignment of everything
+that rule governs, so the tool refuses to pick a policy on the operator's
+behalf. The four outcomes are genuinely different products — an error, an
+explicitly unowned path, or a fallthrough to the broader rule above — and
+picking a default would mean guessing which one a reviewer meant.
+
+### `TestBuild_PreservesCRLFLineEndings`
+
+SPEC INV-5 (line endings): a CRLF file stays a CRLF file. Rewriting line
+endings touches every line at once, which turns a one-owner fix into a
+whole-file diff and, on a repo with mixed tooling, into a merge conflict for
+everybody — a cost paid by people who never asked lint to run.
+
+### `TestBuild_PreservesUntouchedBytes`
+
+SPEC INV-5: lint edits owner tokens, not files. Comments, blank lines, the
+column alignment somebody hand-maintained and the trailing spacing of rules
+it did not touch all come through byte-identical. A tool that reformats the
+file while fixing one owner produces a diff no reviewer can read, and an
+unreadable diff is how a bad edit gets approved.
+
+### `TestBuild_ProducesAPlanNotAWrite`
+
+SPEC R-0: lint computes, apply writes. The evidence is structural — Build
+takes CONTENT, not a path, and hands back a *plan.Plan carrying the pinned
+before-hash and the sizes that apply.Apply re-checks before it renames
+anything into place. Nothing in this package can reach a filesystem.
+
+### `TestBuild_RepairBeforeVerify`
+
+SPEC (ordering, the headline requirement): stage 1 runs before stage 2, over
+the whole file, so the owner stage only ever sees repaired handles. Given
+`/x/ @ org/live` where org/live EXISTS, the run must rejoin the handle and
+keep the owner. Asserting on the after-content alone is not enough — the
+verifier call log is what proves the question asked was "does org/live
+exist?" and never "does @ exist?", which is the question a stage-2-first
+implementation would ask and answer "no" to, deleting a live team.
+
+### `TestBuild_RepairedLineChangesResolvedOwnership`
+
+SPEC (why the repair matters at all): GitHub skips a line with a broken
+handle entirely, so before the repair the rule owns nothing. Fixing it is
+therefore a real ownership change, not cosmetics, and it must be REPORTED as
+one — the ownership rows are what a reviewer reads before approving, and a
+repair that silently moves a path from one team to another is exactly the
+kind of change that must not arrive unannounced.
+
+### `TestBuild_StaleRuleKeptUnlessOptedIn`
+
+SPEC R-11: a rule matching zero tracked files is REPORT-ONLY unless the
+operator asks for it. `*.tf` in a repo about to adopt Terraform is intent,
+and intent lives nowhere else in the system — so with RemoveStalePaths off,
+the file comes back untouched and the run is a no-op rather than a cleanup.
+
+### `TestBuild_StaleRuleRemovedOnOptInWithoutMovingOwnership`
+
+SPEC R-11 (opt-in half): with the explicit instruction given, the dead rule
+is deleted — and deleting it must move NOBODY. That is the whole argument for
+why stage 3 is safe: a rule matching zero tracked files can never win a
+tracked path, so an empty ownership-row set is not an accident of this
+fixture but the property that makes the deletion provable.
+
+### `TestInheritEscapeHatch_IsScopedToTheDeletedRulesPaths`
+
+The inherit escape hatch is scoped to the paths the deleted rule was winning.
+
+The gate accepts a divergence from the pure owner-set transform under
+--on-empty=inherit, because deleting a rule resurrects whatever sat behind
+it. That acceptance was keyed on a whole-run counter: one inherit-delete
+anywhere disarmed the ownership comparison for EVERY path in the file, for
+any cause. plan.synthRemove narrows its equivalent to one op's scope, and its
+comment records that the broader form "weakened the gate".
+
+### `TestLint_CRLFFileStaysCRLF`
+
+SPEC INV-5: a CRLF file stays CRLF, including on the lines lint edits.
+
+Windows-authored repositories are the common case for this, and a single
+LF-terminated line in a CRLF file is the kind of change that makes a
+whole-file diff on the next unrelated edit — or trips a repo's
+end-of-line lint and blocks CI for a reason that has nothing to do with
+ownership.
+
+### `TestLint_EmptyAndCommentOnlyFilesAreNoOps`
+
+SPEC R-12: a file with nothing in it, and a file with nothing but comments,
+are no-ops — *plan.NoOpError, exit 1, and above all no panic.
+
+A brand-new repo and a repo whose CODEOWNERS is still a template are exactly
+the inputs a fleet-wide scheduled run hits first and most often. A panic
+there takes down the run for every other repo behind it in the batch.
+
+### `TestLint_PreservesOrderCommentsAndAMissingFinalNewline`
+
+SPEC INV-5: lint never reorders lines, never touches comments or blank lines,
+and preserves a final line that has no trailing newline.
+
+Every one of those is a diff an operator has to read past to find the change
+that matters. A lint commit whose diff is thirty reflowed lines and one real
+removal will be approved without being read, which defeats the point of
+routing the fix through review at all; adding a trailing newline nobody asked
+for is the same failure in miniature.
+
+### `TestLint_UnrepairableLineIsReportedNotRewritten`
+
+SPEC R-12: a line lint cannot repair without guessing is REPORTED as
+ActionUnrepairable and left byte-for-byte in the output — never deleted,
+never rewritten — even on a run that rewrites other lines around it.
+
+Deleting it would destroy a rule somebody wrote and believes is in force, and
+destroy it in the one commit an operator is least likely to read closely: the
+automated one. The correct outcome is a file that still contains the broken
+line and a report that says so.
+
+### `TestOwners_CaseFoldedForLookupButNotRewritten`
+
+Owner identity is case-folded for the lookup, because GitHub's is.
+
+`@Org/Team` and `@org/team` are one owner to GitHub and were two to lint: two
+lookups, two cache keys, two entries in the dead set. If the API is
+case-sensitive on the slug, every capitalised team handle 404s and gets
+DELETED — the same "a finding under audit is a write under lint" asymmetry
+that justified the org-owner gate. Folding the lookup is safe either way.
+
+### `TestR12_DeadOwnerBesideAnInconclusiveOneWritesNothing`
+
+SPEC R-12: the case the rule exists for — one owner PROVEN dead sitting on
+the same line as one owner nobody could decide. The proven removal is
+correct, tempting, and must not be written: a partial edit publishes a file
+that looks reviewed and complete while silently omitting whatever the failed
+lookups would have said.
+
+The whole run is one atomic decision. Either lint saw the entire file, or it
+writes nothing and exits 5 so a human re-runs it with a working token.
+
+### `TestR12_InconclusiveAlsoBlocksTheOfflineStages`
+
+SPEC R-12: an inconclusive lookup also blocks the stages that never touched
+the network — the whitespace repair of stage 1 and the opt-in stale-path
+deletion of stage 3.
+
+It is tempting to let the offline work through, since no API answer was
+involved. But the three stages compose into one file rewrite, and shipping
+half of it means a commit that says "lint" and contains an arbitrary subset
+of the intended change — impossible to review, and impossible to tell apart
+from the complete run by looking at the result.
+
+### `TestR12_InconclusiveUserLookupStopsTheRun`
+
+SPEC R-12: a single user lookup that could not be decided — a rate limit, a
+5xx, a dropped connection — stops the ENTIRE run. Nothing is repaired,
+nothing is removed, and the error names the owner so an operator knows what
+to re-run rather than being told only that "something" failed.
+
+Without this, the tool's behavior degrades exactly when GitHub is degraded:
+a rate-limited lookup reads as "this owner does not exist" and the owner is
+dropped from a file that is otherwise fine.
+
+### `TestR12_ProbeOrgFailureDisqualifiesTeamNegatives`
+
+SPEC R-12: until ProbeOrg proves the token can enumerate an org, that org's
+404s are meaningless — "not visible to you" and "does not exist" are the same
+HTTP status. So a failed probe both fails the run closed AND disqualifies
+every team answer for that org, even a definitive-looking `false`.
+
+This is the mass-false-negative case: one unprivileged token against an org
+with fifty teams would otherwise delete fifty owners in a single commit, each
+removal individually "justified" by a 404.
+
+### `TestR12_TeamLookupErrorStopsTheRun`
+
+SPEC R-12: a team lookup that returns an error is inconclusive, not a
+negative. The Verifier contract is explicit that an error means "could not
+be decided" — so ANY error from TeamExists, not merely a *ghapi.Inconclusive,
+must fail the whole run closed.
+
+A team is the owner shape most likely to be looked up through a token with
+partial org scopes; treating its errors as "team is gone" would strip the
+owners of whole directories at the moment the API is least reliable.
+
+### `TestR13_EmailOwnerAloneIsNotInconclusive`
+
+SPEC R-13: "unverifiable" is not "unknown". A file whose only unusual owner
+is an email address is a CLEAN file — it must not exit 5, and it must not
+make lint refuse the removals it was otherwise sure about.
+
+Conflating the two would put every repo that routes ownership through a
+mailing list into permanent exit-5 limbo, and the operator response to that
+is to stop running the tool.
+
+### `TestR13_EmailOwnersAreNeverLookedUp`
+
+SPEC R-13: an email owner is never looked up. GitHub resolves it against
+commit-author addresses, not against any API this tool can query, so there
+is no endpoint that could answer and no answer that could justify removing
+it. It is reported in Result.Unverifiable and left exactly where it is.
+
+Proven from the call log, not from the output: an implementation that asks
+about `docs@example.com` and merely ignores the reply is one refactor away
+from believing it.
+
+### `TestRepairHandle_ConservesBytesAndProducesOnlyHandles`
+
+Property: a merge may only ever remove whitespace, and only from inside one
+handle. Stated over random token lists, because the two spellings we now know
+about are not the interesting ones — the next variant is.
+
+The invariant that catches every variant at once: concatenating the output
+must equal concatenating the input (nothing added, nothing lost), and every
+token the merge PRODUCED must be a valid @handle. A fusion like `@alice/docs`
+satisfies the first and is caught by the run-start rule; a dropped token
+fails the first outright.
+
+### `TestRepairHandle_EmailConcatenationIsValidButForbidden`
+
+The email exclusion deserves its own statement, because it is the one case
+where the merge rule would produce something SYNTACTICALLY VALID and still be
+wrong: `a@b.com` + `/x` concatenates into `a@b.com/x`, a well-formed email
+owner and an address no human ever typed. A repair that can invent a
+deliverable email address is not a repair, it is a forgery.
+
+### `TestRepairHandle_EmptyAndNilAreLeftAlone`
+
+SPEC R-12: an empty or nil token list is what a zero-owner rule (S-9) and a
+comment-only line hand to RepairHandle. Both must come back unchanged and
+neither may panic — lint runs over whole files nobody vetted first, and a
+panic in a repair pass takes down a run that had real fixes queued behind it.
+
+### `TestRepairHandle_LongTokenRunTerminates`
+
+SPEC R-12: a long run of tokens terminates, and terminates without inventing
+bytes. A merge rule implemented as "restart the scan after every merge" is
+easy to write and quadratic-to-nonterminating on a pathological line; a
+CODEOWNERS file is attacker-influenced input in any repo that takes pull
+requests, so a line that hangs the linter is a denial of service on every
+downstream check that waits for it.
+
+The byte-level invariant is asserted alongside: whatever the merge decides,
+concatenating the result must equal concatenating the input, because the only
+bytes a repair may delete are the whitespace BETWEEN tokens.
+
+### `TestRepairHandle_MergeBoundary`
+
+SPEC (stage 1): RepairHandle is exported and pure over tokens because it is
+a GUESS, and a guess is only tolerable when its boundaries can be stated and
+tested directly. The boundary is: the run starts at an "@" token, every join
+sits against an "@" or a "/", and the concatenation is a valid handle. This
+table is that boundary, written out — both the merges it must make and, just
+as importantly, the ones it must refuse. `@a @b` are two owners; inventing
+`@a@b` from them would silently delete two review requests and create one
+for nobody.
+
+### `TestRepairHandle_MergesTheSplitHandleItIsFor`
+
+SPEC §4: the control for the cases above — the ONE shape a repair is allowed
+to take. `@ org/team` is not two owners that do not exist; it is one owner
+nobody has looked up yet, and the join sits directly against the `@`.
+
+Without a passing control, every refusal test above would also pass against
+an implementation that simply never merges — and the split handle, which
+GitHub skips silently and which is the entire reason stage 1 exists, would go
+unfixed forever.
+
+### `TestRepairHandle_NeverInventsAnOwner`
+
+SPEC R-12/§4: RepairHandle merges tokens only where the join sits inside what
+can only be one handle. Each case below is a join a looser rule would take,
+and each one would MINT AN OWNER that appears nowhere in the file: `@a b`
+becoming `@ab`, `a@b.com /x` becoming the perfectly valid address
+`a@b.com/x`, `@a @b` becoming `@a@b`.
+
+An invented owner is worse than a broken line. A broken line is skipped by
+GitHub and shows up in `audit`; an invented owner silently routes review
+requests to a stranger, or to a handle that will exist the day somebody
+registers it.
+
+### `TestRepairLine_EscapedSpacePatternIsNotResplit`
+
+The escaped space is the case that makes the pattern token non-trivial to
+find: `/a\ b/` is ONE token containing a space, so any repair that re-splits
+the line on whitespace mangles it into `/a\` and hands the rule a different
+set of files. Proven separately from the table because it is the input that
+silently changes what a line governs rather than failing loudly.
+
+### `TestRepairLine_InvalidPatternIsNeverRepaired`
+
+SPEC R-12: a line that is invalid because of its PATTERN is never "repaired".
+Rejoining its owners would produce a line that still does not parse, and
+guessing at the pattern would change which files it governs — the one thing
+lint may never do.
+
+Both inputs below are rejected by pattern.Compile, not by the owner scan:
+CODEOWNERS has no negation, and three consecutive asterisks are not a
+pattern. The right outcome is to hand the line back untouched so it surfaces
+as ActionUnrepairable and a human decides.
+
+### `TestRepairLine_PreservesAnEscapedSpaceInThePattern`
+
+SPEC R-12/INV-5: the repaired line must re-parse with a BYTE-IDENTICAL
+pattern token. The case that catches a naive implementation is a pattern
+containing — or ending in — an ESCAPED space, which is a legal way to write a
+path with a space in it: `/trailing\ ` is a pattern, and the space after it is
+the separator.
+
+Anything that splits on whitespace, or trims it, turns `/trailing\ ` into
+`/trailing` — a pattern governing a DIFFERENT set of files. The line would
+still look repaired, the owners would still look right, and ownership of two
+directories would have silently swapped. file.SplitOwnerRegion exists so this
+scan is written once; this test is what proves lint uses it.
+
+### `TestRepairLine_RepairsOwnersAndPreservesEverythingElse`
+
+SPEC (stage 1, line level): RepairLine rewrites only the owner region. The
+pattern token, the whitespace that separates it from the owners and any
+inline comment come through untouched — a repair that shifts which files a
+line governs, or that eats the note explaining why the line exists, is a
+different edit wearing a repair's name.
+
+### `TestRepairLine_ZeroOwnerRuleIsLeftAlone`
+
+SPEC S-9: a rule with NO owners is legal and deliberate — it is how a repo
+says "this path is explicitly unowned", and it is what --on-empty=unowned
+writes. There is nothing to rejoin, so RepairLine declines.
+
+Reported, because an implementation that treats "no owner tokens" as "a
+handle got split" would start manufacturing owners out of the pattern itself,
+and would do it on lines the file's authors were most deliberate about.
+
+### `TestRepair_ABrokenStartDoesNotLicenseTheNextJoin`
+
+The fusion defect, one space to the right of where it was first fixed.
+
+The first fix guarded only the FIRST token of a merge run, so
+`/src @alice /docs @bob` was refused while `/src @ alice /docs @bob` — the
+same line with one more space — still fused into `@alice/docs`, handed
+`@bob`'s directory to an owner nobody typed, and exited 0. A second review
+reproduced it in 178 of 200,000 generated files.
+
+Brokenness is a property of the first join, not of the whole run: after
+`@`+`alice` the accumulator is `@alice`, an ordinary owner, and `@alice` +
+`/docs` is byte-for-byte the ambiguity the package already refuses. The pair
+below must therefore have the SAME outcome — that is the assertion, more than
+either case individually.
+
+### `TestRepair_LongLineDoesNotBlowUp`
+
+A long line must not take quadratic time.
+
+`joinable` accepts any token starting with "/", so a line of the shape
+`/p @ /aaa /aaa …` drove the scan to the end of the token list, doing an O(n)
+concatenation and an O(n) regex match at every step: 32k tokens took 2.8s and
+128k took 30s, all of it spent to conclude the line cannot be repaired. One
+garbage file would stall a fleet run. A handle is at most four tokens, so the
+run is capped there.
+
+### `TestRepair_NeverFusesTwoRulesWrittenOnOneLine`
+
+Two rules written on one line must never be fused into one owner.
+
+`/src @alice /docs @bob` is a line somebody meant as two rules. It is invalid
+— `/docs` is not an owner token — so lint looks at it, and the original merge
+rule accepted the join because `/docs` starts with a slash: it produced
+`/src @alice/docs @bob`, handing `@bob` every file under `/src` and quietly
+leaving `/docs` to the catch-all. Exit 0, "applied".
+
+The shape is indistinguishable from `@org /team`, a real handle with a space
+in it, which is why the fix is to repair NEITHER: a run may only begin at a
+token that is not already a valid owner. Ambiguity gets reported, not guessed.
+
+### `TestRepair_NeverFusesUsingAnOrgTheTokenCanSee`
+
+The same fusion, with an org the token really can enumerate.
+
+The first exploit was partly masked by luck: `ProbeOrg("alice")` 404s, so the
+run went inconclusive before the damage showed. With an org that exists —
+the repository's own org, the one a CI token can always see — nothing masks
+it, and the merge also manufactured a duplicate owner.
+
+### `TestRepair_RefusesAMergeThatDuplicatesAnExistingOwner`
+
+A merge that reassembles an owner the line already names is refused.
+
+`/x @ org/a @org/a` reassembles into `@org/a @org/a`: a rule naming one team
+twice. It conserves bytes and passes every other check, so only an explicit
+duplicate guard catches it. Fuzzing turned up 539 distinct inputs of this
+shape.
+
+### `TestRepair_TheFourTokenShatteringStillWorks`
+
+...and the four-token shattering still repairs, because a BARE "/" is the one
+token that cannot be anything else — not a pattern anybody writes, not an
+owner. That single exception is the whole difference between the rule that
+works and the rule that fused.
+
+### `TestS4_ResultOverMaxSizeIsRefused`
+
+SPEC S-4: a result over the size cap is refused with *plan.RefusalError, not
+written and truncated, not written and warned about.
+
+GitHub silently ignores a CODEOWNERS file over 3 MB — the whole file, with no
+error anywhere in the UI. A lint pass that pushes a file over that line
+converts "some owners are stale" into "this repository has no code owners at
+all", which is the failure this tool exists to prevent.
+
+### `TestStages_ARepairedThenDeletedLineCountsOnce`
+
+A line repaired and then deleted is ONE change, not two.
+
+len(Plan.Changes) drives "N fix(es) applied", so a single removed line
+reported as two, and the diff rendered a "+" line that never reached disk and
+was immediately deleted again.
+
+### `TestStalePaths_AnUncommittedButPresentPathIsNotStale`
+
+A directory that exists on disk but is not committed is not stale.
+
+Staleness was judged against the tree at --branch while the edit lands on the
+WORKING-TREE file. So a rule for a directory the developer just created —
+present in the checkout, not yet committed — read as "matches zero tracked
+files" and its owners were deleted, at exit 0, with the message "deleting it
+changes no ownership". The directory was sitting right there.
+
+### `TestStalePaths_RefuseWhenTheTreeIsEmpty`
+
+--remove-stale-paths against an empty tree must refuse, not empty the file.
+
+Staleness asks which rules match nothing. Over an empty tree that is every
+rule, and the gate cannot object because it iterates the tree and therefore
+iterates nothing: the run deleted every rule, reported no ownership rows, and
+exited 0. An orphan branch, an --allow-empty initial commit, or a tag on an
+empty tree all reach it.
+
+### `TestStalePaths_RefuseWithoutAWorkingTreeList`
+
+--remove-stale-paths without a working-tree list is refused.
+
+Options.WorkTree is documented as required for stage 3, and nothing enforced
+it: omitting the field silently reinstated the exact write that judging
+staleness against the committed tree alone produces. One caller away from the
+whole protection being off.
+
+### `TestStalePaths_SparingACaseTypoStillCleansThatLine`
+
+Adding a conservative cleanup flag must never make the tool do LESS.
+
+Sparing a case-typo rule skipped the dead-owner removal for that line, so the
+end-of-run gate found the dead owner still present and refused the WHOLE run
+— exit 2, nothing written, including an unrelated and perfectly safe repair
+elsewhere in the file. Every file with both a case typo and a dead owner was
+permanently un-lintable under the flag, and the message read like a tool
+crash.
+
+### `TestTeamNotFound_AnOrgOwnerTokenStillRemoves`
+
+...and an org-owner token still gets the removal, so the guard costs nothing
+on the path it is meant to protect.
+
+### `TestTeamNotFound_IsInconclusiveUnlessTheTokenOwnsTheOrg`
+
+A team 404 does not authorize a deletion unless the token could have seen the
+team.
+
+GET /orgs/{org}/teams/{slug} returns 404 for a team that was deleted AND for
+a SECRET team the caller is not a member of. ProbeOrg does not separate them:
+it proves the token can call the endpoint, not that it can see what is behind
+it. So a scheduled lint with an ordinary org-member token would strip every
+secret team from CODEOWNERS, and the diff would look exactly like the tidy-up
+it claimed to be. Only an org owner sees secret teams.
 
 ## internal/ops
 
@@ -2683,4 +3756,4 @@ DIFFERENT states; transitioning between them is a real ownership change.
 
 ---
 
-312 documented test cases across 12 packages.
+397 documented test cases across 13 packages.
