@@ -350,12 +350,10 @@ func (r *syncRun) execute() (SyncRecord, int) {
 		rec.Error = withGoverningFile(fmt.Sprintf(
 			"refusing: this run would change the owners of %d path(s), over the %d-path ceiling set by %s (R-25) — nothing was written; the op(s) behind the number: %s. Re-run with `--dry-run --out preview.json` to see which paths, raise the ceiling if the number is right, or narrow the ops if it is not",
 			rec.PathsChanged, r.maxPaths, r.maxPathsSource, blockedOpLabels(rec.Ops)), rel, creating)
-		// Same normalization the failed-write path applies, and for the same
-		// reason: no byte moved, so no op may still claim it applied or a
-		// fleet's `[.[].ops_applied] | add` overcounts the rollout by exactly
-		// the repos that refused. paths_changed is the deliberate exception —
-		// it is the entire content of this refusal, and a record that refuses
-		// on a number and then omits the number is useless.
+		// Same normalization the failed-write path applies: no byte moved, so no
+		// op may still claim it applied. paths_changed is the deliberate
+		// exception — a record that refuses on a number and omits the number is
+		// useless.
 		for i := range rec.Ops {
 			if rec.Ops[i].Status == "applied" {
 				rec.Ops[i].Status = "unchanged"
@@ -400,25 +398,18 @@ func (r *syncRun) execute() (SyncRecord, int) {
 			return rec, ExitRefused
 		}
 	}
-	// Below the ceiling and below every refusal: a warning about the comments
-	// in a file this run did not write is a warning about a change that did not
-	// happen, and its line numbers come from AfterContent, which in that case
-	// describes a file nobody will ever see.
+	// Below every refusal: warning about comments in a file this run did not
+	// write describes a change that did not happen, with line numbers from a
+	// file nobody will see.
 	rec.Warnings = append(rec.Warnings, staleCommentWarnings(p.AfterContent, r.ops, p.OpResults, rel)...)
 
 	// `created` reports what this run did, or under --dry-run what it would have
 	// done — a converged repo needs no file written, so nothing is created for it
 	// even with --create.
 	rec.Created = creating && !converged
-	// codeowners_path is emitted ONLY here, on the applied path. The fleet loop
-	// stages `git add "$(jq -r '.codeowners_path // empty')"`, so the field has
-	// to mean "there is something to stage" and nothing else. Emitting it
-	// whenever a file was merely CHOSEN broke that on the two commonest fleet
-	// outcomes: an already-correct repo named a file with no diff, and `git
-	// commit` then failed with "nothing to commit", killing a `set -e` rollout
-	// at whichever repo happened to be converged; and a `--create` run that
-	// correctly created nothing named a path that does not exist, which `git
-	// add` rejects outright.
+	// Emitted ONLY here, on the applied path: the fleet loop stages what this
+	// field names, so it has to mean "there is something to stage". See the
+	// field's own comment for what emitting it more widely cost.
 	if rec.Status == StatusApplied {
 		rec.CodeownersPath = rel
 	}
@@ -604,35 +595,17 @@ func (r *syncRun) governing(tree []string) (rel string, content []byte, creating
 // governingWarnings reports what is wrong with the FILE this run is about to
 // edit, as distinct from what is wrong with the change.
 //
-// Both conditions below exit 0 and report "applied" — they have to, because
-// neither is a reason to refuse an otherwise correct edit — and both are
-// invisible at fleet scale unless the run that touched the file says so.
-//
-//   - The file being written is not the file GitHub reads. `--file
-//     docs/CODEOWNERS` on a repo whose `.github/CODEOWNERS` governs writes
-//     rules into a file GitHub never loads (S-8): a rollout reporting 100
-//     successes that moved no ownership at all, which is the "applied, dead on
-//     arrival" outcome these verbs exist to prevent.
-//   - A second CODEOWNERS file exists. The right one was edited, but the other
-//     one stays in the repository looking authoritative to every human who
-//     opens it, and usually says something different (A-10).
-//   - The file already contains lines GitHub cannot parse. It skips them
-//     individually and honors the rest (S-3), so the change is correct and the
-//     tool leaves those lines alone (INV-5) — but some paths in that repo are
-//     owned by nobody for a reason sitting on a line this run just read, while
-//     the operator is looking at a green `applied` row.
+// Every condition below exits 0 and reports "applied" — none is a reason to
+// refuse an otherwise correct edit — and every one of them is invisible at
+// fleet scale unless the run that touched the file says so.
 func governingWarnings(tree []string, rel string, content []byte) []string {
 	var out []string
-	// Two independent facts, deliberately not an either/or. A `--file` pointed
-	// at the wrong location in a repo that ALSO has three CODEOWNERS files is
-	// the case where an operator most needs both halves: which file GitHub
-	// actually reads, and that there is more than one to clean up. Reporting
-	// only the first left the second invisible in exactly that repo.
-	// A path GitHub never loads, regardless of what the tree contains. With
-	// `--file build/OWNERSFILE --create` in a repo that has no CODEOWNERS at
-	// all, the tree check below sees nothing to compare against, so the run
-	// wrote a file governing nothing and reported `applied` with no warning —
-	// the exact "dead on arrival" outcome these verbs exist to prevent.
+	// Independent facts, deliberately not an either/or: a repo can be in both,
+	// and that is the one where the operator most needs both halves.
+	// A path GitHub never loads. The tree check below cannot catch this on a
+	// repo that has no CODEOWNERS at all — there is nothing to compare against
+	// — so `--file build/OWNERSFILE --create` wrote a file governing nothing
+	// and reported `applied`.
 	if !isCodeownersLocation(rel) {
 		out = append(out, fmt.Sprintf(
 			"this run writes %s, which is not a path GitHub loads CODEOWNERS from (S-8 reads only %s) — whatever is written there governs nothing",
@@ -670,14 +643,10 @@ func isCodeownersLocation(rel string) bool {
 	return false
 }
 
-// withGoverningFile appends the CODEOWNERS a refusal was about.
-//
-// A refused record carries no codeowners_path — nothing was written — so this
-// string is all a `needs-human` pile has to go on, and "which file does this
-// repo keep ownership in" is the first question triage asks. It is omitted when
-// the run was CREATING: naming .github/CODEOWNERS as the governing file of a
-// repo that has no CODEOWNERS at all answers a question nobody asked with a
-// path that does not exist.
+// withGoverningFile appends the CODEOWNERS a refusal was about. A refused
+// record carries no codeowners_path, so this string is all a `needs-human` pile
+// has to go on. Omitted while CREATING: the repo has no CODEOWNERS yet, and
+// naming the one that would have been written points at nothing.
 func withGoverningFile(msg, rel string, creating bool) string {
 	if creating || rel == "" {
 		return msg
@@ -688,20 +657,12 @@ func withGoverningFile(msg, rel string, creating bool) string {
 // staleCommentWarnings reports comments that still name an owner this run
 // renamed away.
 //
-// `rename_owner` substitutes owner tokens and deliberately does not touch
-// prose: editing a comment is the one thing this op could do that it cannot
-// prove, and a file whose comments the tool rewrites is a file nobody can
-// review by diff. The cost is a comment that now lies — `# @org/acq owns the
-// pipeline` above a rule owned by `@org/platform-data`, pointing the next
-// engineer at a team that no longer exists. Nothing else finds these: `audit`
-// does not read prose, and the handle is gone, so no lookup will ever trip on
-// it.
-//
-// It fires only on a run that actually renamed something, and only for the
-// file that run wrote, so a fleet rename does not warn on the repos it left
-// alone. The line number is the point — the fix is a human's, and it goes in
-// the same PR they are already reviewing (which is why this reaches
-// --summary-out as well as the record).
+// `rename_owner` deliberately does not touch prose — editing a comment is the
+// one thing this op could do that it cannot prove — so the comment is left
+// lying, pointing the next engineer at a team that no longer exists. Nothing
+// else finds these: `audit` does not read prose, and the handle is gone, so no
+// lookup will trip on it. The line number is the point, and the fix goes in the
+// PR the human is already reading, which is why this reaches --summary-out too.
 func staleCommentWarnings(after string, opList []ops.Op, results []plan.OpResult, rel string) []string {
 	var out []string
 	for i, op := range opList {
@@ -717,12 +678,10 @@ func staleCommentWarnings(after string, opList []ops.Op, results []plan.OpResult
 			continue
 		}
 		for _, line := range commentLinesNaming(after, op.Owner) {
-			// The line number is the one in the file AS THIS RUN LEAVES IT —
-			// the same file the PR diff shows — which is not necessarily where
-			// the comment sits today, because a rule inserted above it shifts
-			// it down. Saying so is the difference between a number a reviewer
-			// can act on and one that sends them to the wrong line of a
-			// --dry-run preview.
+			// The line number is the one in the file as this run leaves it, not
+			// where the comment sits today: a rule inserted above shifts it
+			// down, and the message says so rather than misdirecting whoever
+			// reads a --dry-run preview.
 			out = append(out, fmt.Sprintf(
 				"%s line %d as this run leaves it: a comment still names %q, which this run renamed to %q; comments are never rewritten (the substitution is proven only over owner tokens), so this one now points at an identifier that no longer exists",
 				rel, line, op.Owner, op.NewOwner))

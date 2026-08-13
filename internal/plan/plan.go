@@ -1217,19 +1217,14 @@ func containsStr(list []string, s string) bool { return contains(list, s) }
 // substituteOwner replaces old with new IN PLACE, keeping every other owner
 // where it was.
 //
-// The obvious implementation — drop the old identifier, append the new one —
-// gives the same owner SET, and GitHub cares about nothing else. It is still
-// wrong here. `rename_owner` is documented as pure identifier substitution,
-// the one op safe as plain text replacement, and a reorg that renames one team
-// across a fleet then produces `/pipeline/ @org/b @org/renamed` where the file
-// said `@org/renamed-from @org/b`: a diff on every line that lists the renamed
-// team alongside anyone else, in which the reviewer has to work out that the
-// owner list was only permuted. This tool's claim is minimal, provable edits;
-// a permutation nobody asked for is neither.
+// Dropping the old identifier and appending the new one gives the same owner
+// SET, which is all GitHub reads, but it permutes every line listing the
+// renamed team alongside anyone else — and `rename_owner` is documented as pure
+// identifier substitution, the one op safe to read as a text diff. A reorg
+// across a fleet is only reviewable if that holds.
 //
-// When new is ALREADY on the line, substitution would duplicate it, so the
-// earliest of the two positions is kept and the other dropped — `@a @b` under
-// rename(@a → @b) is `@b`, not `@b @b`, and not `@b` in @b's old slot.
+// When new is ALREADY on the line the earliest position is kept and the other
+// dropped: `@a @b` under rename(@a → @b) is `@b`, not `@b @b`.
 func substituteOwner(list []string, old, new string) []string {
 	if list == nil {
 		return nil

@@ -207,35 +207,23 @@ func splitArgs(s string) []string {
 	return args
 }
 
-// StaticConflict reports a pair of ops whose order changes the outcome for
-// every repository that has a file in the narrower one's scope — decided from
-// the op strings alone, with no tree.
+// StaticConflict reports a pair of ops whose order changes the outcome, decided
+// from the op strings alone with no tree.
 //
 // plan.Build already refuses order-dependent batches (R-8), but it learns the
-// overlap from the repository: it needs a concrete path that both scopes
-// match. That makes the verdict repo-shaped, so `sync` reports it as exit 2 —
-// this repo needs a human — and a fleet run files all 100 repos under
-// `needs-human` one at a time while `check`, which never opens a repo, passes
-// the policy as valid. The defect is in the policy and the operator finds out
-// a hundred times.
-//
-// The subset decidable here is the one the README already warns about:
+// overlap from a concrete path in the repository, so the verdict is repo-shaped
+// and `sync` reports it at exit 2. A fleet then files all 100 repos under
+// `needs-human` one at a time while `check`, which opens no repo, calls the
+// policy valid — for a defect that was in the policy the whole time. The
+// canonical case is the one the README already warns about:
 //
 //	set_owners(*, [@org/everyone])        # displaces
 //	add_owner(/services/api/, @org/api)   # co-owns
 //
-// Run in either order these give different owners to services/api, so the
-// batch has no defined meaning. Whether a particular repo HAS a
-// services/api/ is not the question — a policy whose meaning depends on which
-// files a repo happens to contain is exactly what exit 3 is for, and the fix
-// (run the displacing op alone, then the narrower ones) is the same edit for
-// every repo in the fleet.
-//
-// Soundness over completeness, deliberately. It reports only pairs where
-// pattern.Contains PROVES one scope covers the other, because exit 3 halts a
-// rollout and a false positive there is the expensive direction. Everything it
-// cannot prove is left to plan.Build's tree-based R-8, which still refuses per
-// repo at exit 2.
+// Sound rather than complete, deliberately: only pairs where pattern.Contains
+// PROVES one scope covers the other, because exit 3 halts a rollout and a false
+// positive there is the expensive direction. Everything else stays with
+// plan.Build's tree-based R-8, at exit 2 per repo.
 func StaticConflict(list []Op) error {
 	for i := 0; i < len(list); i++ {
 		for j := i + 1; j < len(list); j++ {
@@ -276,25 +264,15 @@ func StaticConflict(list []Op) error {
 }
 
 // conditionalScope reports whether an op's on_zero_match makes its effect
-// depend on the repository — which is what decides the exit code this whole
-// function feeds.
+// depend on the repository, which is what decides the exit code above.
 //
-// The static verdict is exit 3, and CONTRIBUTING is explicit that exit 3 is
-// reachable only from facts independent of which repo you are standing in. A
-// pair of `require` ops earns that: in a repo that HAS the narrower scope the
-// batch is order-dependent and refuses, and in a repo that does not, the
-// narrower op matches zero files and refuses under R-5 — so the policy cannot
-// converge anywhere, whatever the tree looks like, and saying so once at repo 0
-// is strictly better than saying it a hundred times.
-//
-// `skip` and `declare` break that argument, and the first cut refused them
-// anyway. `skip` says "if this repo has Terraform" — the documented fleet
-// shape — so the batch is order-dependent exactly in the repos that have the
-// scope and is a clean no-op in the rest; refusing statically turned 100 × exit
-// 0 into a halted rollout. A `declare` rule is appended at EOF where
-// last-match-wins settles the outcome, so there is no order ambiguity to refuse
-// at all. Both are left to plan.Build, which decides them against the tree and
-// reports exit 2 per repo.
+// A pair of `require` ops earns exit 3: a repo WITH the narrower scope refuses
+// on the overlap and a repo without it refuses on the zero match (R-5), so the
+// policy converges nowhere and saying so at repo 0 beats saying it a hundred
+// times. `skip` breaks that argument — "if this repo has Terraform" is a clean
+// no-op in the rest, and refusing statically turned 100 × exit 0 into a halted
+// rollout — and a `declare`d rule lands at EOF where last-match-wins settles
+// the outcome, so there is no order ambiguity at all. Both go to plan.Build.
 func conditionalScope(op Op) bool {
 	return op.OnZeroMatch == ZeroMatchSkip || op.OnZeroMatch == ZeroMatchDeclare
 }
@@ -313,13 +291,11 @@ func scopeCoverage(a, b Op) (aCoversB, bCoversA bool) {
 // commutes reports whether two ops produce the same owners in either order, on
 // every owner set they could ever meet.
 //
-// This is the closed-form version of that question. The first implementation
-// enumerated every subset of the owner names the two ops mention, which is
-// exact but costs 2^n: a `set_owners` listing 20 teams — an ordinary baseline —
-// took 7 seconds per pair, a 400-op policy took five minutes, and every one of
-// those seconds was paid again on each of a hundred repos, before any of them
-// was even opened. The rules below are the same answer in O(owners), and they
-// are exhaustive over the three transforms that reach this point (a rename is
+// Closed form, because the first cut enumerated every subset of the owner names
+// the two ops mention: exact, and 2^n. A `set_owners` listing 20 teams — an
+// ordinary baseline — took 7 seconds per pair and a 400-op policy took five
+// minutes, paid again on every repo before any was opened. Same answer in
+// O(owners), exhaustive over the three transforms that reach here (rename is
 // excluded above):
 //
 //	add(x)    ∘ add(y)     always — both orders give S ∪ {x, y}

@@ -687,18 +687,16 @@ func cmdAudit(args []string, stdout, stderr io.Writer) int {
 
 // The --fail-on thresholds, and the severity ladder they are compared on.
 //
-// A fleet that rolls out a baseline with `on_zero_match: declare` writes a rule
-// matching zero files into every repo — that is what a baseline IS — and A-4
-// then reports it forever, at severity `warning` and explicitly "report-only".
-// With exit 4 as the only verdict, the documented rollout and the documented CI
-// gate contradict each other: every repo the rollout touched goes red on its
-// next push. `--checks` is not the answer, because spelling out the other
-// eleven checks silently opts out of any check added later.
+// A baseline rolled out with `on_zero_match: declare` writes a rule matching
+// zero files into every repo — that is what a baseline IS — and A-4 reports
+// each one forever, at `warning` and explicitly report-only. With exit 4 as the
+// only verdict the documented rollout and the documented CI gate contradict
+// each other. `--checks` is not the answer: naming the other eleven silently
+// opts out of any check added later.
 //
-// The flag moves the GATE and never the report: every finding is printed under
-// every setting, so `--fail-on error` is a decision about what fails CI, not a
-// way to stop looking. Inconclusive (exit 5, R-12) is untouched by it — an API
-// that could not be reached is not a finding whose severity you can weigh.
+// The flag moves the GATE and never the report — every finding prints under
+// every setting — and leaves exit 5 alone (R-12): an API that could not be
+// reached is not a finding whose severity you can weigh.
 const (
 	auditFailOnAny = "any"
 )
