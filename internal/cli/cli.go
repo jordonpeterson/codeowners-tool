@@ -12,6 +12,12 @@
 // `sync` and `check` run under a coarser three-code contract of their own
 // (R-19: only 0, 2 and 3), because their question is "did this repo converge?"
 // rather than "what exactly happened?". See sync.go.
+//
+// `audit --lint` narrows 0 and 4 rather than redefining them: it never returns
+// 1, because a file that needs no repair is that verb's SUCCESS and exiting
+// no-op would make every healthy repo in a fleet read as a failure under
+// `set -e`; and its 4 is still "findings present", counting a fix computed but
+// not written (--dry-run) as one. See lint.go.
 package cli
 
 import (
@@ -70,6 +76,19 @@ func flagParseCode(err error) int {
 		return ExitOK
 	}
 	return ExitInvalid
+}
+
+// isFlagSet reports whether the operator actually PASSED a flag, as opposed to
+// inheriting its default. --cache-ttl has a non-zero default, so "did you ask
+// for this?" cannot be read off its value.
+func isFlagSet(fs *flag.FlagSet, name string) bool {
+	seen := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == name {
+			seen = true
+		}
+	})
+	return seen
 }
 
 // SyncRecord is one `sync` run, rendered as one JSON object (R-24). One line
@@ -142,6 +161,8 @@ func Run(argv []string, stdout, stderr io.Writer) int {
 		return cmdApply(argv[1:], stdout, stderr)
 	case "audit":
 		return cmdAudit(argv[1:], stdout, stderr)
+	case "lint":
+		return cmdLint(argv[1:], stdout, stderr)
 	case "verify":
 		return cmdVerify(argv[1:], stdout, stderr)
 	case "snapshot":
@@ -174,10 +195,25 @@ func usage(w io.Writer) {
   apply    --plan plan.json [--repo DIR]
   audit    [--checks a1,a3,a6] [--fail-on any|warning|error|never] [--format json|text]
            [--github-repo owner/name] [--token T | $GITHUB_TOKEN] [--api-url URL]
-           [--cache-dir D] [--cache-ttl DUR] [--repo DIR] [--branch REF]
+           [--cache-dir D] [--cache-ttl DUR] [--repo DIR] [--branch REF] [--file PATH]
+  lint     --github-repo owner/name [--token T | $GITHUB_TOKEN] [--api-url URL]
+           [--remove-stale-paths] [--on-empty error|inherit|unowned] [--dry-run]
+           [--repo DIR] [--branch REF] [--file PATH] [--format text|json]
   snapshot [--repo DIR] [--branch REF] [--out snap.json]
   verify   --before before.json --after after.json [--scope PATTERN ...]
   version  print the build this binary was stamped with
+
+audit REPORTS — twelve checks, and it never writes. lint REPAIRS three of the
+things audit reports: @handles that whitespace has split, owners that no longer
+exist, and (only with --remove-stale-paths) rules matching nothing. It rewrites
+the WORKING-TREE file, so it needs a token and --github-repo; one lookup it
+cannot answer and nothing is written at all. Start with --dry-run.
+
+audit --lint is the older spelling of lint and still works.
+
+Exit 4 from lint means the file still needs a person — fixes pending under
+--dry-run, or a line lint would not guess at. A successful write can also exit
+4 for that reason, so gate CI on lint --dry-run, not on the writing run.
 
 Exit codes: 0 ok · 1 no-op · 2 refused (invariant/size) · 3 invalid input
             4 audit findings · 5 inconclusive (fail-closed) · 6 rolled back
@@ -575,8 +611,50 @@ func cmdAudit(args []string, stdout, stderr io.Writer) int {
 	apiURL := fs.String("api-url", "", "API base URL (GHES), default https://api.github.com")
 	cacheDir := fs.String("cache-dir", "", "disk cache directory (R-15); empty = memory only")
 	cacheTTL := fs.Duration("cache-ttl", 24*time.Hour, "disk cache TTL")
+	lintMode := fs.Bool("lint", false, "repair the whole file instead of only reporting: rejoin @handles split by whitespace, then remove owners that do not exist (needs --token and --github-repo)")
+	removeStale := fs.Bool("remove-stale-paths", false, "with --lint, also delete rules whose pattern matches zero tracked files (R-11 keeps this off by default)")
+	onEmpty := fs.String("on-empty", "", "with --lint, R-6 policy when removing a dead owner empties a set: error|inherit|unowned (no default)")
+	dryRun := fs.Bool("dry-run", false, "with --lint, compute and report the fixes but write nothing (exit 4 if any are pending)")
 	if err := fs.Parse(args); err != nil {
 		return flagParseCode(err)
+	}
+	// The three lint-only flags are rejected rather than ignored when --lint is
+	// absent. `audit --remove-stale-paths` silently reporting instead of
+	// deleting is the shape of mistake that only surfaces months later, when
+	// somebody notices the rules they believed were cleaned up are all still
+	// there.
+	if !*lintMode {
+		var only []string
+		if *removeStale {
+			only = append(only, "--remove-stale-paths")
+		}
+		if *onEmpty != "" {
+			only = append(only, "--on-empty")
+		}
+		if *dryRun {
+			only = append(only, "--dry-run")
+		}
+		if len(only) > 0 {
+			verb := "applies"
+			if len(only) > 1 {
+				verb = "apply"
+			}
+			fmt.Fprintf(stderr, "error: %s %s only to the `lint` verb (or `audit --lint`); plain audit reports and never writes, so there is nothing for them to govern\n", strings.Join(only, " and "), verb)
+			return ExitInvalid
+		}
+	}
+	// Symmetrically, --fail-on governs the REPORT's exit code and means nothing
+	// to a repair pass, which reports what it fixed. Rejected rather than
+	// ignored, for the reason above.
+	failOnSet := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "fail-on" {
+			failOnSet = true
+		}
+	})
+	if *lintMode && failOnSet {
+		fmt.Fprintln(stderr, "error: --fail-on applies to the audit report, not to a repair pass; drop it, or drop --lint")
+		return ExitInvalid
 	}
 	gate, ok := auditFailOnLevel(*failOn)
 	if !ok {
@@ -591,6 +669,17 @@ func cmdAudit(args []string, stdout, stderr io.Writer) int {
 	authToken := *token
 	if authToken == "" {
 		authToken = os.Getenv("GITHUB_TOKEN")
+	}
+
+	if *lintMode {
+		return runLint(lintRun{
+			repo: *repo, branch: *branch, filePath: *filePath,
+			githubRepo: *githubRepo, token: authToken,
+			apiURL: *apiURL, cacheDir: *cacheDir, cacheTTL: *cacheTTL,
+			cacheTTLSet: isFlagSet(fs, "cache-ttl"),
+			format:      *format, checks: *checksFlag,
+			removeStale: *removeStale, onEmpty: *onEmpty, dryRun: *dryRun,
+		}, stdout, stderr)
 	}
 
 	tree, coPath, all, err := locate(*repo, *branch, *filePath)

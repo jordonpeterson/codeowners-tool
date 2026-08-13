@@ -1229,6 +1229,9 @@ func substituteOwner(list []string, old, new string) []string {
 	if list == nil {
 		return nil
 	}
+	// Hoisted: whether old is present cannot change while we walk the list, and
+	// testing it per element made a linear substitution quadratic.
+	hasOld := containsStr(list, old)
 	out := make([]string, 0, len(list))
 	done := false
 	for _, x := range list {
@@ -1242,7 +1245,7 @@ func substituteOwner(list []string, old, new string) []string {
 		case x == new && done:
 			// Already emitted at the renamed owner's position; this later copy
 			// would be a duplicate.
-		case x == new && containsStr(list, old):
+		case x == new && hasOld:
 			// new appears BEFORE old on this line: keep it here, and the old
 			// identifier's slot collapses when we reach it.
 			done = true

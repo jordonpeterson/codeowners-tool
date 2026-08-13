@@ -46,6 +46,34 @@ func ListTracked(repoDir, ref string) ([]string, error) {
 	return paths, nil
 }
 
+// ListWorkTree returns the repo-relative paths of every file that is on disk
+// and not ignored — tracked files plus untracked, non-ignored ones.
+//
+// It answers a different question from ListTracked, and lint needs both. A rule
+// is only stale if its pattern matches nothing at the ref AND nothing in the
+// checkout: a directory that has been created but not committed is invisible to
+// `ls-tree`, and deleting its owners because git has not seen it yet un-owns a
+// directory the developer is looking at.
+//
+// Ignored files are excluded deliberately — build output is not evidence that a
+// rule is live.
+func ListWorkTree(repoDir string) ([]string, error) {
+	out, err := gitOutput(repoDir, "ls-files", "-z", "--cached", "--others", "--exclude-standard")
+	if err != nil {
+		return nil, err
+	}
+	var paths []string
+	seen := map[string]bool{}
+	for _, p := range bytes.Split(out, []byte{0}) {
+		if len(p) == 0 || seen[string(p)] {
+			continue
+		}
+		seen[string(p)] = true
+		paths = append(paths, string(p))
+	}
+	return paths, nil
+}
+
 // ReadFileAtRef reads a file's content from a ref without touching the working
 // tree. cat-file has no separator to lose, so --end-of-options is safe here.
 func ReadFileAtRef(repoDir, ref, path string) ([]byte, error) {

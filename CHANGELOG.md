@@ -78,6 +78,93 @@ changes to which class a failure lands in are called out explicitly.
   that touched the file says so. Warnings now also render into `--summary-out`,
   under **Worth a look** — the PR is the one moment somebody is already reading
   that file and can fix it in the same commit.
+- **`lint` repairs the whole file instead of only describing it.** Three
+  stages, in this order: rejoin `@`handles that whitespace has split
+  (`/x/ @ org/team` — GitHub skips such a line entirely, so that team owns
+  nothing and nobody is told); remove users and teams that definitively do not
+  exist; and, only with `--remove-stale-paths`, delete rules matching zero
+  tracked files. The rejoin runs before any lookup on purpose: `@` and
+  `org/team` are not two owners that do not exist, they are one owner nobody has
+  asked about yet. `--dry-run` reports without writing and exits 4, which is the
+  CI gate. `audit` is unchanged and still never writes; the bytes still reach
+  disk only through `apply`, with the hash pin, the size cap, the pre-write
+  validation and the atomic rename.
+  - It is a verb, not a flag. It began as `audit --lint`, and that spelling
+    still works and routes to the same code — but six of `audit`'s fourteen
+    flags changed meaning or validity on that one boolean, three error messages
+    existed only to police the coupling, `--help` introduced `-dry-run` ("with
+    --lint, …") three entries before the flag explaining what `--lint` was, and
+    the exit contract had already forked. `lint` has ten flags and none of them
+    are mode-dependent.
+  - A rule that misses only because of CASE (`/Src/` where the directory is
+    `src/`) is spared by `--remove-stale-paths` and reported. It is audit's A-5
+    — a typo, not a dead rule — and deleting it destroys the only evidence the
+    typo happened while quietly un-owning the files it was aimed at. Lint
+    cannot correct the casing safely, because the tree's real casing may not be
+    the naive lowercase, so it hands it over.
+  - The merge rule refuses a join once the accumulator is already a valid
+    owner, with a bare `/` as the sole exception. Guarding only the run's first
+    token left the fusion defect reachable one space away — `/src @ alice /docs
+    @bob` still fused into `@alice/docs` where `/src @alice /docs @bob` was
+    correctly refused — because brokenness is a property of the FIRST join, not
+    of the whole run. Reproduced in 178 of 200,000 generated files by a second
+    review; now covered by a byte-conservation property test rather than by
+    examples of the two spellings we happen to know about.
+  - Owner handles are case-folded for the LOOKUP (never in the file). GitHub
+    treats `@Org/Team` and `@org/team` as one owner and team slugs are lowercase
+    by construction, so asking about a capitalised spelling risked a 404 that
+    means only "you typed it differently" — and under lint a 404 deletes.
+  - The JSON record carries `needs_human` and `exit_code`, both from the same
+    function that produces the process status. The obvious hand-written gate
+    (`jq '.changes|length > 0'`) went green over a file whose only problems were
+    ones lint refuses to guess at.
+  - R-12 is applied to the WHOLE RUN rather than per owner: one inconclusive
+    lookup and nothing is written at all, including the offline whitespace
+    fixes. A rate-limited run therefore leaves the file byte-identical instead
+    of dribbling out partial repairs, and `--lint` requires a token and
+    `--github-repo` rather than silently degrading to a whitespace tidy.
+  - The repair is a guess, so its boundaries are exact: the run must start at a
+    token that is VISIBLY BROKEN — beginning `@` and not already a valid owner —
+    every join must sit against an `@` or a `/`, and the concatenation must be a
+    valid handle. `@org /team` is therefore NOT repaired: on a CODEOWNERS line
+    everything after the pattern is an owner, so it is shaped exactly like
+    `@alice /docs`, somebody putting two rules on one line, and adversarial
+    review produced precisely that write — `@alice/docs` fused into one owner,
+    handing `/docs`'s owner every file under `/src`, at exit 0. Ambiguity is
+    reported, not guessed. An email owner is never repaired for the same reason:
+    `a@b.com` is already valid, and `a@b.com` + `/x` would concatenate into a
+    syntactically valid address nobody wrote. A repair is accepted only if it
+    conserves every non-whitespace byte and re-parses as a rule with a
+    byte-identical pattern.
+  - Stale-path removal stays opt-in per R-11: a pattern matching nothing may be
+    deliberate and forward-looking, and deleting it destroys that intent.
+  - It carries both of `sync`'s repository guards, which adversarial review
+    found it had been shipped without. `--branch` must be what the clone has
+    checked out, or a directory present on HEAD and absent on that ref makes its
+    rule look stale and `--remove-stale-paths` un-owns a directory sitting right
+    there in the checkout, at exit 0 (`--dry-run` lifts this one — nothing is
+    written, so nothing lands in the wrong tree). And `--repo` must be the
+    repository root, or discovery finds the root's `.github/CODEOWNERS` in a tree
+    git reports relative to that root while the join addresses a different file
+    of the same name one level down — reading one file, rewriting another,
+    printing the first one's path, and leaving the file GitHub loads untouched.
+    That guard holds under `--dry-run` too.
+  - Exit codes under `--lint` follow one rule — 0 when the file needs nothing
+    further from a human, 4 when it does (pending fixes under `--dry-run`, or a
+    line lint would not guess at). `--remove-stale-paths`, `--on-empty` and
+    `--dry-run` are rejected with exit 3 when `--lint` is absent rather than
+    ignored; `--cache-dir` is rejected *with* it, because a cached "does not
+    exist" is served without revalidation and here that answer deletes an owner
+    instead of printing a finding.
+  - **`--lint` never returns 1.** The precise taxonomy maps 1 to "no-op —
+    nothing to change", and a CODEOWNERS that needs no repair is this mode's
+    SUCCESS: under `set -e` a scheduled fleet run would otherwise read every
+    healthy repository as a failure. This is the only place the precise table's
+    1 does not apply.
+  - **Removing a team requires an org-owner token.** A secret team the caller
+    cannot see returns the same 404 as a deleted one, and enumerating the org
+    does not separate them, so anyone else's 404 is inconclusive. The check only
+    runs once a team already looks gone, so it costs nothing on the common path.
 - `SECURITY.md`, `CONTRIBUTING.md`, `CHANGELOG.md`, `.github/dependabot.yml`
   (GitHub Actions only — see the file), and a `CODEOWNERS` for this repository,
   which previously failed its own A-11 check.
@@ -104,6 +191,15 @@ changes to which class a failure lands in are called out explicitly.
   is what makes the verdict repo-independent. Ops carrying `skip` or `declare` are
   deliberately excluded — their order-dependence *is* a fact about the tree — and so are
   overlaps only a real tree reveals: both stay exit 2, per repo.
+- **`docs/LINTING.md`** carries the repair guide — the three stages, what lint
+  refuses to guess at and why, the exit-code table, every error you will
+  actually hit and what to do about each, and the warning about scheduling
+  `lint` alongside `sync`. The README keeps a 45-line entry point: what the
+  three stages are, one worked `--dry-run`, the CI gate, and a link.
+  `docs/REFERENCE.md` keeps the lookup tables, so the same material is not
+  written out three times. The README's own lint section is five lines and a
+  link: the reader who types `lint` wants the command, not an essay on what it
+  does before they have run it once.
 - **The README is a front door, not the manual.** It now carries the mental model
   (`add_owner` co-owns, `set_owners` displaces), one worked example, and three
   task guides — lint a file, write a new one, modify an existing one — plus a
