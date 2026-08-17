@@ -510,13 +510,6 @@ make build     # ./bin/codeowners-tool
 make all       # vet, test, build, docs
 ```
 
-## Non-goals
-
-GitLab/Bitbucket semantics · reordering or reformatting existing files · auto-deleting
-rules that match zero files · inventing owners · resolving conflicting batches by
-precedence · opening PRs or any git write · iterating over repos (that's your script's
-job).
-
 ## License
 
 MIT. The pattern matcher is ported from, and differentially tested against,
