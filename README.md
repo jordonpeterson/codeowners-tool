@@ -203,8 +203,9 @@ $ echo $?
 4
 ```
 
-**Exit 4 means findings, 0 means clean** — that's your CI gate. Exit 5 means the audit
-couldn't reach a conclusion (see below), which you also want to fail on.
+**Exit 4 means findings, 0 means clean** — that's your CI gate, and `--fail-on` decides
+which findings count toward it. Exit 5 means the audit couldn't reach a conclusion (see
+below), which you also want to fail on.
 
 Offline it checks the file and the git tree: dead patterns, case-only mismatches, shadowed
 and duplicate rules, syntax errors, unowned paths, more than one CODEOWNERS file, and the
@@ -230,10 +231,18 @@ token, or rate-limited. Anything inconclusive is reported as `unknown`, exits 5,
 thing this tool could do, so it can't. Pin the exit code you gate on accordingly:
 
 ```yaml
-- run: codeowners-tool audit --github-repo ${{ github.repository }}
+- run: codeowners-tool audit --github-repo ${{ github.repository }} --fail-on error
   env:
     GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 ```
+
+`--fail-on` chooses which findings exit 4; every finding is printed either way. The
+default `any` is the strictest reading and the right one for a file you maintain by hand.
+Gate on `error` once you roll a baseline out with `on_zero_match: declare` — a declared
+rule matches zero files by construction, and A-4 reports every one of them as a
+report-only warning, so the default would fail CI in each repo the rollout touched.
+`never` reports without gating. Exit 5 is unaffected: a check that could not run is not a
+finding whose severity you can weigh.
 
 The full check table (A-1 … A-12, which ones the API is needed for, which propose fixes)
 is in [docs/REFERENCE.md](docs/REFERENCE.md#audit-checks). Run a subset with
@@ -276,6 +285,16 @@ under `set -e` a good policy always lets the script continue.
 
 For a repo with no CODEOWNERS at all, `--create` writes one at `.github/CODEOWNERS`.
 It never overwrites an existing file, and it's off by default.
+
+It is permission to create a file, not an instruction to. When there is nothing to write —
+every op carrying `on_zero_match: "skip"` matched nothing — it creates no file and no
+`.github/` directory, and reports `skipped` at exit 0. Nothing here synthesizes ownership
+to make a repo look covered.
+
+A scope that matches nothing under the DEFAULT `require` is the other outcome, and not a
+quiet one: that repo is refused at exit 2 and gets no file, because a path you named and
+this repo does not have is usually a typo. Which of the two you want is what
+`on_zero_match` is for — see [docs/FLEET.md](docs/FLEET.md#your-100-repos-arent-identical).
 
 The smallest version is one op:
 

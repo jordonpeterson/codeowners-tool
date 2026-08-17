@@ -41,6 +41,43 @@ changes to which class a failure lands in are called out explicitly.
 
 ### Added
 
+- **`--max-paths-changed N` / `max_paths_changed` (R-25)**, an opt-in ceiling on how much
+  ownership one run may move. Over it, the run refuses (exit 2, per repo), writes nothing,
+  and keeps `paths_changed` in the record so the operator can see what it would have been.
+  Off by default — a default ceiling would break every legitimate `set_owners(*, …)`
+  baseline on upgrade and teach people to pass a huge number reflexively. Flag only with
+  `--op`, field only in a policy, exactly like `--on-empty`: a ceiling is a claim about
+  the intent, so it belongs in the artifact a reviewer approves.
+- **`sync` records the file it wrote**, as `codeowners_path` in the JSON record and
+  as a bullet in `--summary-out`. Ownership lives in `.github/`, the root, or
+  `docs/` depending on the repo, so a rollout that has to commit its change could
+  only `git add -A` and hope nothing else had moved in the clone. `plan` and
+  `snapshot` already named their file; the record that drives a fleet was the one
+  document that did not. The key is present **exactly when the run changed the
+  file** — or, under `--dry-run`, would have — so its presence means there is
+  something to stage and nothing else. Emitting it whenever a file was merely
+  chosen would break the documented commit recipe on the two commonest fleet
+  outcomes: an already-correct repo names a file with no diff, `git commit` fails
+  with "nothing to commit", and a `set -euo pipefail` rollout dies at a repo that
+  was fine. A refusal names its file in the `error` string instead, which is what
+  triage needs.
+- **`audit --fail-on any|warning|error|never`** decides which findings exit 4.
+  Every finding is still printed under every setting — the flag moves the gate,
+  not the report. Without it, the documented rollout and the documented CI gate
+  contradicted each other: a baseline with `on_zero_match: declare` writes rules
+  that match zero files, A-4 reports each one as a report-only `warning`, and the
+  next push to every repo the rollout touched failed CI. The default is `any`, so
+  the existing exit-4 contract is unchanged. Inconclusive stays exit 5 under every
+  setting (R-12).
+- **`sync` warns about four things that converge anyway**: a second CODEOWNERS
+  file GitHub ignores (A-10), a run writing a file that is not the one GitHub
+  reads (a `--file` at the wrong location — reported `applied` while moving no
+  ownership at all), lines GitHub cannot parse and silently skips (S-3), and a
+  comment still naming an owner a `rename_owner` renamed away. None is a reason
+  to refuse a correct edit, and none is visible at fleet scale unless the run
+  that touched the file says so. Warnings now also render into `--summary-out`,
+  under **Worth a look** — the PR is the one moment somebody is already reading
+  that file and can fix it in the same commit.
 - **`lint` repairs the whole file instead of only describing it.** Three
   stages, in this order: rejoin `@`handles that whitespace has split
   (`/x/ @ org/team` — GitHub skips such a line entirely, so that team owns
@@ -138,6 +175,22 @@ changes to which class a failure lands in are called out explicitly.
 
 ### Changed
 
+- **`rename_owner` substitutes in place.** It removed the old identifier and appended the
+  new one, which preserves the owner set — GitHub cares about nothing else — but permutes
+  every line that lists the renamed team alongside anyone else. The op is documented as
+  pure identifier substitution, the one op safe to read as a text diff, and a hundred-repo
+  reorg is only reviewable if that is true. When the new name is already on the line the
+  result collapses to one owner at the earliest position, which is a real change of
+  review requirements and shows up as such in `changes`.
+- **A non-commuting batch provable from the op strings alone is now exit 3 everywhere**,
+  when both ops carry the default `on_zero_match: require`. `set_owners(*, [@a])` next to
+  `add_owner(/services/api/, @b)` was decided against the tree, so `check` passed the
+  policy and every repo refused at exit 2 — a hundred entries in `needs-human` for a
+  defect that was in the policy the whole time. Such a policy converges nowhere (a repo
+  with the scope refuses on the overlap, one without it refuses on the zero match), which
+  is what makes the verdict repo-independent. Ops carrying `skip` or `declare` are
+  deliberately excluded — their order-dependence *is* a fact about the tree — and so are
+  overlaps only a real tree reveals: both stay exit 2, per repo.
 - **`docs/LINTING.md`** carries the repair guide — the three stages, what lint
   refuses to guess at and why, the exit-code table, every error you will
   actually hit and what to do about each, and the warning about scheduling
