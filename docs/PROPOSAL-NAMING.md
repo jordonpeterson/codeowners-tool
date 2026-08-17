@@ -7,7 +7,7 @@ Two tests, applied to every name below.
 
 **The sentence test.** A setting and its value should read as a sentence when you put them
 together. `on_zero_match: skip` does not — "on zero match, skip" skips *what*, and matches
-*what* against *what*? `if_no_files: skip` does.
+*what* against *what*? `if_no_files_match: skip` does.
 
 **No distinction may rest on one letter.** The difference between co-owning and displacing is
 the mistake this tool exists to prevent, and today it is carried by the `s` on the end of
@@ -46,15 +46,32 @@ of the implementation rather than of the question being asked.
 
 | today | proposed |
 |---|---|
-| `on_zero_match: require \| skip \| declare` | `if_no_files: error \| skip \| write_anyway` |
+| `on_zero_match: require \| skip \| declare` | `if_no_files_match: error \| skip \| write_anyway` |
 | `on_empty: error \| inherit \| unowned` | `if_no_owners_left: error \| inherit \| unowned` |
 
 `on_zero_match` fails the sentence test three times over. Its subject is missing (it is the
 *scope* that matched nothing, and what it matched against is *tracked files*), and its three
 values come from three unrelated families: `require` requires what, `skip` skips what,
-`declare` declares what? Renamed, each one completes the sentence — "if no files: error", "if
-no files: skip", "if no files: write anyway" — and `require` becomes `error`, which is what it
-actually does and which the other conditional already calls it.
+`declare` declares what? Renamed, each one completes the sentence — "if no files match: error",
+"if no files match: skip", "if no files match: write anyway" — and `require` becomes `error`,
+which is what it actually does and which the other conditional already calls it.
+
+Keeping the word `match` is not a regression to `on_zero_match`, because the defect there was
+never that word. `zero match` is a statement about a matcher returning nothing — an
+implementation event, with the count as the subject. `no files match` puts the user's own noun
+in the subject position and demotes `match` to an ordinary verb. It also aligns the setting
+with the result vocabulary, since `matched` is already what the JSON output calls this.
+
+Match against *what* is elided, but in the v2 shape the antecedent sits on the same line:
+
+```json
+"**/*.tf": { "add": ["@org/infra"], "if_no_files_match": "skip" }
+```
+
+Reading straight through — "`**/*.tf`, if no files match, skip" — there is nothing left to
+infer. Note what the name still cannot carry: these are *tracked* files, so an untracked `.tf`
+file in a working tree does not count, and `if_no_tracked_files_match` is a bridge too far.
+That belongs in the docs.
 
 `on_empty` has the same missing subject: what is empty is the rule's owner list. Its values
 survive intact, and `inherit` versus `unowned` should stay exactly as it is — the tempting
@@ -63,7 +80,9 @@ this setting exists to draw, since deleting the rule is how *both* outcomes happ
 difference is whether a broader rule then applies.
 
 The larger win is the shared prefix: two one-off names become one learnable pattern,
-`if_<condition>: <what to do>`, with `error` meaning the same thing in both.
+`if_<condition>: <what to do>`, with `error` meaning the same thing in both. The two conditions
+end up structurally identical as well — "no files match" and "no owners left" are both a
+negated user-facing noun plus its own predicate, so the pair teaches the pattern on sight.
 
 **One cost, stated plainly.** `declare` gives the docs a noun — "a declared rule", used
 throughout FLEET.md. `write_anyway` has no noun form, so those sentences become "a rule written
@@ -87,8 +106,8 @@ After, with the v2 shape:
 ```json
 { "version": 2, "if_no_owners_left": "inherit", "ownership": {
   "/docs/":              { "replace_all": ["@org/docs-team"] },
-  "/.github/workflows/": { "add": ["@org/ci"], "if_no_files": "write_anyway" },
-  "**/*.tf":             { "remove": ["@org/infra-legacy"], "if_no_files": "skip" }
+  "/.github/workflows/": { "add": ["@org/ci"], "if_no_files_match": "write_anyway" },
+  "**/*.tf":             { "remove": ["@org/infra-legacy"], "if_no_files_match": "skip" }
 }}
 ```
 
@@ -120,7 +139,7 @@ The renames ride in on `version: 2`, which is already a new dialect:
 - **`convert --policy v1.json`** (proposed in the v2 doc) emits new names, so nobody
   hand-migrates a 40-op baseline.
 - **Old names in a v2 file get the existing did-you-mean treatment**, pointed at the new
-  spelling: `unknown field "on_zero_match" (in version 2, this is "if_no_files")`. That single
+  spelling: `unknown field "on_zero_match" (in version 2, this is "if_no_files_match")`. That single
   message does most of the teaching for anyone arriving from an older policy.
 
 Nothing here is user-visible until someone opts into v2 by writing `"version": 2`.
