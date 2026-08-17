@@ -1076,3 +1076,85 @@ func TestR20_MalformedPolicyIsCaughtWithoutARepo(t *testing.T) {
 		t.Errorf("a scope no repo contains is a per-repo fact (exit 2), not a policy error: %v", err)
 	}
 }
+
+// SPEC R-25: on_unowned is accepted on add_owner, and its value reaches the op.
+//
+// The absent case is the compatibility half and matters just as much: an op
+// that does not mention the field must come out of the parser carrying the
+// zero value, because that is what preserves the behavior of every policy
+// written before the field existed.
+func TestR25_OnUnownedLegalOnAddOwner(t *testing.T) {
+	for _, val := range []string{ops.UnownedOwn, ops.UnownedSkip} {
+		t.Run(val, func(t *testing.T) {
+			p := mustParse(t, `{"version":1,"ops":[{"id":"g","op":"add_owner(*.gradle, @platform)","on_unowned":"`+val+`"}]}`)
+			if p.Ops[0].OnUnowned != val {
+				t.Errorf("OnUnowned = %q, want %q", p.Ops[0].OnUnowned, val)
+			}
+		})
+	}
+	if p := mustParse(t, `{"version":1,"ops":["add_owner(*.gradle, @platform)"]}`); p.Ops[0].OnUnowned != "" {
+		t.Errorf("OnUnowned = %q, want \"\" — an op that never mentions the field must keep the pre-R-25 behavior", p.Ops[0].OnUnowned)
+	}
+}
+
+// SPEC R-25: on_unowned is rejected on every other op kind, statically.
+//
+// Whether an op may carry the field depends only on its KIND, which is a
+// repo-independent fact — so, like R-21's legality table, the verdict is
+// reached on repo 0 rather than on whichever repo first has an unowned path in
+// scope. set_owners is the one that would otherwise be a landmine: it is not
+// merely meaningless there, it would plan a rule that recaptures the excluded
+// paths and refuse at the gate, on some repos and not others.
+func TestR25_OnUnownedRejectedOnEveryOtherOpKind(t *testing.T) {
+	for _, tc := range []struct{ name, spec, extra, mentions string }{
+		{"set_owners", `set_owners(*.gradle, [@platform])`, "", "set_owners"},
+		{"remove_owner", `remove_owner(/x/, @a)`, `"on_empty":"error",`, "remove_owner"},
+		{"rename_owner", `rename_owner(@a, @b)`, "", "rename_owner"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := mustReject(t, `{"version":1,`+tc.extra+`"ops":[{"op":"`+tc.spec+`","on_unowned":"skip"}]}`)
+			assertMentions(t, err, "on_unowned", tc.mentions)
+			assertNoGoInternals(t, err)
+		})
+	}
+}
+
+// SPEC R-25: on_unowned=skip and on_zero_match=declare are contradictory on the
+// same op, and saying both is an error rather than a silent precedence.
+//
+// skip says "never make this owner the sole owner of anything". declare writes
+// a rule for files that do not exist yet, and every file that later lands under
+// it gets this owner and nobody else — the exact outcome skip forbids, deferred
+// until a file arrives months later and nobody connects the two. Honouring
+// either one silently would apply an intent the policy does not state.
+func TestR25_SkipContradictsDeclare(t *testing.T) {
+	err := mustReject(t, `{"version":1,"ops":[{"op":"add_owner(*.gradle, @platform)","on_unowned":"skip","on_zero_match":"declare"}]}`)
+	assertMentions(t, err, "on_unowned", "on_zero_match", "declare")
+	assertNoGoInternals(t, err)
+
+	// Either alone is fine, and so is skip alongside the other zero-match values
+	// — the contradiction is with declare specifically, not with the field.
+	mustParse(t, `{"version":1,"ops":[{"op":"add_owner(*.gradle, @platform)","on_unowned":"skip","on_zero_match":"skip"}]}`)
+	mustParse(t, `{"version":1,"ops":[{"op":"add_owner(*.gradle, @platform)","on_unowned":"own","on_zero_match":"declare"}]}`)
+}
+
+// SPEC R-25: a bad on_unowned value is a hard error that shows the value and
+// lists the legal ones — never a silent fall back to the default.
+//
+// A present-but-empty string gets its own message for the same reason
+// on_zero_match does: to a reviewer it reads as a decision that was made, so
+// accepting it would run the default across a fleet under a spelling that says
+// otherwise.
+func TestR25_OnUnownedBadValuesRejected(t *testing.T) {
+	err := mustReject(t, `{"version":1,"ops":[{"op":"add_owner(*.gradle, @platform)","on_unowned":"co-own"}]}`)
+	assertMentions(t, err, "on_unowned", "co-own", ops.UnownedOwn, ops.UnownedSkip)
+	assertNoGoInternals(t, err)
+
+	err = mustReject(t, `{"version":1,"ops":[{"op":"add_owner(*.gradle, @platform)","on_unowned":""}]}`)
+	assertMentions(t, err, "on_unowned", "empty")
+	assertNoGoInternals(t, err)
+
+	err = mustReject(t, `{"version":1,"ops":[{"op":"add_owner(*.gradle, @platform)","on_unowned":true}]}`)
+	assertMentions(t, err, "on_unowned")
+	assertNoGoInternals(t, err)
+}

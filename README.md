@@ -94,6 +94,7 @@ syntax.
 | Op | What it means |
 |---|---|
 | `add_owner(scope, owner)` | Owner becomes a **co-owner**. Every pre-existing owner of every path in scope is kept. |
+| ↳ `--on-unowned skip` | …and paths in scope that **nobody** owns are left alone, instead of being given this owner alone. |
 | `set_owners(scope, [owners])` | This exact set owns every path in scope, displacing whoever owned it. `[]` is legal and deliberately un-owns the scope. |
 | `remove_owner(scope, owner)` | Owner stops owning every path in scope. If that would empty a rule, you must say what happens — see [`--on-empty`](docs/REFERENCE.md#--on-empty--on_empty-r-6). |
 | `rename_owner(old, new)` | Global identifier substitution — the only op that is safe as plain text replacement. |
@@ -363,6 +364,42 @@ The first is the common case and the one hand-editing gets wrong. The second is 
 edit stated deliberately. The third is what a reorg needs — it substitutes the identifier
 everywhere it appears, and it's the only op that is safe as plain text replacement,
 because it can't change any rule's match set.
+
+### Co-owner only, never sole owner
+
+`add_owner` does two different things depending on where it lands, and the difference is
+a permissions change. On a path a team already owns it adds a co-owner. On a path
+**nobody** owns it writes a rule making your owner the *sole* owner — so a file anyone
+could merge now needs one specific team's approval.
+
+That's the default, and often what you want. When it isn't, say so:
+
+```console
+$ codeowners-tool sync --op 'add_owner(*.gradle, @org/platform)' --on-unowned skip
+```
+
+Given `/services/api/` and `/libs/` owned, and a `build.gradle` at the root that nobody
+owns:
+
+```
+/services/api/    @org/api-team
+/services/api/**/*.gradle @org/api-team @org/platform
+/libs/            @org/libs-team
+/libs/**/*.gradle @org/libs-team @org/platform
+```
+
+No `*.gradle @org/platform` catch-all, so the root `build.gradle` still resolves to
+nobody. And because the rules are derived per owned directory rather than per file, a
+`.gradle` file added under `/services/api/` next month picks up `@org/platform` too.
+
+A path counts as unowned when nothing can approve it — no rule matched, *or* the rule
+that matched lists no owners (which is what `--on-empty unowned` writes). If **no**
+in-scope path has an owner, the op is reported `skipped` and the run exits 0, so a fleet
+rollout steps over that repo rather than stopping on it.
+
+The flag is `add_owner`-only, and it's `--op`-only — in a policy file it's a per-op
+`"on_unowned": "skip"`. Full rules in
+[docs/REFERENCE.md](docs/REFERENCE.md#--on-unowned--on_unowned-r-25).
 
 **Removing an owner** is the one that stops and asks. If it would empty a rule's owner set
 there is deliberately no default:

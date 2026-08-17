@@ -14,6 +14,7 @@
 - [The two invariants](#the-two-invariants)
 - [What `declare` costs](#what-declare-costs)
 - [`--on-empty` / `on_empty` (R-6)](#--on-empty--on_empty-r-6)
+- [`--on-unowned` / `on_unowned` (R-25)](#--on-unowned--on_unowned-r-25)
 - [Audit checks](#audit-checks)
 - [`lint`](#lint)
 - [Exit codes](#exit-codes)
@@ -25,10 +26,10 @@
 
 ```
 sync     (--op 'OP' ... | --policy FILE) [--on-empty error|inherit|unowned]
-         [--repo DIR] [--branch REF] [--file PATH] [--create] [--dry-run]
-         [--format text|json] [--out FILE] [--summary-out FILE]
+         [--on-unowned own|skip] [--repo DIR] [--branch REF] [--file PATH]
+         [--create] [--dry-run] [--format text|json] [--out FILE] [--summary-out FILE]
 check    (--op 'OP' ... | --policy FILE) [--format text|json]
-plan     --op 'OP' ... [--on-empty error|inherit|unowned]
+plan     --op 'OP' ... [--on-empty error|inherit|unowned] [--on-unowned own|skip]
          [--repo DIR] [--branch REF] [--file PATH] [--out plan.json]
 apply    --plan plan.json [--repo DIR]
 audit    [--checks a1,a3,a6] [--format json|text] [--github-repo owner/name]
@@ -75,6 +76,7 @@ else (bad enum values, ops that can't carry the `on_zero_match` you gave them, a
 | `--branch` | Ref whose tracked tree governs resolution (S-7). Default `HEAD`. |
 | `--file` | CODEOWNERS path override, repo-relative. |
 | `--on-empty` | Policy when `remove_owner` empties an owner set. Allowed only with `--op`; with `--policy`, set `on_empty` in the file instead. |
+| `--on-unowned` | `own` (default) or `skip` — what `add_owner` does with in-scope paths nobody owns (R-25). Allowed only with `--op`; with `--policy`, set `on_unowned` per op instead. |
 | `--create` | Write CODEOWNERS if the repo has none. Off by default; never overwrites an existing file. |
 | `--dry-run` | Makes no change to CODEOWNERS. `--out` and `--summary-out` still emit. |
 | `--format` | `text` (default) or `json`. Under `json`, stdout is data and stderr is logs. |
@@ -86,8 +88,8 @@ without asking, and they are *not* contained to `--repo`. Unlike `--file` and th
 discovered CODEOWNERS path, no repository can influence them.
 
 Three different things in this tool are called "policy". `--policy` is your ops file — and
-that file is always "the policy file". `--on-empty` and `on_zero_match` are per-situation
-rules the tool follows.
+that file is always "the policy file". `--on-empty`, `--on-unowned` and `on_zero_match`
+are per-situation rules the tool follows.
 
 ## Policy file fields
 
@@ -100,6 +102,7 @@ rules the tool follows.
 | `op` | per op | yes | Op string, same syntax as `--op`. |
 | `id` | per op | no | Short label used in JSON results and error messages. |
 | `on_zero_match` | per op | no | `require` (default) \| `skip` \| `declare` |
+| `on_unowned` | per op | no | `own` (default) \| `skip` — see [below](#--on-unowned--on_unowned-r-25). `add_owner` only. |
 | `note` | per op | no | Reaches the PR reviewer via `--summary-out`. |
 
 Unknown fields are a hard error — a typo'd `on_zero_mtach` that silently fell back to the
@@ -108,6 +111,9 @@ beginning with `_` (and the key `//`) are always ignored and can hold one.
 
 `on_zero_match` is rejected on `rename_owner` (its scope comes from current ownership, not
 a pattern) and `declare` is rejected on `remove_owner` (there is no rule to write).
+`on_unowned` is accepted on `add_owner` only —
+[why](#--on-unowned--on_unowned-r-25), and the rejection is a policy error on repo 0
+rather than a refusal on repo 47.
 
 Ops in one batch must **commute**. Two ops whose scopes overlap on a path and whose order
 would change the outcome are refused rather than resolved by position (R-8):
@@ -203,7 +209,7 @@ Scope is a directory, file path, or glob — same syntax as CODEOWNERS patterns.
 
 | Op | Meaning |
 |---|---|
-| `add_owner(scope, owner)` | Owner becomes a **co-owner**; every pre-existing owner of every path in scope is retained. |
+| `add_owner(scope, owner)` | Owner becomes a **co-owner**; every pre-existing owner of every path in scope is retained. Paths in scope that nobody owns are given this owner *alone* unless [`on_unowned`](#--on-unowned--on_unowned-r-25) says otherwise. |
 | `set_owners(scope, [owners])` | Exact owner set for every path in scope, displacing prior owners. `[]` is legal: it deliberately un-owns the scope. |
 | `remove_owner(scope, owner)` | Owner stops owning every path in scope. If a rule's owner set would empty, an `--on-empty` policy is **required**. |
 | `rename_owner(old, new)` | Global identifier substitution — the only op safe as pure text replacement (it can't change any rule's match set). |
@@ -255,6 +261,64 @@ the documented recommendation is `error`:
   negation)
 
 Under `inherit`/`unowned` the resulting reassignment is shown in the plan's ownership rows.
+
+## `--on-unowned` / `on_unowned` (R-25)
+
+`add_owner` does two different things depending on where it lands. On a path some
+team already owns, it adds a **co-owner**. On a path nobody owns, it writes a rule that
+makes your owner the **sole** owner — turning a file anyone could merge into one that
+now requires a specific team's approval.
+
+That second behavior is the default (`own`) and is unchanged. `skip` switches it off:
+
+- `own` (default) — an in-scope path with no owner is given this owner, alone.
+- `skip` — in-scope paths with no owner are **excluded from the op**. The owner is only
+  ever added alongside existing owners.
+
+```sh
+codeowners-tool sync --op 'add_owner(*.gradle, @org/platform)' --on-unowned skip
+```
+
+```json
+{"version": 1, "ops": [
+  {"op": "add_owner(*.gradle, @org/platform)", "on_unowned": "skip"}
+]}
+```
+
+**A path counts as unowned when nothing can approve it** — no rule matched it, *or* the
+rule that matched lists no owners. The second case is not a corner: `--on-empty unowned`
+writes exactly that, as GitHub's sanctioned substitute for `!` negation. Both are left
+alone.
+
+**`skip` is implemented as a scope narrowing**, not as a special case during synthesis.
+Excluded paths are removed from the op's scope before anything is planned, which puts
+them under **INV-2** — so the guarantee that they don't move is proven over the real tree
+by the same gate that proves everything else, not by the code implementing this flag.
+
+**When no in-scope path has an owner, the op is `skipped`** with a reason naming R-25,
+and the run exits 0. Across a fleet, "this repo owns none of its `*.gradle` files" is the
+policy working, not a repo to stop on. It is distinct from R-21's zero-match skip, which
+means the pattern matched nothing at all — that still refuses under R-5.
+
+### Where it's accepted
+
+**`add_owner` only.** Everywhere else it is a policy error (exit 3), decided before any
+repository is opened:
+
+| Op | Why not |
+|---|---|
+| `set_owners` | It writes one rule spelled with the scope pattern verbatim, and "the paths that already have an owner" is not expressible as a pattern. The rule would recapture the excluded paths, and the plan would be refused for violating INV-2 — but only on repos that *have* an unowned path in scope. Rejecting it up front turns a repo-47 surprise into a repo-0 one. |
+| `remove_owner` | Removing an owner can never give a path one. |
+| `rename_owner` | Its scope comes from current ownership, so every path it touches is owned by definition. |
+
+Two more rules, both static:
+
+- `--on-unowned` is **not allowed with `--policy`** (R-20), like `--on-empty`: the policy
+  file in git has to be the complete statement of what ran. Set `on_unowned` on the ops
+  that need it instead.
+- `on_unowned: "skip"` **contradicts `on_zero_match: "declare"`** and the pair is
+  rejected. `declare` writes a rule for files that don't exist yet, and every file that
+  later arrives under it gets this owner and no other — precisely what `skip` forbids.
 
 ## Audit checks
 

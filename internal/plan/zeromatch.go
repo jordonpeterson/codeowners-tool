@@ -558,14 +558,17 @@ func warnDuplicateDeclaredPatterns(f *file.File, scope string, pl *Plan) {
 // opResultFor is R-24's per-op record. The fleet record is the only artifact of
 // an unattended run: "which repos lack Terraform" is answerable only if every
 // op reports itself, by id, in the order the policy lists them.
-func opResultFor(op ops.Op, skipped, declared, changed bool) OpResult {
+// skipReason carries WHY, because there is now more than one way to be skipped
+// (R-21's zero match and R-25's all-unowned scope) and a fleet operator grepping
+// records has to be able to tell them apart.
+func opResultFor(op ops.Op, skipReason string, declared, changed bool) OpResult {
 	r := OpResult{ID: op.ID, Op: op.Raw}
-	if skipped {
+	if skipReason != "" {
 		// A skipped op must carry a reason — without it a fleet operator cannot
 		// tell a skipped repo from a converged one. Proven stays empty: a
 		// skipped op proves nothing.
 		r.Status = "skipped"
-		r.Reason = fmt.Sprintf("scope %q matches zero tracked files and on_zero_match=skip (R-21)", op.Scope)
+		r.Reason = skipReason
 		return r
 	}
 	r.Status = "unchanged"

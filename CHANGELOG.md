@@ -41,6 +41,24 @@ changes to which class a failure lands in are called out explicitly.
 
 ### Added
 
+- **`add_owner` can add a co-owner without ever becoming a sole owner** —
+  `--on-unowned skip`, or `"on_unowned": "skip"` per op in a policy file (R-25).
+  The default (`own`) is unchanged: an in-scope path that nobody owns is given
+  the owner, alone. That is a permissions change — a file anyone could merge now
+  needs one team's approval — and it lands on whichever paths happened to be
+  uncovered that day, which is rarely what "add `@platform` to the `*.gradle`
+  files" was meant to say. `skip` restricts the op to paths that already have an
+  owner. A path counts as unowned when nothing can approve it: no rule matched,
+  *or* the matching rule lists no owners (what `--on-empty unowned` writes).
+  When no in-scope path is owned the op is `skipped` with its own reason and the
+  run exits 0, so a fleet rollout steps over that repo instead of stopping. It is
+  implemented as a scope narrowing, so the excluded paths are covered by INV-2
+  and the existing gate proves they did not move. Accepted on `add_owner` only,
+  and rejected on the other three as a policy error rather than a per-repo
+  refusal — `set_owners` is the one that would otherwise be a landmine, since it
+  writes a rule spelled with the scope pattern itself, which would recapture the
+  excluded paths and refuse at the gate on some repos and not others.
+
 - **`lint` repairs the whole file instead of only describing it.** Three
   stages, in this order: rejoin `@`handles that whitespace has split
   (`/x/ @ org/team` — GitHub skips such a line entirely, so that team owns

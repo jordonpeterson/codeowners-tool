@@ -399,6 +399,16 @@ a bare line deletion.
 > token is never a value the flag package can render. These tests pin both halves:
 > the secret never appears in output, and $GITHUB_TOKEN is still honored.
 
+**`unowned_test.go`**
+
+> These tests cover R-25 at the command line: `--on-unowned own|skip`.
+>
+> The planner tests prove the narrowing is correct. These prove the OPERATOR
+> can reach it in one invocation, which is the entire point of the flag —
+> the alternative it replaces is a snapshot, a jq filter, a generated policy
+> and a shell script wrapped around the tool, all of which have to agree with
+> the tool about what "unowned" means in order to be safe.
+
 ### `TestCheck_BrokenPolicyExitsThree`
 
 SPEC R-22: `check` exits 3 on every member of the exit-3 class, and 3 only.
@@ -1289,6 +1299,49 @@ without anyone noticing that `sync --format json` now emits something new,
 and a spot-checking test can see neither. Every other cli test unmarshals
 into SyncRecord, using the same tags on both sides of its assertions, so
 this is the only place the wire names are compared to anything external.
+
+### `TestR25_CLIDefaultTakesOwnershipOfUnownedPaths`
+
+SPEC R-25: the same command without the flag takes ownership of those paths
+— the difference the flag exists to express, shown side by side on one repo.
+
+### `TestR25_CLIFlagRejectedOnBatchesItCannotApplyTo`
+
+SPEC R-25: the flag enforces the same legality table as a policy file, so a
+batch containing an op that cannot carry it is rejected outright rather than
+having the flag applied to some ops and silently passed over on others.
+
+### `TestR25_CLIFlagRejectedWithPolicy`
+
+SPEC R-25: `--on-unowned` is rejected with `--policy`, for R-20's reason —
+the policy file in git must be the complete statement of what ran.
+
+It has a second effect worth keeping: on_zero_match=declare is settable only
+in a policy file and this flag only without one, so the contradictory pair
+can never meet anywhere except the policy validator that rejects it.
+
+### `TestR25_CLINothingOwnedIsARecordedSkipNotAFailure`
+
+SPEC R-25: a repo where NO in-scope path is owned is a clean skip carrying
+R-25's own reason — not a refusal, and not confusable with R-21's.
+
+This is the fleet case. "This repo owns none of its *.gradle files" is the
+policy working as intended, and a rollout must step over it rather than
+stopping, while still recording enough for an operator to tell the two kinds
+of skip apart afterwards.
+
+### `TestR25_CLISkipCoOwnsOnlyWhereSomebodyAlreadyOwns`
+
+SPEC R-25 (the whole feature, in one command): `--on-unowned skip` adds the
+owner alongside existing owners and leaves paths nobody owns untouched.
+
+The file has to be committed before snapshot sees it — snapshot asks what
+GitHub would do, and GitHub only ever reads committed files.
+
+### `TestR25_CLIUnknownValueIsExit3`
+
+SPEC R-25: an unknown value is exit 3 and never a silent fall back to the
+default, which would write the opposite intent across a whole fleet.
 
 ### `TestSync_AlreadyCorrectIsZeroNotNoOp`
 
@@ -2526,6 +2579,27 @@ Contains must not blow up or report true on patterns Compile rejects.
 > (or a bad earlier batched edit) and must REFUSE — accepting it would
 > launder the error past the gate.
 
+**`unowned_test.go`**
+
+> These tests cover R-25 (on_unowned: own | skip).
+>
+> The distinction they exist to protect is the one CODEOWNERS itself hides.
+> `add_owner(*.gradle, @platform)` reads like one intent, but it does two
+> different things depending on the path it lands on: on a path some team
+> already owns it adds a CO-owner, and on a path nobody owns it writes a rule
+> that makes @platform the SOLE owner. The second is not a smaller version of
+> the first — it converts a file anyone could merge into a file that now
+> requires one specific team's approval, which is a permissions change nobody
+> asked for, applied to whichever paths happened to be uncovered that day.
+>
+> on_unowned=skip is how a caller says "co-owner only, never sole owner". It
+> is implemented as a SCOPE NARROWING rather than a case inside synthesis:
+> paths without an owner are removed from the op's scope set before anything
+> is planned, which makes INV-2 — already proven over the real tree by the
+> existing gate — the thing that guarantees they do not move. These tests
+> check the guarantee at the resolved-ownership level for that reason, not by
+> asserting on which lines got written.
+
 **`zeromatch_test.go`**
 
 > These tests cover R-21 (on_zero_match: require | skip | declare), R-22
@@ -3139,6 +3213,82 @@ accepted today. The refusal must cite R-8; a refusal citing R-5 means
 `declare` was never implemented and this test is passing for the wrong
 reason.
 
+### `TestR25_DefaultStillOwnsUnownedPaths`
+
+SPEC R-25: the DEFAULT is unchanged. With on_unowned absent, an in-scope
+path that no rule matches is given the op's owner and that owner becomes its
+sole owner — exactly what the tool did before this field existed.
+
+This is the compatibility test for the whole feature. Every op parsed from
+--op carries the zero value, so if this ever changes, the field has silently
+altered the behavior of every policy already in production.
+
+### `TestR25_SetOwnersUnderSkipIsRefusedByTheGate`
+
+SPEC R-25: this is WHY on_unowned is confined to add_owner
+(ops.CanCarryOnUnowned), and the reason is worth a test rather than only a
+comment, because "we rejected it for safety" and "it would actually break"
+are very different claims.
+
+set_owners writes one rule spelled with the scope pattern VERBATIM. Narrow
+its scope set and the pattern no longer describes it: the rule recaptures
+the paths the narrowing just excluded and hands them the new owner set. The
+gate catches that — nothing unsafe can ship — but the verdict depends on the
+repository, so the flag would work until it mattered and then refuse mid
+rollout. Both boundaries reject it up front instead; if either rejection is
+ever relaxed, this test says what the planner will do about it.
+
+### `TestR25_SkipCoOwnsWithoutManufacturingOwnership`
+
+SPEC R-25: on_unowned=skip adds the owner where somebody already owns the
+path, and leaves paths nobody owns exactly as they were.
+
+Both halves matter. Skipping the unowned path is the point of the field, but
+an implementation that skipped the whole op whenever ANY in-scope path was
+unowned would also pass a test that only checked the first half — and would
+silently do nothing on the repos that need the change most.
+
+### `TestR25_SkipDoesNotSuppressTheZeroMatchRefusal`
+
+SPEC R-25: skip narrows the scope, it does not suppress R-5. A scope that
+matches zero tracked files is still a dead rule and still refuses.
+
+The two conditions look alike from the outside — both end with an empty
+scope set — but they mean opposite things. "The pattern is wrong" is a typo
+worth failing on; "the files exist and nobody owns them" is the policy
+declining to act. Collapsing them would make on_unowned=skip a way to
+silence R-5 by accident.
+
+### `TestR25_SkipIsIdempotent`
+
+SPEC R-25: running the same skip op twice is a no-op the second time.
+
+Idempotence is what makes this safe on a schedule. An implementation that
+re-derived a narrowing rule each run would grow the file without bound on
+exactly the repos the policy is scheduled against.
+
+### `TestR25_SkipTreatsEmptyOwnerSetAsUnowned`
+
+SPEC R-25: a rule with an EMPTY owner set counts as unowned.
+
+This is the case a "did any rule match?" test gets wrong, and it is not
+hypothetical: `--on-empty unowned` (R-6) deliberately writes a pattern with
+no owners as GitHub's sanctioned substitute for `!` negation. Such a path IS
+matched, so a Matched check calls it owned, and the op then amends that rule
+and hands the owner sole approval rights over exactly the paths somebody
+went out of their way to leave unowned. The test is on the owner COUNT.
+
+### `TestR25_SkipWithNothingOwnedIsANoOpNotAnError`
+
+SPEC R-25: when every in-scope path is unowned, the op is SKIPPED with a
+reason of its own — not an error, and not confusable with R-21's skip.
+
+Across a fleet this is an ordinary answer: "this repo owns none of its
+*.gradle files" is the policy working, not the repo being broken. Failing
+here would halt a 100-repo rollout on a repo that is behaving exactly as
+intended. The reason string is load-bearing too — with two ways to be
+skipped, an operator grepping records has to be able to tell which happened.
+
 ### `TestRenameOwner_Global`
 
 rename_owner replaces the identifier everywhere; it cannot change any
@@ -3684,6 +3834,47 @@ SPEC R-21: require and skip ARE meaningful on remove_owner — "this repo must
 have had @a here" versus "clean it up where it exists". Rejecting them would
 make the only fleet-safe removal impossible.
 
+### `TestR25_OnUnownedBadValuesRejected`
+
+SPEC R-25: a bad on_unowned value is a hard error that shows the value and
+lists the legal ones — never a silent fall back to the default.
+
+A present-but-empty string gets its own message for the same reason
+on_zero_match does: to a reviewer it reads as a decision that was made, so
+accepting it would run the default across a fleet under a spelling that says
+otherwise.
+
+### `TestR25_OnUnownedLegalOnAddOwner`
+
+SPEC R-25: on_unowned is accepted on add_owner, and its value reaches the op.
+
+The absent case is the compatibility half and matters just as much: an op
+that does not mention the field must come out of the parser carrying the
+zero value, because that is what preserves the behavior of every policy
+written before the field existed.
+
+### `TestR25_OnUnownedRejectedOnEveryOtherOpKind`
+
+SPEC R-25: on_unowned is rejected on every other op kind, statically.
+
+Whether an op may carry the field depends only on its KIND, which is a
+repo-independent fact — so, like R-21's legality table, the verdict is
+reached on repo 0 rather than on whichever repo first has an unowned path in
+scope. set_owners is the one that would otherwise be a landmine: it is not
+merely meaningless there, it would plan a rule that recaptures the excluded
+paths and refuse at the gate, on some repos and not others.
+
+### `TestR25_SkipContradictsDeclare`
+
+SPEC R-25: on_unowned=skip and on_zero_match=declare are contradictory on the
+same op, and saying both is an error rather than a silent precedence.
+
+skip says "never make this owner the sole owner of anything". declare writes
+a rule for files that do not exist yet, and every file that later lands under
+it gets this owner and nobody else — the exact outcome skip forbids, deferred
+until a file arrives months later and nobody connects the two. Honouring
+either one silently would apply an intent the policy does not state.
+
 ## internal/resolve
 
 **`resolve_test.go`**
@@ -3756,4 +3947,4 @@ DIFFERENT states; transitioning between them is a real ownership change.
 
 ---
 
-397 documented test cases across 13 packages.
+414 documented test cases across 13 packages.

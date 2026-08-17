@@ -35,6 +35,11 @@ type Op struct {
 	// preserves R-5 exactly, which is why adding this changes nothing for
 	// ops built by Parse.
 	OnZeroMatch string `json:"on_zero_match,omitempty"`
+	// OnUnowned selects what happens to in-scope paths that nobody owns yet:
+	// "" (== "own") | "own" | "skip". The zero value preserves the original
+	// behavior exactly, which is why adding this changes nothing for ops
+	// built by Parse (R-25).
+	OnUnowned string `json:"on_unowned,omitempty"`
 	// ID is a policy-file label used in results and errors; "" from --op.
 	ID string `json:"id,omitempty"`
 }
@@ -45,6 +50,40 @@ const (
 	ZeroMatchSkip    = "skip"
 	ZeroMatchDeclare = "declare"
 )
+
+// Unowned-path policies (R-25). "own" is what the tool has always done: an
+// in-scope path that no rule matches is given the op's owner, which makes that
+// owner its SOLE owner. "skip" narrows the op to paths that already have an
+// owner, so the op can only ever add a co-owner and never manufacture
+// ownership where there was none.
+const (
+	UnownedOwn  = "own"
+	UnownedSkip = "skip"
+)
+
+// CanCarryOnUnowned reports whether on_unowned is meaningful on this kind of
+// op. It is add_owner and nothing else, and the reason is one table so the
+// policy file and the --on-unowned flag can never drift apart on it (R-25).
+//
+//   - add_owner narrows cleanly, because its synthesis already works rule by
+//     rule: it derives a narrowing pattern from the intersection of the scope
+//     with each rule that currently owns something in it. A path nobody owns
+//     is under none of those rules, so dropping it from the scope drops it
+//     from the synthesis too, and the pattern written is exactly as narrow as
+//     the paths it is allowed to touch.
+//   - set_owners cannot. It writes ONE rule spelled with the op's scope
+//     pattern verbatim, and "the .gradle files that somebody already owns" is
+//     a predicate about ownership, not a path shape — there is generally no
+//     pattern that expresses it. The rule would recapture the very paths the
+//     narrowing removed, INV-2 would catch it, and the op would refuse. That
+//     refusal is per-repo: it would pass on repos where every in-scope path is
+//     already owned and fail on the ones where some are not, i.e. fail exactly
+//     where the field is doing something. A flag that works until it matters
+//     is worse than one that says no up front.
+//   - remove_owner can never give a path an owner, and rename_owner draws its
+//     scope from current ownership, so for both the field asks for something
+//     that already holds.
+func CanCarryOnUnowned(k Kind) bool { return k == AddOwner }
 
 func (o Op) String() string { return o.Raw }
 

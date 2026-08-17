@@ -138,7 +138,10 @@ func Build(content []byte, tree []string, opList []ops.Op, opts Options) (*Plan,
 	// Per-op scope path sets (R-5: empty scope is invalid input, unless a
 	// policy op opts out per R-21).
 	scopeSets := make([]map[string]bool, len(opList))
-	skipped := make([]bool, len(opList))
+	// A non-empty skipReason IS the skipped flag. They were briefly two parallel
+	// slices; one array means a future branch cannot mark an op skipped without
+	// saying why, which is the half a fleet operator actually reads.
+	skipReasons := make([]string, len(opList))
 	declared := make([]bool, len(opList))
 	for i, op := range opList {
 		set := map[string]bool{}
@@ -171,7 +174,7 @@ func Build(content []byte, tree []string, opList []ops.Op, opts Options) (*Plan,
 					// REQUESTED, and an all-skip batch would fall into "no
 					// operations supplied" (exit 3) where R-21 requires a
 					// per-repo no-op (exit 1).
-					skipped[i] = true
+					skipReasons[i] = fmt.Sprintf("scope %q matches zero tracked files and on_zero_match=skip (R-21)", op.Scope)
 				case ops.ZeroMatchDeclare:
 					if op.Kind == ops.RemoveOwner {
 						return nil, &InvalidError{Msg: fmt.Sprintf(
@@ -186,6 +189,46 @@ func Build(content []byte, tree []string, opList []ops.Op, opts Options) (*Plan,
 					// exactly as before the field existed.
 					return nil, &InvalidError{Msg: fmt.Sprintf("scope %q matches zero tracked files (R-5: refusing to create a dead rule)", op.Scope)}
 				}
+			}
+		}
+
+		// R-25: on_unowned=skip narrows the op to in-scope paths that ALREADY
+		// have an owner, by removing the rest from the scope set here — before
+		// R-8, before synthesis, before the gate.
+		//
+		// Doing it as a scope narrowing rather than as a special case inside
+		// synthAdd is the whole point: a path dropped here becomes OUT of scope,
+		// so INV-2 already obliges it to resolve exactly as it did before, and
+		// the existing gate proves that over the real tree. The guarantee is
+		// therefore enforced by machinery that predates this flag, not by the
+		// code that implements it.
+		//
+		// The test is len(owners)==0, not "no rule matched": `--on-empty
+		// unowned` deliberately writes a rule with an EMPTY owner set, and a
+		// path governed by one is matched yet has nobody who can approve it —
+		// exactly the state this policy exists to avoid manufacturing an owner
+		// for. Filtering on Matched alone would sail straight past it.
+		//
+		// Guarded on the set being non-empty so a scope that matched zero files
+		// keeps the zero-match verdict it just reached above: a declared scope
+		// must stay declared, and a zero-match skip must keep its own reason.
+		if op.OnUnowned == ops.UnownedSkip && len(set) > 0 {
+			kept := 0
+			for p := range set {
+				if len(beforeOwners[p]) == 0 {
+					delete(set, p)
+				} else {
+					kept++
+				}
+			}
+			if kept == 0 {
+				// Every path in scope is unowned, so there is nothing this op is
+				// permitted to touch. A no-op, not an error: across a fleet,
+				// "this repo owns none of its *.gradle files" is an ordinary
+				// answer, and failing here would halt the rollout over a repo
+				// that is behaving exactly as the policy intends.
+				skipReasons[i] = fmt.Sprintf(
+					"scope %q matches only paths that have no owner, and on_unowned=skip (R-25)", op.Scope)
 			}
 		}
 		scopeSets[i] = set
@@ -268,7 +311,7 @@ func Build(content []byte, tree []string, opList []ops.Op, opts Options) (*Plan,
 	// planned before this existed can start refusing now.
 	for i := 0; i < len(opList); i++ {
 		for j := i + 1; j < len(opList); j++ {
-			if skipped[i] || skipped[j] || (!declared[i] && !declared[j]) {
+			if skipReasons[i] != "" || skipReasons[j] != "" || (!declared[i] && !declared[j]) {
 				continue
 			}
 			if patternsProvablyDisjoint(opList[i].Scope, opList[j].Scope) {
@@ -315,7 +358,7 @@ func Build(content []byte, tree []string, opList []ops.Op, opts Options) (*Plan,
 		mark := len(pl.Changes)
 		var err error
 		switch {
-		case skipped[i]:
+		case skipReasons[i] != "":
 			// R-21: a skipped op changes nothing and does not stop the rest of
 			// the batch from applying.
 		case declared[i]:
@@ -335,7 +378,7 @@ func Build(content []byte, tree []string, opList []ops.Op, opts Options) (*Plan,
 		if err != nil {
 			return nil, err
 		}
-		pl.OpResults = append(pl.OpResults, opResultFor(op, skipped[i], declared[i], len(pl.Changes) > mark))
+		pl.OpResults = append(pl.OpResults, opResultFor(op, skipReasons[i], declared[i], len(pl.Changes) > mark))
 	}
 
 	// ASSERT: the gate. Serialize, RE-PARSE, and re-resolve over the real

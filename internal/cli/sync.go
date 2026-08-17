@@ -99,6 +99,37 @@ func validateScopes(list []ops.Op) error {
 	return nil
 }
 
+// applyOnUnowned stamps the --on-unowned batch default onto the ops (R-25).
+//
+// It enforces the SAME legality table as a policy file — ops.CanCarryOnUnowned,
+// which is add_owner and nothing else — rather than quietly stamping the ops
+// that can take it and passing over the ops that cannot. Silently applying a
+// stated intent to some of a batch is the failure this tool exists to prevent:
+// the operator asked for one thing and got it in half the places, with nothing
+// in the output saying which half.
+//
+// Both rejections here are repo-independent, so both belong to the exit-3 class
+// and halt a fleet run at repo 0 rather than writing 100 files under an
+// argument that was never going to mean what it said.
+func applyOnUnowned(list []ops.Op, v string) error {
+	switch v {
+	case "":
+		return nil
+	case ops.UnownedOwn, ops.UnownedSkip:
+	default:
+		return fmt.Errorf("unknown --on-unowned %q; want %q (add the owner to in-scope paths nobody owns, making it their sole owner) or %q (leave those paths alone) (R-25)",
+			v, ops.UnownedOwn, ops.UnownedSkip)
+	}
+	for i, op := range list {
+		if !ops.CanCarryOnUnowned(op.Kind) {
+			return fmt.Errorf("--on-unowned applies to add_owner and %s is a %s (%s): it is a rule about whether to CREATE ownership, and only add_owner can create it in a way the planner can narrow — drop the flag, or run the add_owner ops as their own invocation (R-25)",
+				policy.OpLabel(op.ID, i), op.Kind, op.Raw)
+		}
+		list[i].OnUnowned = v
+	}
+	return nil
+}
+
 // syncRun is one repo's sync, after every repo-independent verdict has been made.
 type syncRun struct {
 	repoArg  string // D6: the --repo argument VERBATIM, never absolutized
@@ -121,6 +152,7 @@ func cmdSync(args []string, stdout, stderr io.Writer) int {
 	branch := fs.String("branch", "HEAD", "ref whose tracked tree governs resolution (S-7)")
 	filePath := fs.String("file", "", "CODEOWNERS path override (repo-relative)")
 	onEmpty := fs.String("on-empty", "", "R-6 policy when remove_owner empties a set: error|inherit|unowned (only with --op)")
+	onUnowned := fs.String("on-unowned", "", "R-25 policy for in-scope paths nobody owns: own|skip (default own; only with --op)")
 	create := fs.Bool("create", false, "write .github/CODEOWNERS when the repo has none; never overwrites (R-23)")
 	dryRun := fs.Bool("dry-run", false, "change no CODEOWNERS; --out and --summary-out still emit")
 	format := fs.String("format", "text", "text|json — governs stdout only")
@@ -143,6 +175,13 @@ func cmdSync(args []string, stdout, stderr io.Writer) int {
 	}
 	if *onEmpty != "" && len(policyPaths) > 0 {
 		return exit3(stderr, errors.New("--on-empty is not allowed with --policy: set \"on_empty\" in the policy file instead, or the artifact in git is not the policy that ran (R-20)"))
+	}
+	if *onUnowned != "" && len(policyPaths) > 0 {
+		// Same R-20 reasoning as --on-empty, and it also keeps on_unowned=skip
+		// and on_zero_match=declare from ever meeting outside the policy
+		// validator that rejects the pair: declare is settable only in a policy
+		// file, and this flag is settable only without one.
+		return exit3(stderr, errors.New("--on-unowned is not allowed with --policy: set \"on_unowned\" on the ops that need it in the policy file instead, or the artifact in git is not the policy that ran (R-20)"))
 	}
 	// A non-HEAD --branch may not write — checkBranchIsWritable enforces that
 	// for creates and edits alike, by comparing RESOLVED COMMITS rather than
@@ -167,6 +206,9 @@ func cmdSync(args []string, stdout, stderr io.Writer) int {
 		return exit3(stderr, err)
 	}
 	if err := validateScopes(opList); err != nil {
+		return exit3(stderr, err)
+	}
+	if err := applyOnUnowned(opList, *onUnowned); err != nil {
 		return exit3(stderr, err)
 	}
 

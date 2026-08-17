@@ -174,11 +174,11 @@ func usage(w io.Writer) {
 	fmt.Fprint(w, `codeowners-tool — safe, intent-level, verifiable CODEOWNERS changes
 
   sync     (--op 'OP' ... | --policy FILE) [--on-empty error|inherit|unowned]
-           [--repo DIR] [--branch REF] [--file PATH] [--create] [--dry-run]
-           [--format text|json] [--out FILE] [--summary-out FILE]
+           [--on-unowned own|skip] [--repo DIR] [--branch REF] [--file PATH]
+           [--create] [--dry-run] [--format text|json] [--out FILE] [--summary-out FILE]
   check    (--op 'OP' ... | --policy FILE) [--format text|json]
   plan     --op 'add_owner(/services/api, @org/team-1)' [--op ...] [--on-empty error|inherit|unowned]
-           [--repo DIR] [--branch REF] [--file PATH] [--out plan.json]
+           [--on-unowned own|skip] [--repo DIR] [--branch REF] [--file PATH] [--out plan.json]
   apply    --plan plan.json [--repo DIR]
   audit    [--checks a1,a3,a6] [--format json|text] [--github-repo owner/name]
            [--token T | $GITHUB_TOKEN] [--api-url URL] [--cache-dir D] [--cache-ttl DUR]
@@ -409,6 +409,7 @@ func cmdPlan(args []string, stdout, stderr io.Writer) int {
 	branch := fs.String("branch", "HEAD", "ref whose tracked tree governs resolution (S-7)")
 	filePath := fs.String("file", "", "CODEOWNERS path override (repo-relative)")
 	onEmpty := fs.String("on-empty", "", "policy when remove_owner empties a set: error|inherit|unowned (R-6, no default)")
+	onUnowned := fs.String("on-unowned", "", "policy for in-scope paths nobody owns: own|skip (R-25, default own)")
 	// Same class as sync's --out; see the note there.
 	out := fs.String("out", "", "write plan JSON here (default stdout); trusted operator path — overwritten, and not contained to --repo")
 	maxSize := fs.Int("max-size", 3_000_000, "hard size cap in bytes (S-4)")
@@ -422,6 +423,9 @@ func cmdPlan(args []string, stdout, stderr io.Writer) int {
 	}
 	parsed, err := ops.ParseAll(opSpecs)
 	if err != nil {
+		return errExit(&plan.InvalidError{Msg: err.Error()}, stderr)
+	}
+	if err := applyOnUnowned(parsed, *onUnowned); err != nil {
 		return errExit(&plan.InvalidError{Msg: err.Error()}, stderr)
 	}
 	tree, coPath, _, err := locate(*repo, *branch, *filePath)
