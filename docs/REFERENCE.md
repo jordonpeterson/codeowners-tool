@@ -74,7 +74,7 @@ else (bad enum values, ops that can't carry the `on_zero_match` you gave them, a
 | `--repo` | Local git repository. Default `.`. |
 | `--branch` | Ref whose tracked tree governs resolution (S-7). Default `HEAD`. |
 | `--file` | CODEOWNERS path override, repo-relative. |
-| `--on-empty` | Policy when `remove_owner` empties an owner set. Allowed only with `--op`; with `--policy`, set `on_empty` in the file instead. |
+| `--on-empty` | Policy when `remove_owner` empties an owner set. Allowed only with `--op`; with `--policy`, set `on_empty` in the file instead. An unknown value is exit 3, checked before any repository is opened. |
 | `--create` | Permission to write a CODEOWNERS if the repo has none — not an instruction to. Off by default, never overwrites, and a run with nothing to write creates nothing (no file, no `.github/`). With `--file`, the file is created at that path instead of `.github/CODEOWNERS`. |
 | `--max-paths-changed` | R-25 ceiling: refuse (exit 2) if the run would change the owners of more than N paths. Off by default. Allowed only with `--op`; with `--policy`, set `max_paths_changed` in the file. |
 | `--dry-run` | Makes no change to CODEOWNERS. `--out` and `--summary-out` still emit. |
@@ -511,6 +511,13 @@ Unlike the `sync` record, `actions`, `changes` and `ownership_rows` are always p
 `sync` uses a coarse three-code contract — its question is "did this repo converge?" — and
 returns exactly `0`, `2`, or `3`, never anything else. Every other command uses the
 precise taxonomy below.
+
+An exit-3 verdict is reached **before the repository is opened**, so that run emits
+no JSON record and writes neither `--out` nor `--summary-out`. This is deliberate — a
+row for a repo that was never read would be a phantom entry in the aggregation — but
+it means a fleet that aggregates `records/*.json` will not see those repos at all.
+The exit code is the signal, and `sync` says so on stderr when either sink was asked
+for.
 
 **The two tables do not use the same numbers for the same things**, so don't read across.
 `sync` maps the precise codes onto its own by asking a single question — *is this about

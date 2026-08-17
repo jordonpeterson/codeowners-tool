@@ -123,11 +123,13 @@ while read -r repo; do                         # repos.txt: one "org/name" per l
   codeowners-tool sync --repo "work/$repo" --policy policy.json --create \
     --format json --summary-out "bodies/${repo//\//__}.md" >> results.jsonl || code=$?
   case $code in
-    0) ;;                                      # converged
+    # done.txt is the resume guard, so ONLY a converged repo goes in it. Marking
+    # an exit-2 repo done as well retires it permanently: you fix the repo, re-run,
+    # and the loop skips it forever — a rollout you believe is complete and isn't.
+    0) echo "$repo" >> done.txt ;;             # converged
     2) echo "$repo" >> needs-human ;;          # this repo, not the policy
     *) exit "$code" ;;                         # policy broken — stop
   esac
-  echo "$repo" >> done.txt
 done < repos.txt
 
 jq -s 'group_by(.status)|map({status:.[0].status, n:length})' results.jsonl
@@ -266,6 +268,9 @@ size — give that one no ceiling, deliberately.
 Two piles.
 
 **`clone-failed`** is infrastructure — re-run the loop against just that list.
+
+Re-run the whole loop after fixing anything in `needs-human`: converged repos are
+skipped by the resume guard, and the repos you fixed are picked up.
 
 **`needs-human`** is the interesting one, and it holds two different jobs. Split it on
 `.status` before you start triaging:

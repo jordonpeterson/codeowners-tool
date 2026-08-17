@@ -256,8 +256,14 @@ func StaticConflict(list []Op) error {
 				return fmt.Errorf("ops %q and %q do not commute, and their scopes %q and %q govern exactly the same paths — so the batch is order-dependent on every repository (R-8); state one intent per scope, or run them as separate invocations",
 					a.Raw, b.Raw, a.Scope, b.Scope)
 			}
-			return fmt.Errorf("ops %q and %q do not commute, and %q provably governs every path %q does — so the batch is order-dependent on every repository that has one (R-8); run %q on its own first and the narrower op(s) in a second run, which is two exit-0 invocations",
-				a.Raw, b.Raw, outer.Scope, inner.Scope, outer.Raw)
+			// The remedy names the risk it carries. Telling an operator to run
+			// the broader op alone is correct, and for a `set_owners` that run
+			// REPLACES the owners of everything in scope — one reported doing
+			// exactly that on a security repo and stripping two teams, having
+			// read the old closing clause ("which is two exit-0 invocations")
+			// as reassurance. An exit code is not a safety property.
+			return fmt.Errorf("ops %q and %q do not commute, and %q provably governs every path %q does — so the batch is order-dependent on every repository that has one (R-8); run %q on its own first and the narrower op(s) in a second run%s",
+				a.Raw, b.Raw, outer.Scope, inner.Scope, outer.Raw, displacementWarning(outer))
 		}
 	}
 	return nil
@@ -275,6 +281,15 @@ func StaticConflict(list []Op) error {
 // the outcome, so there is no order ambiguity at all. Both go to plan.Build.
 func conditionalScope(op Op) bool {
 	return op.OnZeroMatch == ZeroMatchSkip || op.OnZeroMatch == ZeroMatchDeclare
+}
+
+// displacementWarning is appended to the R-8 remedy when running the broader op
+// alone would displace owners rather than add to them.
+func displacementWarning(outer Op) string {
+	if outer.Kind != SetOwners {
+		return ""
+	}
+	return fmt.Sprintf(" — but preview that first run with --dry-run or `plan --out`: %q REPLACES the owners of every path in scope, so anyone owning those paths today and not listed in it loses them", outer.Raw)
 }
 
 // scopeCoverage reports, for each direction, whether one op's scope provably

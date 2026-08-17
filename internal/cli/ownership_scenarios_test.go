@@ -1096,30 +1096,54 @@ func TestScenario_FileOutsideTheThreeLocationsIsWarned(t *testing.T) {
 	}
 }
 
-// SPEC R-24: the stale-comment warning fires only on a run that actually
-// renamed something, and never on a run that wrote nothing.
+// SPEC R-24: the stale-comment warning follows the OLD HANDLE, not the edit —
+// it fires wherever a comment still names a renamed owner, including in the
+// repos where the rename itself had nothing to do.
 //
-// The first cut scanned for the old identifier regardless of whether the
-// rename matched anything, so a fleet-wide rename warned about a rename that
-// did not happen in every repo whose comments merely mentioned the old team —
-// in the record and in the PR body — and kept warning on every later run. It
-// also fired on runs that refused, describing line numbers in a file that was
-// never written.
-func TestScenario_StaleCommentWarningOnlyFollowsARealRename(t *testing.T) {
+// This reverses a decision made when the warning was introduced. It was gated
+// on the rename reporting `applied`, to stop it claiming a rename that had not
+// happened. A reorg run against a real fleet found the case that gate excludes:
+// a repo where the old handle survives ONLY in a comment renames nothing, so
+// the record reads `unchanged` — and that is exactly the repo where the comment
+// is the last trace of a retired team, where docs/FLEET.md promises this
+// warning ("nothing else finds these"), and where it stayed silent. The two
+// cases now carry different wording, so neither overclaims.
+//
+// A run that WROTE NOTHING still says nothing: a refusal describes no file.
+func TestScenario_StaleCommentWarningFindsCommentOnlyRepos(t *testing.T) {
 	t.Parallel()
-	files := map[string]string{
+
+	// The comment names @org/acq; no rule does. The rename is a no-op here, and
+	// the comment is the only thing left to find.
+	commentOnly := initRepo(t, map[string]string{
 		".github/CODEOWNERS": "# @org/acq owns the pipeline\n/pipeline/ @org/other\n",
 		"pipeline/p.go":      "package p\n",
+	})
+	rec, code, _ := scenarioSync(t, "--repo", commentOnly, "--op", "rename_owner(@org/acq, @org/new)")
+	if code != cli.ExitOK || rec.Status != cli.StatusUnchanged {
+		t.Fatalf("exit %d status %q, want 0/unchanged — there is no rule to rename here", code, rec.Status)
+	}
+	joined := strings.Join(rec.Warnings, "\n")
+	if !strings.Contains(joined, "line 1") || !strings.Contains(joined, "@org/acq") {
+		t.Errorf("the comment-only repo got no warning; it is the repo where this warning is the ONLY signal: %#v", rec.Warnings)
+	}
+	// Wording, not just presence: nothing was renamed in this file, and a
+	// warning that says otherwise is the overclaim the old gate guarded against.
+	if strings.Contains(joined, "which this run renamed") {
+		t.Errorf("the warning claims a rename that did not happen in this repo: %#v", rec.Warnings)
+	}
+	if !strings.Contains(joined, "no rule in this file names") {
+		t.Errorf("the warning does not say the rename found nothing here: %#v", rec.Warnings)
 	}
 
-	// The comment names @org/acq; no rule does. Nothing is renamed.
-	dir := initRepo(t, files)
-	rec, code, _ := scenarioSync(t, "--repo", dir, "--op", "rename_owner(@org/acq, @org/new)")
-	if code != cli.ExitOK || rec.Status != cli.StatusUnchanged {
-		t.Fatalf("exit %d status %q, want 0/unchanged", code, rec.Status)
-	}
-	if len(rec.Warnings) != 0 {
-		t.Errorf("a rename that renamed nothing warned about a stale comment: %#v", rec.Warnings)
+	// A repo that mentions the handle nowhere stays quiet.
+	quiet := initRepo(t, map[string]string{
+		".github/CODEOWNERS": "# owned by the platform team\n/pipeline/ @org/other\n",
+		"pipeline/p.go":      "package p\n",
+	})
+	recQuiet, _, _ := scenarioSync(t, "--repo", quiet, "--op", "rename_owner(@org/acq, @org/new)")
+	if len(recQuiet.Warnings) != 0 {
+		t.Errorf("a repo that never names the old handle warned: %#v", recQuiet.Warnings)
 	}
 
 	// A refusal writes nothing, so it has no file whose comments to describe.
@@ -1133,7 +1157,7 @@ func TestScenario_StaleCommentWarningOnlyFollowsARealRename(t *testing.T) {
 		t.Fatalf("exit %d, want 2", code2)
 	}
 	for _, w := range rec2.Warnings {
-		if strings.Contains(w, "comment still names") {
+		if strings.Contains(w, "comment still names") || strings.Contains(w, "no rule in this file names") {
 			t.Errorf("a refusal warned about comments in a file it never wrote: %q", w)
 		}
 	}
@@ -1148,8 +1172,120 @@ func TestScenario_StaleCommentWarningOnlyFollowsARealRename(t *testing.T) {
 		t.Fatalf("exit %d, want 0", code3)
 	}
 	for _, w := range rec3.Warnings {
-		if strings.Contains(w, "comment still names") {
+		if strings.Contains(w, "names") {
 			t.Errorf("a rule line whose PATTERN contains '#' was read as a comment: %q", w)
 		}
+	}
+}
+
+// SPEC R-6/R-20: an unknown `--on-empty` value is exit 3 from the argument
+// alone, like the policy field it mirrors.
+//
+// It used to be validated only where a removal actually emptied an owner set,
+// so `--on-empty typo` ran a whole fleet at exit 0 and then reported exit 2 —
+// "this repo needs a human" — on the one repo that happened to trip it, naming
+// a CODEOWNERS that had nothing to do with the mistake. A flag value is
+// decidable with no repository open, which is the definition of the exit-3
+// class, and `on_empty` in a policy has been validated at load time all along:
+// two spellings of one setting disagreeing is the defect.
+func TestScenario_UnknownOnEmptyIsAPolicyError(t *testing.T) {
+	t.Parallel()
+	// A repo where no removal empties anything — the case that used to exit 0.
+	dir := initRepo(t, map[string]string{
+		".github/CODEOWNERS": "* @org/eng\n/x/ @org/a @org/b\n",
+		"x/f.go":             "package x\n",
+	})
+	code, stdout, errOut := runCLI(t, "sync", "--repo", dir,
+		"--op", "remove_owner(/x/, @org/a)", "--on-empty", "typo", "--dry-run")
+	if code != cli.ExitInvalid {
+		t.Fatalf("exit %d, want 3 — the value is wrong wherever it runs, so it must not depend on this repo's shape", code)
+	}
+	if !strings.Contains(errOut, "on-empty") {
+		t.Errorf("the error must name the flag: %s", errOut)
+	}
+	if stdout != "" {
+		t.Errorf("a policy error emits no record, got %q", stdout)
+	}
+	// The legal values still work, and the empty default still means "unset".
+	for _, v := range []string{"error", "inherit", "unowned"} {
+		if code, _, errOut := runCLI(t, "sync", "--repo", dir,
+			"--op", "remove_owner(/x/, @org/a)", "--on-empty", v, "--dry-run"); code == cli.ExitInvalid {
+			t.Errorf("--on-empty %s was rejected: %s", v, errOut)
+		}
+	}
+}
+
+// SPEC R-20/R-24: when a policy error stops the run, the operator is told that
+// no record was written.
+//
+// The verdict is reached before the repository is opened, so there is nothing
+// to report and a row would put a phantom repo in the aggregation — that part
+// is deliberate. What was missing is saying so. A loop writing `--out
+// records/$repo.json` and aggregating the directory afterwards sees the
+// affected repos vanish rather than appear as refused, so the count of repos
+// needing attention goes DOWN, and `jq -r .status` on empty stdout yields ""
+// which most shell comparisons read as "not refused".
+func TestScenario_PolicyErrorSaysNoRecordWasWritten(t *testing.T) {
+	t.Parallel()
+	dir := initRepo(t, map[string]string{
+		".github/CODEOWNERS":   "* @org/eng\n",
+		"services/api/main.go": "package api\n",
+	})
+	outPath := filepath.Join(t.TempDir(), "rec.json")
+
+	code, stdout, errOut := runCLI(t, "sync", "--repo", dir, "--format", "json", "--out", outPath,
+		"--op", "set_owners(*, [@org/a])", "--op", "add_owner(/services/api/, @org/b)")
+	if code != cli.ExitInvalid {
+		t.Fatalf("exit %d, want 3", code)
+	}
+	if stdout != "" {
+		t.Errorf("a policy error must emit no record on stdout, got %q", stdout)
+	}
+	if _, err := os.Stat(outPath); err == nil {
+		t.Error("--out was written for a run that never opened the repository")
+	}
+	if !strings.Contains(errOut, "no record was written") {
+		t.Errorf("the operator is not told the record is missing, which is how a repo silently leaves a fleet aggregate:\n%s", errOut)
+	}
+	// Text format with no file sinks has nothing to explain, so it stays quiet.
+	_, _, plainErr := runCLI(t, "sync", "--repo", dir,
+		"--op", "set_owners(*, [@org/a])", "--op", "add_owner(/services/api/, @org/b)")
+	if strings.Contains(plainErr, "no record was written") {
+		t.Errorf("the note fires where no record was ever expected:\n%s", plainErr)
+	}
+}
+
+// SPEC R-8: the refusal's remedy carries its own warning when running the
+// broader op alone would displace owners.
+//
+// The remedy is correct and the batch must be refused — but it points at the
+// most destructive operation the tool offers. An operator followed it verbatim
+// and stripped two teams from a security repo, quoting the old closing clause
+// ("which is two exit-0 invocations") as the reason they ran it without a
+// preview. An exit code is not a safety property.
+func TestScenario_R8RemedyWarnsThatSetOwnersDisplaces(t *testing.T) {
+	t.Parallel()
+	policy := rolloutPolicy(t, `{"version":1,"ops":[
+	  "set_owners(*, [@org/everyone])", "add_owner(/services/api/, @org/api)"]}`)
+	code, _, errOut := runCLI(t, "check", "--policy", policy)
+	if code != cli.ExitInvalid {
+		t.Fatalf("exit %d, want 3", code)
+	}
+	for _, want := range []string{"REPLACES", "--dry-run"} {
+		if !strings.Contains(errOut, want) {
+			t.Errorf("the remedy does not warn what it costs (%q missing):\n%s", want, errOut)
+		}
+	}
+	if strings.Contains(errOut, "two exit-0 invocations") {
+		t.Errorf("the remedy still reads as reassurance:\n%s", errOut)
+	}
+
+	// A remedy that displaces nothing keeps its plain wording: two add_owners
+	// that fail to commute are not a destructive run.
+	plain := rolloutPolicy(t, `{"version":1,"ops":[
+	  "add_owner(*, @org/x)", "remove_owner(/services/api/, @org/x)"]}`)
+	if code, _, errOut := runCLI(t, "check", "--policy", plain); code == cli.ExitInvalid &&
+		strings.Contains(errOut, "REPLACES") {
+		t.Errorf("a non-displacing remedy carries a displacement warning:\n%s", errOut)
 	}
 }
