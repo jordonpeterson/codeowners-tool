@@ -1625,6 +1625,30 @@ because the narrower rule wins outright. The run must report `applied`, touch
 exactly the one rule that is wrong, and leave the rule that is already
 correct byte-identical.
 
+### `TestScenario_PolicyErrorSaysNoRecordWasWritten`
+
+SPEC R-20/R-24: when a policy error stops the run, the operator is told that
+no record was written.
+
+The verdict is reached before the repository is opened, so there is nothing
+to report and a row would put a phantom repo in the aggregation — that part
+is deliberate. What was missing is saying so. A loop writing `--out
+records/$repo.json` and aggregating the directory afterwards sees the
+affected repos vanish rather than appear as refused, so the count of repos
+needing attention goes DOWN, and `jq -r .status` on empty stdout yields ""
+which most shell comparisons read as "not refused".
+
+### `TestScenario_R8RemedyWarnsThatSetOwnersDisplaces`
+
+SPEC R-8: the refusal's remedy carries its own warning when running the
+broader op alone would displace owners.
+
+The remedy is correct and the batch must be refused — but it points at the
+most destructive operation the tool offers. An operator followed it verbatim
+and stripped two teams from a security repo, quoting the old closing clause
+("which is two exit-0 invocations") as the reason they ran it without a
+preview. An exit code is not a safety property.
+
 ### `TestScenario_RenameSubstitutesInPlace`
 
 SPEC R-24 (rename): a rename substitutes the identifier IN PLACE, leaving
@@ -1637,17 +1661,22 @@ preserves the owner SET and GitHub cares about nothing else, but it permutes
 every line that lists the renamed team alongside anyone else, and a reviewer
 of a hundred reorg PRs then has to work out that a reordering means nothing.
 
-### `TestScenario_StaleCommentWarningOnlyFollowsARealRename`
+### `TestScenario_StaleCommentWarningFindsCommentOnlyRepos`
 
-SPEC R-24: the stale-comment warning fires only on a run that actually
-renamed something, and never on a run that wrote nothing.
+SPEC R-24: the stale-comment warning follows the OLD HANDLE, not the edit —
+it fires wherever a comment still names a renamed owner, including in the
+repos where the rename itself had nothing to do.
 
-The first cut scanned for the old identifier regardless of whether the
-rename matched anything, so a fleet-wide rename warned about a rename that
-did not happen in every repo whose comments merely mentioned the old team —
-in the record and in the PR body — and kept warning on every later run. It
-also fired on runs that refused, describing line numbers in a file that was
-never written.
+This reverses a decision made when the warning was introduced. It was gated
+on the rename reporting `applied`, to stop it claiming a rename that had not
+happened. A reorg run against a real fleet found the case that gate excludes:
+a repo where the old handle survives ONLY in a comment renames nothing, so
+the record reads `unchanged` — and that is exactly the repo where the comment
+is the last trace of a retired team, where docs/FLEET.md promises this
+warning ("nothing else finds these"), and where it stayed silent. The two
+cases now carry different wording, so neither overclaims.
+
+A run that WROTE NOTHING still says nothing: a refusal describes no file.
 
 ### `TestScenario_StaticRejectionRespectsOnZeroMatch`
 
@@ -1676,6 +1705,19 @@ other path unowned, and the two ways of having no owner stay distinct.
 a decision someone made and defended in review. Collapsing them would hide
 the difference between "we chose to leave vendored code unowned" and "nobody
 has looked at this yet", which is the distinction a coverage report is for.
+
+### `TestScenario_UnknownOnEmptyIsAPolicyError`
+
+SPEC R-6/R-20: an unknown `--on-empty` value is exit 3 from the argument
+alone, like the policy field it mirrors.
+
+It used to be validated only where a removal actually emptied an owner set,
+so `--on-empty typo` ran a whole fleet at exit 0 and then reported exit 2 —
+"this repo needs a human" — on the one repo that happened to trip it, naming
+a CODEOWNERS that had nothing to do with the mistake. A flag value is
+decidable with no repository open, which is the definition of the exit-3
+class, and `on_empty` in a policy has been validated at load time all along:
+two spellings of one setting disagreeing is the defect.
 
 ### `TestSync_AlreadyCorrectIsZeroNotNoOp`
 
@@ -4143,4 +4185,4 @@ DIFFERENT states; transitioning between them is a real ownership change.
 
 ---
 
-424 documented test cases across 13 packages.
+427 documented test cases across 13 packages.

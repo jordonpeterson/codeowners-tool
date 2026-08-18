@@ -10,6 +10,38 @@ changes to which class a failure lands in are called out explicitly.
 
 ## [Unreleased]
 
+### Fixed (from five user-test personas driving the shipped binary)
+
+- **A policy error writes no record, and now says so.** The exit-3 verdict is
+  reached before the repository is opened, so no `--out` file and no
+  `--summary-out` is created — deliberate, since a row there would put a phantom
+  repo in the aggregation, but previously silent. A fleet aggregating
+  `records/*.json` saw affected repos DISAPPEAR rather than appear as refused,
+  so the count of repos needing attention went down. The exit code is the
+  signal, and stderr now says the record is missing. (#30)
+- **The stale-comment warning follows the old handle, not the edit.** It was
+  gated on the rename reporting `applied`, which silenced it in exactly the
+  repos where a retired team's handle survives only in a comment — the repos
+  where docs/FLEET.md promises it is the only thing that will find them. Both
+  cases now warn, with wording that does not claim a rename that did not
+  happen. (#33)
+- **The R-8 remedy warns what it costs.** Telling an operator to run the broader
+  op alone is right, and for a `set_owners` that run replaces the owners of
+  everything in scope; one followed it verbatim and stripped two teams from a
+  security repo. The message now says so and points at `--dry-run`. The old
+  closing clause ("which is two exit-0 invocations") read as reassurance and is
+  gone. (#35)
+- **An unknown `--on-empty` value is exit 3**, from the argument alone, like the
+  `on_empty` policy field it mirrors. It used to be validated only where a
+  removal actually emptied an owner set, so a typo ran a whole fleet at exit 0
+  and then reported exit 2 on the one repo that tripped it. (#36)
+- **docs/FLEET.md's resumable script no longer retires the repos it files for
+  triage.** An exit-2 repo went into `needs-human` *and* `done.txt`, so the
+  resume guard skipped it forever — including after a human fixed it. (#37)
+- **`--summary-out`'s `proven` column stops doubling as the skip reason**, which
+  put a full sentence where a reviewer scans for `tree` or `structural`. Reasons
+  have their own column. (#41)
+
 ### Security
 
 - **`install.sh` verifies build provenance, not just the checksum.** Releases

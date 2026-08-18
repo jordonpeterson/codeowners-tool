@@ -53,6 +53,28 @@ func exit3(stderr io.Writer, err error) int {
 	return ExitInvalid
 }
 
+// validOnEmpty reports whether s is one of R-6's three policies.
+func validOnEmpty(s string) bool {
+	return s == "error" || s == "inherit" || s == "unowned"
+}
+
+// noRecordNote says out loud that a policy error produced no record.
+//
+// An exit-3 verdict is reached before the repository is opened, so there is
+// nothing to report about it and emitting a row would put a phantom repo in the
+// aggregation. The consequence is easy to miss: a loop writing `--out
+// records/$repo.json` and aggregating the directory afterwards sees the
+// affected repos DISAPPEAR rather than appear as refused, so the count of repos
+// needing attention goes down. Silence about that is what made it dangerous;
+// the behavior itself is correct.
+func noRecordNote(stderr io.Writer, format, outPath, summaryPath string, code int) int {
+	if format != "json" && outPath == "" && summaryPath == "" {
+		return code
+	}
+	fmt.Fprintln(stderr, "note: no record was written for this repo — a policy error is decided before the repository is opened, so there is no per-repo outcome to report, and neither --out nor --summary-out was created. A fleet aggregating those files will not see this repo at all; the exit code is the signal.")
+	return code
+}
+
 // opSource resolves where the ops come from. Everything it can reject is
 // decidable from the arguments alone, with no repository open — which is exactly
 // what makes these verdicts identical on all 100 repos.
@@ -149,6 +171,16 @@ func cmdSync(args []string, stdout, stderr io.Writer) int {
 		// whole rollout has already written its CODEOWNERS files.
 		return exit3(stderr, fmt.Errorf("unknown --format %q; want text or json", *format))
 	}
+	// Validated here, not on whichever repo first has a removal empty an owner
+	// set. A flag value is decidable from the arguments alone, so it belongs to
+	// the exit-3 class — and the policy file's `on_empty` has been validated at
+	// load time all along, so leaving the flag lazy made two spellings of one
+	// setting disagree: `--on-empty typo` ran a whole fleet at exit 0 and then
+	// reported exit 2 ("this repo needs a human") on the one repo that happened
+	// to trip it, naming a CODEOWNERS that had nothing to do with the mistake.
+	if *onEmpty != "" && !validOnEmpty(*onEmpty) {
+		return exit3(stderr, fmt.Errorf("unknown --on-empty %q; want error, inherit or unowned (R-6)", *onEmpty))
+	}
 	if *onEmpty != "" && len(policyPaths) > 0 {
 		return exit3(stderr, errors.New("--on-empty is not allowed with --policy: set \"on_empty\" in the policy file instead, or the artifact in git is not the policy that ran (R-20)"))
 	}
@@ -187,7 +219,7 @@ func cmdSync(args []string, stdout, stderr io.Writer) int {
 	// rather than hidden behind this one.
 	pol, opList, err := opSource(opSpecs, policyPaths)
 	if err != nil {
-		return exit3(stderr, err)
+		return noRecordNote(stderr, *format, *out, *summaryOut, exit3(stderr, err))
 	}
 	if maxPathsSet && *maxPaths < 0 {
 		return exit3(stderr, fmt.Errorf("--max-paths-changed %d must be zero or positive; omit the flag to set no ceiling (R-25)", *maxPaths))
@@ -209,7 +241,7 @@ func cmdSync(args []string, stdout, stderr io.Writer) int {
 	// repo. plan.Build keeps the other half — an overlap only a real tree
 	// reveals stays exit 2, per repo, and the fleet loop still steps over it.
 	if err := ops.StaticConflict(opList); err != nil {
-		return exit3(stderr, err)
+		return noRecordNote(stderr, *format, *out, *summaryOut, exit3(stderr, err))
 	}
 
 	run := &syncRun{
@@ -714,21 +746,28 @@ func staleCommentWarnings(after string, opList []ops.Op, results []plan.OpResult
 		if op.Kind != ops.RenameOwner {
 			continue
 		}
-		// Only a rename that actually substituted something. A fleet-wide
-		// rename passes over repos where the old handle never appeared, and
-		// warning there claims a rename that did not happen — in the record and
-		// in the PR body — for every repo whose comments merely mention the old
-		// team.
-		if i >= len(results) || results[i].Status != "applied" {
-			continue
-		}
+		// The warning fires whether or not this repo had a rule to rename. Gating
+		// it on "applied" was backwards: in a repo where the old handle survives
+		// ONLY in a comment, the rename correctly changes nothing, the record
+		// reads `unchanged` — and that is exactly the repo where the comment is
+		// the last trace of a retired team and this warning is the only thing
+		// that will ever find it. What the two cases must not share is wording,
+		// because claiming "this run renamed X" where nothing was renamed is the
+		// overclaim the gate was added to prevent.
+		renamed := i < len(results) && results[i].Status == "applied"
 		for _, line := range commentLinesNaming(after, op.Owner) {
 			// The line number is the one in the file as this run leaves it, not
 			// where the comment sits today: a rule inserted above shifts it
 			// down, and the message says so rather than misdirecting whoever
 			// reads a --dry-run preview.
+			if renamed {
+				out = append(out, fmt.Sprintf(
+					"%s line %d as this run leaves it: a comment still names %q, which this run renamed to %q; comments are never rewritten (the substitution is proven only over owner tokens), so this one now points at an identifier that no longer exists",
+					rel, line, op.Owner, op.NewOwner))
+				continue
+			}
 			out = append(out, fmt.Sprintf(
-				"%s line %d as this run leaves it: a comment still names %q, which this run renamed to %q; comments are never rewritten (the substitution is proven only over owner tokens), so this one now points at an identifier that no longer exists",
+				"%s line %d: no rule in this file names %q, so there was nothing for this run to rename here — but a comment still names it, and the rename to %q makes that comment point at an identifier that no longer exists",
 				rel, line, op.Owner, op.NewOwner))
 		}
 	}
@@ -995,18 +1034,17 @@ func renderSummary(rec SyncRecord, r *syncRun) string {
 	}
 
 	if len(rec.Ops) > 0 {
-		b.WriteString("\n## Ops\n\n| id | op | status | proven | note |\n|---|---|---|---|---|\n")
+		// `proven` holds only tree/structural. It used to double as the skip
+		// reason, which put a full sentence in the column a reviewer scans for
+		// one of two short words — across a hundred near-identical PRs.
+		b.WriteString("\n## Ops\n\n| id | op | status | proven | why | note |\n|---|---|---|---|---|---|\n")
 		for i, o := range rec.Ops {
 			id := policy.OpLabel(o.ID, i)
 			note := ""
 			if r.policy != nil {
 				note = r.policy.Notes[id]
 			}
-			detail := o.Proven
-			if o.Reason != "" {
-				detail = o.Reason
-			}
-			fmt.Fprintf(&b, "| `%s` | `%s` | %s | %s | %s |\n", id, o.Op, o.Status, detail, note)
+			fmt.Fprintf(&b, "| `%s` | `%s` | %s | %s | %s | %s |\n", id, o.Op, o.Status, o.Proven, o.Reason, note)
 		}
 	}
 
