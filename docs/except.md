@@ -1,7 +1,8 @@
 # Scope subtraction (`except`) — specification
 
-**Status: proposed.** Requirements R-25…R-31 below are new; tests referencing them
-exist ahead of the implementation (see [CONTRIBUTING.md](../CONTRIBUTING.md): the
+**Status: implemented.** Requirements R-25…R-31 below are enforced by the e2e
+suite in `internal/cli/except_test.go`, which was written against this document
+before the implementation existed (see [CONTRIBUTING.md](../CONTRIBUTING.md): the
 failing test comes first). One guarantee is deliberately weakenable and only by
 explicit opt-in (`on_except_zero_match: allow`, R-27) — it is marked in output the
 same way `declare` is, and documented below alongside it.
@@ -133,9 +134,9 @@ Two emptiness questions exist, and they are **ordered**:
      carve for the unmatched pattern, so a matching file created later falls
      under the grant — nothing in the repo today can verify the carve-out you
      asked for. Ops that take this path report `proven: "structural"`, exactly
-     as `declare` does, and the cost belongs in
-     [guarantees.md](guarantees.md#what-declare-costs) beside declare's when the
-     feature lands. No dead rule is written for the unmatched pattern (R-5).
+     as `declare` does, and the cost is documented in
+     [guarantees.md](guarantees.md#what-on_except_zero_match-allow-costs) beside
+     declare's. No dead rule is written for the unmatched pattern (R-5).
 
 ### R-28 — carve synthesis
 

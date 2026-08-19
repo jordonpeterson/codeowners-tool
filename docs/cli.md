@@ -119,6 +119,7 @@ Read-only. See [audit.md](audit.md) for the check list and the fail-closed rules
 | `op` | per op | yes | Op string, same syntax as `--op`. |
 | `id` | per op | no | Short label used in JSON results and error messages. |
 | `on_zero_match` | per op | no | `require` (default) \| `skip` \| `declare` |
+| `on_except_zero_match` | per op | no | `require` (default) \| `allow` — only on ops whose scope carries an `except` clause; governs an except pattern that matches zero tracked files ([except.md](except.md)) |
 | `note` | per op | no | Reaches the PR reviewer via `--summary-out`. |
 
 Unknown fields are a hard error — a typo'd `on_zero_mtach` that silently fell back to
