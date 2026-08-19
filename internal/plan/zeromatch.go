@@ -558,7 +558,7 @@ func warnDuplicateDeclaredPatterns(f *file.File, scope string, pl *Plan) {
 // opResultFor is R-24's per-op record. The fleet record is the only artifact of
 // an unattended run: "which repos lack Terraform" is answerable only if every
 // op reports itself, by id, in the order the policy lists them.
-func opResultFor(op ops.Op, skipped, declared, changed bool) OpResult {
+func opResultFor(op ops.Op, skipped, declared, structural, changed bool) OpResult {
 	r := OpResult{ID: op.ID, Op: op.Raw}
 	if skipped {
 		// A skipped op must carry a reason — without it a fleet operator cannot
@@ -573,10 +573,12 @@ func opResultFor(op ops.Op, skipped, declared, changed bool) OpResult {
 		r.Status = "applied"
 	}
 	// INV-6's disclosure: "structural" says a rule went in without a single
-	// tracked file to check it against. A fleet operator reading 100 JSON
-	// records cannot otherwise tell a checked rollout from an unchecked one.
+	// tracked file to check it against — a declare's whole write, or the
+	// missing carve of an except allowed past its zero match (R-28). A fleet
+	// operator reading 100 JSON records cannot otherwise tell a checked
+	// rollout from an unchecked one.
 	r.Proven = "tree"
-	if declared {
+	if declared || structural {
 		r.Proven = "structural"
 	}
 	return r

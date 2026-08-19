@@ -35,6 +35,15 @@ type Op struct {
 	// preserves R-5 exactly, which is why adding this changes nothing for
 	// ops built by Parse.
 	OnZeroMatch string `json:"on_zero_match,omitempty"`
+	// Except is the op's scope-subtraction patterns (R-26a): tracked paths
+	// matching any of them are out of the op's scope. Parsed from the one
+	// spelling `<scope> except <pat> [<pat> ...]`; there is no JSON field
+	// carrying excepts, so an op built any other way has none.
+	Except []string `json:"except,omitempty"`
+	// OnExceptZeroMatch selects behavior when an except pattern matches zero
+	// tracked files AND the op will write (R-28): "" (== "require") |
+	// "require" | "allow". Policy object form only, like OnZeroMatch.
+	OnExceptZeroMatch string `json:"on_except_zero_match,omitempty"`
 	// ID is a policy-file label used in results and errors; "" from --op.
 	ID string `json:"id,omitempty"`
 }
@@ -44,6 +53,13 @@ const (
 	ZeroMatchRequire = "require"
 	ZeroMatchSkip    = "skip"
 	ZeroMatchDeclare = "declare"
+)
+
+// Except zero-match policies (R-28). Require shares R-21's spelling — the
+// default posture has one name across both knobs.
+const (
+	ExceptZeroMatchRequire = "require"
+	ExceptZeroMatchAllow   = "allow"
 )
 
 func (o Op) String() string { return o.Raw }
@@ -65,7 +81,8 @@ func Parse(s string) (Op, error) {
 		if len(args) != 2 {
 			return Op{}, fmt.Errorf("%s takes (scope, owner), got %d args", kind, len(args))
 		}
-		if err := checkScope(args[0]); err != nil {
+		scope, excepts, err := parseScopeArg(args[0])
+		if err != nil {
 			return Op{}, err
 		}
 		if strings.HasPrefix(args[1], "[") {
@@ -74,15 +91,16 @@ func Parse(s string) (Op, error) {
 		if !file.ValidOwnerToken(args[1]) {
 			return Op{}, fmt.Errorf("invalid owner token %q", args[1])
 		}
-		op.Scope, op.Owner = args[0], args[1]
+		op.Scope, op.Except, op.Owner = scope, excepts, args[1]
 	case SetOwners:
 		if len(args) < 2 || !strings.HasPrefix(args[1], "[") || !strings.HasSuffix(args[len(args)-1], "]") {
 			return Op{}, fmt.Errorf("set_owners takes (scope, [owners]) — the list brackets are required")
 		}
-		if err := checkScope(args[0]); err != nil {
+		scope, excepts, err := parseScopeArg(args[0])
+		if err != nil {
 			return Op{}, err
 		}
-		op.Scope = args[0]
+		op.Scope, op.Except = scope, excepts
 		listStr := strings.TrimSpace(strings.Join(args[1:], ","))
 		listStr = strings.TrimSuffix(strings.TrimPrefix(listStr, "["), "]")
 		op.Owners = []string{}
@@ -97,6 +115,13 @@ func Parse(s string) (Op, error) {
 			return Op{}, fmt.Errorf("rename_owner takes (old, new), got %d args", len(args))
 		}
 		for _, a := range args {
+			// R-27.4: an except clause on a rename has to be named as such.
+			// Falling through to "invalid owner token \"@a except @b\"" would
+			// leave the operator hunting a typo in an owner name instead of
+			// learning that the clause has no meaning here.
+			if _, _, isExcept := splitExceptClause(a); isExcept {
+				return Op{}, fmt.Errorf("rename_owner takes no scope, so it cannot carry an except clause (R-27)")
+			}
 			if !file.ValidOwnerToken(a) {
 				return Op{}, fmt.Errorf("invalid owner token %q", a)
 			}
@@ -151,6 +176,104 @@ func checkScope(scope string) error {
 		return fmt.Errorf("invalid scope %q: %v", scope, err)
 	}
 	return nil
+}
+
+// splitUnescapedWS splits s on runs of UNESCAPED spaces and tabs, keeping
+// escape sequences inside their token. This is the except delimiter (R-26a):
+// unescaped whitespace is otherwise illegal in a scope (checkScope), so every
+// op string legal today yields one token here and parses identically. A
+// strings.Fields splitter would split `/a\ except\ b/` — a directory literally
+// named "a except b" — into three tokens and read a clause its author never
+// wrote (adversarial-review finding).
+func splitUnescapedWS(s string) []string {
+	var toks []string
+	var cur strings.Builder
+	esc := false
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case esc:
+			cur.WriteByte(c)
+			esc = false
+		case c == '\\':
+			// The backslash stays in the token: these are raw pattern texts,
+			// and stripping the escape would turn `/docs/a\ b.md` into a
+			// pattern for a different path.
+			cur.WriteByte(c)
+			esc = true
+		case c == ' ' || c == '\t':
+			if cur.Len() > 0 {
+				toks = append(toks, cur.String())
+				cur.Reset()
+			}
+		default:
+			cur.WriteByte(c)
+		}
+	}
+	if cur.Len() > 0 {
+		toks = append(toks, cur.String())
+	}
+	return toks
+}
+
+// splitExceptClause recognizes the one except spelling: a second
+// unescaped-whitespace token that is lowercase `except`, exactly. Any other
+// unescaped-whitespace form (including `EXCEPT`) reports isExcept=false and is
+// left for checkScope's existing whitespace refusal — the spec promises no new
+// acceptance for near-misses (R-26a).
+func splitExceptClause(arg string) (scope string, excepts []string, isExcept bool) {
+	toks := splitUnescapedWS(arg)
+	if len(toks) < 2 || toks[1] != "except" {
+		return "", nil, false
+	}
+	return toks[0], toks[2:], true
+}
+
+// parseScopeArg parses a scope argument, with or without an except clause,
+// and runs every R-27 check that is a property of the op string alone. These
+// live here rather than in the policy validator so `--op` and a policy file
+// refuse identically — two validation paths for one grammar is how they
+// drift apart.
+func parseScopeArg(arg string) (scope string, excepts []string, err error) {
+	scope, excepts, isExcept := splitExceptClause(arg)
+	if !isExcept {
+		if err := checkScope(arg); err != nil {
+			return "", nil, err
+		}
+		return arg, nil, nil
+	}
+	if len(excepts) == 0 {
+		return "", nil, fmt.Errorf("except clause has no patterns in %q: write `<scope> except <pat> [<pat> ...]` (R-26a)", arg)
+	}
+	if err := checkScope(scope); err != nil {
+		return "", nil, err
+	}
+	for _, e := range excepts {
+		if err := checkScope(e); err != nil {
+			return "", nil, fmt.Errorf("invalid except pattern: %v", err)
+		}
+	}
+	// R-27 comparisons are over the pattern LANGUAGE (containment both ways),
+	// never string equality: `/x/**` and `/x/` are one language spelled two
+	// ways, and a string check would wave through a policy that empties its
+	// own scope in every repo, then fail per-repo at exit 2 a hundred times
+	// where the contract demands one exit 3.
+	for _, e := range excepts {
+		if pattern.Contains(e, scope) {
+			return "", nil, fmt.Errorf("except pattern %q covers the entire scope %q — the op is emptied by construction (R-27)", e, scope)
+		}
+		if !pattern.Contains(scope, e) {
+			return "", nil, fmt.Errorf("except pattern %q is not provably contained in scope %q (R-27: unprovable containment is refused, so a carve can never bite a foreign subtree)", e, scope)
+		}
+	}
+	for i := 0; i < len(excepts); i++ {
+		for j := i + 1; j < len(excepts); j++ {
+			if pattern.Contains(excepts[i], excepts[j]) && pattern.Contains(excepts[j], excepts[i]) {
+				return "", nil, fmt.Errorf("duplicate except pattern: %q and %q match the same paths — a generator bug, not a choice (R-27)", excepts[i], excepts[j])
+			}
+		}
+	}
+	return scope, excepts, nil
 }
 
 // trimArg trims surrounding whitespace WITHOUT eating escaped trailing
@@ -296,11 +419,32 @@ func displacementWarning(outer Op) string {
 // covers the other's. A rename has no pattern scope at all — it derives its
 // scope from current ownership — so it is never decidable here and is left to
 // the tree.
+//
+// An except clause can dissolve coverage entirely (R-31): if some except of the
+// broader op contains the narrower op's whole scope, every path the narrower op
+// governs is excluded from the broader op's effective scope, so the pair shares
+// no path in any repository and cannot be order-dependent. Containment of the
+// FULL scope is required — an except that bites only part of it leaves the rest
+// contested, and the conflict stands.
 func scopeCoverage(a, b Op) (aCoversB, bCoversA bool) {
 	if a.Kind == RenameOwner || b.Kind == RenameOwner {
 		return false, false
 	}
-	return pattern.Contains(a.Scope, b.Scope), pattern.Contains(b.Scope, a.Scope)
+	aCoversB = pattern.Contains(a.Scope, b.Scope) && !exceptsContain(a.Except, b.Scope)
+	bCoversA = pattern.Contains(b.Scope, a.Scope) && !exceptsContain(b.Except, a.Scope)
+	return aCoversB, bCoversA
+}
+
+// exceptsContain reports whether any except pattern provably contains the whole
+// of scope — the condition under which the excepting op provably governs none
+// of scope's paths.
+func exceptsContain(excepts []string, scope string) bool {
+	for _, e := range excepts {
+		if pattern.Contains(e, scope) {
+			return true
+		}
+	}
+	return false
 }
 
 // commutes reports whether two ops produce the same owners in either order, on

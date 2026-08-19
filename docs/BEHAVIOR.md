@@ -192,6 +192,27 @@ a bare line deletion.
 > tests pin only that the bytes outside the repository are never touched and that no
 > record claims otherwise.
 
+**`except_test.go`**
+
+> Except-clause end-to-end tests (docs/except.md, R-26…R-32). Written ahead
+> of the implementation per CONTRIBUTING.md; every negative case asserts a
+> message fragment as well as the exit code, because today the whole grammar
+> dies at checkScope's whitespace rule with exit 3 — the same code several of
+> these tests expect — and an exit-code-only assertion would pass vacuously
+> against a feature that does not exist.
+>
+> Mutating tests assert EXACT file bytes or snapshot-level resolution, never
+> line existence: under last-match-wins (S-1) a substring check is satisfied
+> by a file whose line ORDER hands the excepted path to the grantee
+> (adversarial-review finding — an append-at-EOF implementation threaded
+> through every Contains-based oracle in the first draft).
+>
+> Three cases pass against today's binary by design and are labeled as pins
+> (TestR27_UppercaseExceptStaysRefused, TestR32_NonExceptRecordsCarryNoExceptFields,
+> and the escaped-scope subtest of TestR26_EscapedSpaceIsNotAnExceptDelimiter):
+> they freeze current behavior the spec promises to preserve, rather than
+> specify new behavior. Everything else fails until the feature lands.
+
 **`fleet_idempotence_test.go`**
 
 > R-19 — convergence and idempotence at fleet scale.
@@ -1104,6 +1125,20 @@ every time. --dry-run is the fleet preview — the only review step that
 exists at 100 repos — so a preview that differs run to run, or that writes
 while previewing, makes the review meaningless.
 
+### `TestR19_ExceptAllowIsIdempotent`
+
+SPEC R-19/R-28: idempotence must also hold on the ALLOW path, where run 2
+sees the grant present but NO carve line for the unmatched except — the
+state a naive "carve missing, so not yet applied" detector re-appends or
+refuses on, every night, until S-4 stops loading the file
+(adversarial-review finding).
+
+### `TestR19_ExceptIsIdempotent`
+
+SPEC R-19/R-26: an except op converges. Run twice: second run exits 0,
+changes nothing, and the file is byte-identical — the property that lets a
+nightly fleet job re-run the same policy forever.
+
 ### `TestR19_FleetFivePassesNeverGrow`
 
 SPEC R-19: the same fleet, five passes. Two passes is not enough evidence —
@@ -1224,6 +1259,15 @@ status "skipped" (never "unchanged": a policy that matches nothing anywhere
 must not read as "100 repos already correct"), and the file untouched. Twice,
 because a skip that quietly wrote a rule anyway would be growth with a
 reassuring status attached.
+
+### `TestR22_CheckAcceptsValidExceptPolicies`
+
+SPEC R-22/R-27: `check` must also ACCEPT valid except policies — every
+R-27 case above exits 3 today for an unrelated reason (the whitespace
+rule), so without this test an implementation whose validator rejects the
+valid grammar, or whose containment prover is too weak for a legal glob
+except, halts every fleet script at line one and nothing goes red
+(adversarial-review finding).
 
 ### `TestR24_ForwardCompatMissingFieldIsZero`
 
@@ -1350,6 +1394,170 @@ without anyone noticing that `sync --format json` now emits something new,
 and a spot-checking test can see neither. Every other cli test unmarshals
 into SyncRecord, using the same tags on both sides of its assertions, so
 this is the only place the wire names are compared to anything external.
+
+### `TestR26_EscapedSpaceIsNotAnExceptDelimiter`
+
+SPEC R-26a/grammar: escaped whitespace is NEVER an except delimiter. A
+strings.Fields-style splitter passes every other test in this file and
+breaks exactly here (adversarial-review finding): a directory literally
+named "a except b" must stay one scope, and an except pattern containing
+an escaped space must stay one pattern.
+
+### `TestR26_ExceptCarveOutEndToEnd`
+
+SPEC R-26: the motivating carve-out is ONE op. `add_owner(/.github/ except
+/.github/CODEOWNERS, @org/team_a)` grants team_a co-ownership of .github/
+while the CODEOWNERS file itself keeps exactly its current owners — owners
+the policy never names, discovered per repo. Exact bytes: the carve line
+must restate the original owners and sit after the broad grant (R-29
+structural placement), so last-match-wins (S-1) resolves the excepted path
+to them.
+
+### `TestR26_ExceptDoesNotRevokeExistingOwnership`
+
+SPEC R-26/R-32: except means DON'T TOUCH, not revoke. When the grantee
+already owns an excepted path via a pre-existing rule, the op succeeds,
+that rule keeps winning, and the record's `excepted` says so — the one
+place the don't-touch semantics could otherwise hide something a
+security-minded operator needs to see. Exact bytes matter here more than
+anywhere: an append-at-EOF implementation leaves the asserted LINE intact
+while the appended grant steals the path by last-match (INV-2 violation
+invisible to a substring check).
+
+### `TestR26_GlobExcept`
+
+SPEC R-26/glob: an except may be a glob, provided containment is provable.
+Exact bytes pin grant + carve + order. The zero-directory `**` case
+(src/a_gen.pb.go, no intermediate dir) rides on the carve line matching it
+— if the containment prover and the matcher disagree on `**`, the proof
+gate refuses and the exit-0 assertion goes red; a snapshot oracle would
+re-use the same matcher and prove nothing more (that cross-engine question
+belongs to the differential fuzz, not e2e).
+
+### `TestR26_MultipleExceptsEachKeepOwners`
+
+SPEC R-26/R-29: multiple excepts are a flat list; one carve line per
+excepted pattern, in except-list order, all placed after the grant they
+correct. Exact bytes also pin that the grant line itself EXISTS — the
+first draft never asserted it, so a carve-only implementation that never
+granted anything passed (adversarial-review finding).
+
+### `TestR26_SetOwnersAndRemoveOwnerHonorExcept`
+
+SPEC R-26/R-29: except applies to every verb, and R-29 carves for every
+line the op writes OR AMENDS — set_owners and remove_owner amend `/x/` in
+place, which captures the excepted path until the carve restores it. Exact
+bytes pin both halves: the base mutation actually happened (the first
+draft never checked, so a carve-only no-op implementation passed) and the
+excepted path kept its owners.
+
+### `TestR27_StaticExceptDefectsAreExit3`
+
+SPEC R-27: every static defect in an except clause is a POLICY error — exit
+3, identical in every repo, caught by `check` before repo 1 — and each
+message names its defect, because "fix the policy" is only actionable when
+the operator can tell WHICH of the R-27 rules fired.
+
+### `TestR27_UppercaseExceptStaysRefused`
+
+Pin, passes today: the keyword is lowercase `except`, exactly. `EXCEPT`
+keeps hitting checkScope's whitespace refusal — the spec promises no new
+acceptance for near-misses, so this test freezes the current refusal
+against an implementation that tokenizes case-insensitively.
+
+### `TestR28_CreateWithExceptRefusesByDefault`
+
+SPEC R-28/R-23: --create meets except fail-closed. Under the default, the
+motivating op on a repo with NO CODEOWNERS refuses (the excepted path is
+untracked → zero-match require) and creates nothing — because a created
+file would have no original owners to preserve and the grant would land
+carve-free, which is the S-8 hole again (adversarial-review finding).
+
+### `TestR28_FullySweptScopeFollowsOnZeroMatch`
+
+SPEC R-28: emptiness questions are ORDERED — on_zero_match disposes of the
+op first, and on_except_zero_match is consulted only if the op will write.
+When the excepts swallow every in-scope path, the require message must say
+the emptiness came from the excepts, not the scope.
+
+### `TestR28_UnmatchedExceptAllowProceedsAndSurfaces`
+
+SPEC R-28 (`allow`): the opt-out APPLIES the grant (exact bytes — a
+wrong implementation that skips the op entirely while reporting the
+unmatched pattern is the "wall of silent green" this knob must not
+become), records the inert pattern, warns, and marks the op
+proven:"structural" — the declare-class weakening made visible.
+
+### `TestR28_UnmatchedExceptRefusesByDefault`
+
+SPEC R-28 (default): an except pattern matching zero tracked files refuses
+THIS repo, exit 2, nothing written. This is the guard that keeps the
+two-pass flow's protection: a repo whose CODEOWNERS still sits at the root
+has no /.github/CODEOWNERS to carve, and granting /.github/ there without
+the carve reopens the S-8 precedence-escalation hole — the grantee could
+self-approve CREATING /.github/CODEOWNERS and take the repo. Both
+fragments are required: "matches zero tracked files" alone is verbatim in
+today's R-5/R-21 scope messages, and a diagnosis blaming the SCOPE sends
+the operator hunting a typo in the wrong argument.
+
+### `TestR29_CarveLineExplainsItselfAndPreservesBytes`
+
+SPEC R-29: exact bytes for the one fixture with an unrelated LATER rule —
+where placement bugs live. The grant narrows `*` and is inserted after it;
+the carve goes immediately after the grant (structural placement), NOT at
+end of file; the workflows rule is amended in place and keeps its
+precedence; every comment and blank survives verbatim. The changes[]
+entry for the carve must name the except — reviewers must never meet an
+unexplained owner in a diff.
+
+### `TestR29_UnmatchedExceptedPathRefuses`
+
+SPEC R-29: an excepted path that currently matches NO rule is uncarvable.
+nil (unmatched) and [] (zero-owner rule, S-9) are distinct resolved states
+and never equal (OwnersEqual), so once a broad grant line captures the
+path there is no writable line that restores "unmatched" — INV-2 is
+unsatisfiable and the tool must refuse rather than quietly convert "nobody
+owns this" into "a rule says nobody owns this".
+
+### `TestR31_ExceptMakesLayeredBatchDisjoint`
+
+SPEC R-31: excepts make the layered-delegation batch disjoint, so ONE
+policy expresses "team_a gets .github/, platform gets the CODEOWNERS file"
+— the pair R-8 refuses today. The oracle is RESOLUTION via snapshot, not
+bytes: commuting ops may legally produce different line layouts in
+different orders, but must resolve identically — so the same assertions
+run for both op orders, which is the literal meaning of "these commute"
+(first-draft gap: one order, substring oracles, and a mixed-machinery
+placement bug passed).
+
+### `TestR31_ResidualOverlapStillRefuses`
+
+SPEC R-31: excepts relax R-8 only where they actually create disjointness.
+Two ops still overlapping on a non-excepted path without commuting refuse —
+the relaxation must not become a hole. The refusal is exit 3, not 2: the
+grant's scope provably governs the workflows scope over the pattern language
+and no except removes it, so ops.StaticConflict decides the pair at the
+policy level, before any repo is opened — identically on check and sync.
+
+### `TestR32_DryRunSurfacesExceptedWithoutWriting`
+
+SPEC R-32: --dry-run emits the full record — excepted paths, the planned
+changes — and writes nothing. The fleet preview ("who ends up holding the
+carve-outs, in all 100 repos") must not require mutating a single repo,
+and must not be an except-special-cased EMPTY preview either.
+
+### `TestR32_HumanAndSummaryRenderExcepts`
+
+SPEC R-32: human output and --summary-out render the carve-out facts too.
+An implementation surfacing excepted paths only in JSON leaves the fleet
+PR reviewer — who reads the summary, not results.jsonl — blind to them.
+
+### `TestR32_NonExceptRecordsCarryNoExceptFields`
+
+Pin, passes today: R-32's schema promise is ADDITIVE — records for ops
+without an except clause carry no excepted/except_unmatched keys, so
+existing jq pipelines parse byte-identical records. Freezes the field
+names against an implementation that emits them empty on every op.
 
 ### `TestRollout_AuditGateAfterADeclareBaseline`
 
@@ -3167,6 +3375,28 @@ matches files under a DIRECTORY named `.gradle`. The narrowing rule is exact
 for every tracked file, so it is emitted, but the residual must be disclosed
 rather than silently presented as proven.
 
+### `TestR2_NarrowingIsIndependentOfScopeSpelling`
+
+R-2, shape 4: narrowing must depend on what a scope MATCHES, not on how it is
+spelled.
+
+`build.gradle` and `**/build.gradle` are the same pattern — CODEOWNERS gives a
+slashless pattern basename semantics, so both select every build.gradle at
+every depth. The planner disagrees. It derives the narrowing
+`/.github/**/build.gradle` for the bare spelling and refuses the `**/` one with
+"no sound narrowing pattern is derivable", so the operator's choice of two
+interchangeable spellings decides whether an expressible intent is expressed
+or exits 2.
+
+The repo shape is the common one: a catch-all `*`, with `/.github/` locked to
+a release-engineering team. Adding a build owner to every build.gradle crosses
+that lockdown at `.github/build.gradle`, which is what forces a narrowing
+rather than a plain amend.
+
+basenameGlob rejects any pattern containing "/", so `**/build.gradle` never
+reaches the candidate logic — even though deriveIntersection already strips a
+`**/` prefix when it normalizes RULE patterns.
+
 ### `TestR2_ScopeNestedInsideBroaderAnchoredRule`
 
 A scope nested INSIDE a broader anchored rule: the broad rule governs
@@ -3745,6 +3975,13 @@ lack Terraform" is answerable only if each op reports itself, by id, in the
 order the policy lists them — a bare count cannot answer it, and a reordered
 list attributes the wrong outcome to the wrong op.
 
+### `TestBasenameSpellingsSelectTheSameFiles`
+
+The equivalence the test above rests on: nothing in the planner is allowed to
+treat these two spellings as selecting different files. If this ever fails,
+TestR2_NarrowingIsIndependentOfScopeSpelling is asserting the wrong thing and
+the spelling-sensitivity finding needs rereading, not the matcher fixing.
+
 ## internal/policy
 
 **`bounds_test.go`**
@@ -4185,4 +4422,4 @@ DIFFERENT states; transitioning between them is a real ownership change.
 
 ---
 
-427 documented test cases across 13 packages.
+451 documented test cases across 13 packages.

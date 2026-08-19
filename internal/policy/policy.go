@@ -38,15 +38,16 @@ const MaxPolicyBytes = 1 << 20
 // generator put the policy's description on op 17 and nothing would notice.
 var (
 	topFields = []string{"version", "name", "description", "on_empty", "max_paths_changed", "ops"}
-	opFields  = []string{"op", "id", "on_zero_match", "note"}
+	opFields  = []string{"op", "id", "on_zero_match", "on_except_zero_match", "note"}
 )
 
 // The two enums, in the order the docs present them. Alphabetizing a legal set
 // in an error message quietly re-ranks it; `require` is the default and belongs
 // first.
 var (
-	onEmptyValues   = []string{"error", "inherit", "unowned"}
-	zeroMatchValues = []string{ops.ZeroMatchRequire, ops.ZeroMatchSkip, ops.ZeroMatchDeclare}
+	onEmptyValues         = []string{"error", "inherit", "unowned"}
+	zeroMatchValues       = []string{ops.ZeroMatchRequire, ops.ZeroMatchSkip, ops.ZeroMatchDeclare}
+	exceptZeroMatchValues = []string{ops.ExceptZeroMatchRequire, ops.ExceptZeroMatchAllow}
 )
 
 // Names from revision 1 of the design. A policy generated against the older doc
@@ -383,7 +384,7 @@ func (v *validator) op(p *Policy, i int, e *jsonValue) opInfo {
 	info := opInfo{index: i, off: e.off, idOff: e.off}
 
 	spec, specOff := "", e.off
-	var zeroM *member
+	var zeroM, exceptM *member
 	note := ""
 
 	switch e.kind {
@@ -412,6 +413,8 @@ func (v *validator) op(p *Policy, i int, e *jsonValue) opInfo {
 				// handled above, before the loop
 			case "on_zero_match":
 				zeroM = m
+			case "on_except_zero_match":
+				exceptM = m
 			case "note":
 				note = v.optString(m, "note", i, info.id)
 			default:
@@ -438,6 +441,10 @@ func (v *validator) op(p *Policy, i int, e *jsonValue) opInfo {
 	if zeroM != nil {
 		zero, zeroOK = v.zeroMatch(zeroM, i, info.id)
 	}
+	exceptZero, exceptZeroOK := "", true
+	if exceptM != nil {
+		exceptZero, exceptZeroOK = v.exceptZeroMatch(exceptM, i, info.id)
+	}
 
 	parsed, err := ops.Parse(spec)
 	if err != nil {
@@ -452,10 +459,14 @@ func (v *validator) op(p *Policy, i int, e *jsonValue) opInfo {
 	if zeroM != nil {
 		v.checkZeroMatchLegality(zeroM, parsed.Kind, zero, i, info.id)
 	}
+	v.checkExceptLegality(zeroM, exceptM, parsed, zero, i, info.id)
 
 	parsed.ID = info.id
 	if zeroOK {
 		parsed.OnZeroMatch = zero
+	}
+	if exceptZeroOK {
+		parsed.OnExceptZeroMatch = exceptZero
 	}
 	p.Ops = append(p.Ops, parsed)
 
@@ -512,6 +523,55 @@ func (v *validator) checkZeroMatchLegality(m *member, kind ops.Kind, zero string
 			v.at(m.val.off, i, id, `"declare" is not meaningful on remove_owner: declare exists to write a rule for files that do not exist yet, and there is no rule that declares the absence of an owner — use %q or %q`,
 				ops.ZeroMatchRequire, ops.ZeroMatchSkip)
 		}
+	}
+}
+
+// exceptZeroMatch validates the R-28 enum. Like zeroMatch, it reports whether
+// the value is usable, so a rejected value is never written onto the op.
+//
+// The legal pair is rendered as `"require" or "allow"` rather than through
+// list(): there are exactly two values and the default comes first, and the
+// message doubles as the documentation an operator sees mid-rollout.
+func (v *validator) exceptZeroMatch(m *member, i int, id string) (string, bool) {
+	val := m.val
+	switch {
+	case val.kind != kString:
+		v.at(val.off, i, id, `field "on_except_zero_match" must be a string, got %s; legal values are %q or %q`,
+			val.describe(), ops.ExceptZeroMatchRequire, ops.ExceptZeroMatchAllow)
+	case val.str == "":
+		// Same rule as on_zero_match: an ABSENT field means require, a PRESENT
+		// and empty one states no decision while reading to a reviewer as
+		// though a choice was made.
+		v.at(val.off, i, id, `field "on_except_zero_match" is present but empty; omitting the field means %q, while "" states no decision at all — legal values are %q or %q`,
+			ops.ExceptZeroMatchRequire, ops.ExceptZeroMatchRequire, ops.ExceptZeroMatchAllow)
+	case !contains(exceptZeroMatchValues, val.str):
+		v.at(val.off, i, id, `field "on_except_zero_match" has unknown value %q%s; legal values are %q or %q`,
+			val.str, hint(val.str, exceptZeroMatchValues), ops.ExceptZeroMatchRequire, ops.ExceptZeroMatchAllow)
+	default:
+		return val.str, true
+	}
+	return "", false
+}
+
+// checkExceptLegality enforces the two R-27 rules that need the PARSED op next
+// to the policy fields — both repo-independent, both caught on repo 0:
+//
+//   - R-30: on_zero_match=declare cannot ride on an op with an except clause. A
+//     declared rule is one literal CODEOWNERS line and CODEOWNERS has no
+//     negation (S-2), so the moment a file matching both scope and except comes
+//     into existence the declared line governs it — the except would be a
+//     comment, not a constraint.
+//   - R-27.6: on_except_zero_match on an op with no except clause. The field
+//     governs an except pattern that matched nothing; on an op without one it
+//     can never apply, and accepting-and-ignoring it is the same class of
+//     failure as a typo'd field name.
+func (v *validator) checkExceptLegality(zeroM, exceptM *member, parsed ops.Op, zero string, i int, id string) {
+	if zeroM != nil && zero == ops.ZeroMatchDeclare && len(parsed.Except) > 0 {
+		v.at(zeroM.val.off, i, id, `on_zero_match %q cannot be combined with an except clause: a declared rule is one literal CODEOWNERS line, and CODEOWNERS has no negation (S-2), so the line cannot encode subtraction (R-30) — split the carve into its own op or drop the declare`,
+			ops.ZeroMatchDeclare)
+	}
+	if exceptM != nil && len(parsed.Except) == 0 {
+		v.at(exceptM.val.off, i, id, `field "on_except_zero_match" is set, but this op has no except clause, so the field can never apply — remove it, or add `+"`except <pat>`"+` to the scope (R-27)`)
 	}
 }
 
