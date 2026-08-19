@@ -1,4 +1,4 @@
-// Except-clause end-to-end tests (docs/except.md, R-25…R-31). Written ahead
+// Except-clause end-to-end tests (docs/except.md, R-26…R-32). Written ahead
 // of the implementation per CONTRIBUTING.md; every negative case asserts a
 // message fragment as well as the exit code, because today the whole grammar
 // dies at checkScope's whitespace rule with exit 3 — the same code several of
@@ -107,11 +107,11 @@ func exceptWantFile(t *testing.T, path, want string) {
 	}
 }
 
-// SPEC R-25: the motivating carve-out is ONE op. `add_owner(/.github/ except
+// SPEC R-26: the motivating carve-out is ONE op. `add_owner(/.github/ except
 // /.github/CODEOWNERS, @org/team_a)` grants team_a co-ownership of .github/
 // while the CODEOWNERS file itself keeps exactly its current owners — owners
 // the policy never names, discovered per repo. Exact bytes: the carve line
-// must restate the original owners and sit after the broad grant (R-28
+// must restate the original owners and sit after the broad grant (R-29
 // structural placement), so last-match-wins (S-1) resolves the excepted path
 // to them.
 func TestR25_ExceptCarveOutEndToEnd(t *testing.T) {
@@ -132,7 +132,7 @@ func TestR25_ExceptCarveOutEndToEnd(t *testing.T) {
 	}
 }
 
-// SPEC R-25/R-31: except means DON'T TOUCH, not revoke. When the grantee
+// SPEC R-26/R-32: except means DON'T TOUCH, not revoke. When the grantee
 // already owns an excepted path via a pre-existing rule, the op succeeds,
 // that rule keeps winning, and the record's `excepted` says so — the one
 // place the don't-touch semantics could otherwise hide something a
@@ -174,7 +174,7 @@ func TestR25_ExceptDoesNotRevokeExistingOwnership(t *testing.T) {
 	}
 }
 
-// SPEC R-25/R-28: multiple excepts are a flat list; one carve line per
+// SPEC R-26/R-29: multiple excepts are a flat list; one carve line per
 // excepted pattern, in except-list order, all placed after the grant they
 // correct. Exact bytes also pin that the grant line itself EXISTS — the
 // first draft never asserted it, so a carve-only implementation that never
@@ -198,7 +198,7 @@ func TestR25_MultipleExceptsEachKeepOwners(t *testing.T) {
 			"/.github/FUNDING.yml @org/original_team\n")
 }
 
-// SPEC R-25/R-28: except applies to every verb, and R-28 carves for every
+// SPEC R-26/R-29: except applies to every verb, and R-29 carves for every
 // line the op writes OR AMENDS — set_owners and remove_owner amend `/x/` in
 // place, which captures the excepted path until the carve restores it. Exact
 // bytes pin both halves: the base mutation actually happened (the first
@@ -238,7 +238,7 @@ func TestR25_SetOwnersAndRemoveOwnerHonorExcept(t *testing.T) {
 	})
 }
 
-// SPEC R-25a/grammar: escaped whitespace is NEVER an except delimiter. A
+// SPEC R-26a/grammar: escaped whitespace is NEVER an except delimiter. A
 // strings.Fields-style splitter passes every other test in this file and
 // breaks exactly here (adversarial-review finding): a directory literally
 // named "a except b" must stay one scope, and an except pattern containing
@@ -279,7 +279,7 @@ func TestR25_EscapedSpaceIsNotAnExceptDelimiter(t *testing.T) {
 	})
 }
 
-// SPEC R-19/R-25: an except op converges. Run twice: second run exits 0,
+// SPEC R-19/R-26: an except op converges. Run twice: second run exits 0,
 // changes nothing, and the file is byte-identical — the property that lets a
 // nightly fleet job re-run the same policy forever.
 func TestR19_ExceptIsIdempotent(t *testing.T) {
@@ -298,7 +298,7 @@ func TestR19_ExceptIsIdempotent(t *testing.T) {
 	}
 }
 
-// SPEC R-19/R-27: idempotence must also hold on the ALLOW path, where run 2
+// SPEC R-19/R-28: idempotence must also hold on the ALLOW path, where run 2
 // sees the grant present but NO carve line for the unmatched except — the
 // state a naive "carve missing, so not yet applied" detector re-appends or
 // refuses on, every night, until S-4 stops loading the file
@@ -329,17 +329,17 @@ func TestR19_ExceptAllowIsIdempotent(t *testing.T) {
 	}
 }
 
-// SPEC R-26: every static defect in an except clause is a POLICY error — exit
+// SPEC R-27: every static defect in an except clause is a POLICY error — exit
 // 3, identical in every repo, caught by `check` before repo 1 — and each
 // message names its defect, because "fix the policy" is only actionable when
-// the operator can tell WHICH of the R-26 rules fired.
+// the operator can tell WHICH of the R-27 rules fired.
 func TestR26_StaticExceptDefectsAreExit3(t *testing.T) {
 	cases := []struct {
 		name     string
 		policy   string
 		fragment string
 	}{
-		// Fragments below are deliberately phrases only the R-26 messages will
+		// Fragments below are deliberately phrases only the R-27 messages will
 		// contain. The obvious fragments pass VACUOUSLY today: the rename case's
 		// current error quotes the token "@a except @b", the enum case's quotes
 		// the unknown field name — both "contain except" for the wrong reason.
@@ -349,7 +349,7 @@ func TestR26_StaticExceptDefectsAreExit3(t *testing.T) {
 		{"equal to scope",
 			`{"version":1,"ops":["add_owner(/.github/ except /.github/, @a)"]}`,
 			"entire scope"},
-		// R-26.2 is over the PATTERN LANGUAGE: /x/** spells /x/ differently, and
+		// R-27.2 is over the PATTERN LANGUAGE: /x/** spells /x/ differently, and
 		// a string-equality check waves it through — then every repo fails at
 		// exit 2 where the contract demands one exit 3 (adversarial-review
 		// finding; Contains holds in both directions for this pair).
@@ -383,7 +383,7 @@ func TestR26_StaticExceptDefectsAreExit3(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			pol := syncWritePolicy(t, tc.policy)
-			// check first: the whole point of R-26 is dying before any repo.
+			// check first: the whole point of R-27 is dying before any repo.
 			code, _, errOut := runCLI(t, "check", "--policy", pol)
 			if code != cli.ExitInvalid {
 				t.Fatalf("check: want exit 3, got %d\nstderr:\n%s", code, errOut)
@@ -404,8 +404,8 @@ func TestR26_StaticExceptDefectsAreExit3(t *testing.T) {
 	}
 }
 
-// SPEC R-22/R-26: `check` must also ACCEPT valid except policies — every
-// R-26 case above exits 3 today for an unrelated reason (the whitespace
+// SPEC R-22/R-27: `check` must also ACCEPT valid except policies — every
+// R-27 case above exits 3 today for an unrelated reason (the whitespace
 // rule), so without this test an implementation whose validator rejects the
 // valid grammar, or whose containment prover is too weak for a legal glob
 // except, halts every fleet script at line one and nothing goes red
@@ -442,7 +442,7 @@ func TestR26_UppercaseExceptStaysRefused(t *testing.T) {
 	exceptWantFragment(t, "stderr", errOut, "unescaped whitespace")
 }
 
-// SPEC R-27 (default): an except pattern matching zero tracked files refuses
+// SPEC R-28 (default): an except pattern matching zero tracked files refuses
 // THIS repo, exit 2, nothing written. This is the guard that keeps the
 // two-pass flow's protection: a repo whose CODEOWNERS still sits at the root
 // has no /.github/CODEOWNERS to carve, and granting /.github/ there without
@@ -469,7 +469,7 @@ func TestR27_UnmatchedExceptRefusesByDefault(t *testing.T) {
 	}
 }
 
-// SPEC R-27 (`allow`): the opt-out APPLIES the grant (exact bytes — a
+// SPEC R-28 (`allow`): the opt-out APPLIES the grant (exact bytes — a
 // wrong implementation that skips the op entirely while reporting the
 // unmatched pattern is the "wall of silent green" this knob must not
 // become), records the inert pattern, warns, and marks the op
@@ -503,7 +503,7 @@ func TestR27_UnmatchedExceptAllowProceedsAndSurfaces(t *testing.T) {
 	}
 }
 
-// SPEC R-27: emptiness questions are ORDERED — on_zero_match disposes of the
+// SPEC R-28: emptiness questions are ORDERED — on_zero_match disposes of the
 // op first, and on_except_zero_match is consulted only if the op will write.
 // When the excepts swallow every in-scope path, the require message must say
 // the emptiness came from the excepts, not the scope.
@@ -557,7 +557,7 @@ func TestR27_FullySweptScopeFollowsOnZeroMatch(t *testing.T) {
 	})
 }
 
-// SPEC R-27/R-23: --create meets except fail-closed. Under the default, the
+// SPEC R-28/R-23: --create meets except fail-closed. Under the default, the
 // motivating op on a repo with NO CODEOWNERS refuses (the excepted path is
 // untracked → zero-match require) and creates nothing — because a created
 // file would have no original owners to preserve and the grant would land
@@ -581,7 +581,7 @@ func TestR27_CreateWithExceptRefusesByDefault(t *testing.T) {
 	}
 }
 
-// SPEC R-28: exact bytes for the one fixture with an unrelated LATER rule —
+// SPEC R-29: exact bytes for the one fixture with an unrelated LATER rule —
 // where placement bugs live. The grant narrows `*` and is inserted after it;
 // the carve goes immediately after the grant (structural placement), NOT at
 // end of file; the workflows rule is amended in place and keeps its
@@ -628,7 +628,7 @@ func TestR28_CarveLineExplainsItselfAndPreservesBytes(t *testing.T) {
 	}
 }
 
-// SPEC R-28: an excepted path that currently matches NO rule is uncarvable.
+// SPEC R-29: an excepted path that currently matches NO rule is uncarvable.
 // nil (unmatched) and [] (zero-owner rule, S-9) are distinct resolved states
 // and never equal (OwnersEqual), so once a broad grant line captures the
 // path there is no writable line that restores "unmatched" — INV-2 is
@@ -652,7 +652,7 @@ func TestR28_UnmatchedExceptedPathRefuses(t *testing.T) {
 	}
 }
 
-// SPEC R-30: excepts make the layered-delegation batch disjoint, so ONE
+// SPEC R-31: excepts make the layered-delegation batch disjoint, so ONE
 // policy expresses "team_a gets .github/, platform gets the CODEOWNERS file"
 // — the pair R-8 refuses today. The oracle is RESOLUTION via snapshot, not
 // bytes: commuting ops may legally produce different line layouts in
@@ -711,7 +711,7 @@ func gitCommitAll(t *testing.T, repo string) {
 	}
 }
 
-// SPEC R-30: excepts relax R-8 only where they actually create disjointness.
+// SPEC R-31: excepts relax R-8 only where they actually create disjointness.
 // Two ops still overlapping on a non-excepted path without commuting refuse
 // exactly as today — the relaxation must not become a hole.
 func TestR30_ResidualOverlapStillRefuses(t *testing.T) {
@@ -730,7 +730,7 @@ func TestR30_ResidualOverlapStillRefuses(t *testing.T) {
 	}
 }
 
-// SPEC R-31: --dry-run emits the full record — excepted paths, the planned
+// SPEC R-32: --dry-run emits the full record — excepted paths, the planned
 // changes — and writes nothing. The fleet preview ("who ends up holding the
 // carve-outs, in all 100 repos") must not require mutating a single repo,
 // and must not be an except-special-cased EMPTY preview either.
@@ -765,7 +765,7 @@ func TestR31_DryRunSurfacesExceptedWithoutWriting(t *testing.T) {
 	}
 }
 
-// SPEC R-31: human output and --summary-out render the carve-out facts too.
+// SPEC R-32: human output and --summary-out render the carve-out facts too.
 // An implementation surfacing excepted paths only in JSON leaves the fleet
 // PR reviewer — who reads the summary, not results.jsonl — blind to them.
 func TestR31_HumanAndSummaryRenderExcepts(t *testing.T) {
@@ -781,7 +781,7 @@ func TestR31_HumanAndSummaryRenderExcepts(t *testing.T) {
 	exceptWantFragment(t, "summary markdown", syncReadFile(t, summary), ".github/CODEOWNERS")
 }
 
-// Pin, passes today: R-31's schema promise is ADDITIVE — records for ops
+// Pin, passes today: R-32's schema promise is ADDITIVE — records for ops
 // without an except clause carry no excepted/except_unmatched keys, so
 // existing jq pipelines parse byte-identical records. Freezes the field
 // names against an implementation that emits them empty on every op.
@@ -800,7 +800,7 @@ func TestR31_NonExceptRecordsCarryNoExceptFields(t *testing.T) {
 	}
 }
 
-// SPEC R-25/glob: an except may be a glob, provided containment is provable.
+// SPEC R-26/glob: an except may be a glob, provided containment is provable.
 // Exact bytes pin grant + carve + order. The zero-directory `**` case
 // (src/a_gen.pb.go, no intermediate dir) rides on the carve line matching it
 // — if the containment prover and the matcher disagree on `**`, the proof

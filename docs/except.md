@@ -1,10 +1,10 @@
 # Scope subtraction (`except`) — specification
 
-**Status: implemented.** Requirements R-25…R-31 below are enforced by the e2e
+**Status: implemented.** Requirements R-26…R-32 below are enforced by the e2e
 suite in `internal/cli/except_test.go`, which was written against this document
 before the implementation existed (see [CONTRIBUTING.md](../CONTRIBUTING.md): the
 failing test comes first). One guarantee is deliberately weakenable and only by
-explicit opt-in (`on_except_zero_match: allow`, R-27) — it is marked in output the
+explicit opt-in (`on_except_zero_match: allow`, R-28) — it is marked in output the
 same way `declare` is, and documented below alongside it.
 
 ## Motivation
@@ -25,15 +25,15 @@ The excepted paths are simply **out of the op's scope**: the op neither grants n
 revokes there, and the existing invariants — not new machinery — prove them
 untouched. This also dissolves the wider conflict class by turning *ordering*
 problems into *disjointness* problems: "carve out and reassign" becomes two
-non-overlapping ops that commute, which R-8 already accepts (R-30).
+non-overlapping ops that commute, which R-8 already accepts (R-31).
 
 `except` means **don't touch**. It is not a revocation and not a standing
 guarantee that the owner never holds the excepted paths — if the grantee already
-owns an excepted path, that ownership persists (and is reported, R-31). The
+owns an excepted path, that ownership persists (and is reported, R-32). The
 revocation intent remains `remove_owner`; the standing guarantee belongs to
 `audit`.
 
-## Grammar (R-25a)
+## Grammar (R-26a)
 
 The scope argument of `add_owner`, `set_owners`, and `remove_owner` may carry an
 `except` clause:
@@ -58,11 +58,11 @@ The scope argument of `add_owner`, `set_owners`, and `remove_owner` may carry an
   (policy error, exit 3).
 
 One new per-op policy field exists (object form only, like `on_zero_match`):
-`on_except_zero_match`, values `require` (default) | `allow` — defined in R-27.
+`on_except_zero_match`, values `require` (default) | `allow` — defined in R-28.
 
 ## Semantics
 
-### R-25 — effective scope
+### R-26 — effective scope
 
 An op's scope set is
 `{tracked paths matching scope} \ {tracked paths matching any except pattern}`.
@@ -71,12 +71,12 @@ operates on this **effective scope**.
 
 Excepted paths are out of scope **of this op**, nothing more. *This op* must not
 change their resolution; a **sibling op in the same batch may legitimately govern
-them** (that disjointness is R-30's entire point). Batch-level INV-2 therefore
+them** (that disjointness is R-31's entire point). Batch-level INV-2 therefore
 binds exactly the paths in *no* op's effective scope — which is what the prover
 already enforces — and a path excepted by one op and scoped by another is proven
 under the sibling's INV-1, not under INV-2.
 
-### R-26 — static validation (policy errors, exit 3)
+### R-27 — static validation (policy errors, exit 3)
 
 All of the following are properties of the policy alone, are reported by
 `check --policy` with file/line/op-id, and exit 3 from `sync` before anything is
@@ -98,14 +98,14 @@ hundred times where the contract demands one exit 3.
 3. Two except patterns of one op whose languages are equal are duplicates —
    refused (a generator bug, not a choice).
 4. `except` on `rename_owner` — refused ("rename_owner takes no scope").
-5. `on_zero_match: declare` combined with `except` — refused (R-29: a declared
+5. `on_zero_match: declare` combined with `except` — refused (R-30: a declared
    line cannot encode subtraction).
 6. `on_except_zero_match` with any value other than `"require"` or `"allow"`, or
    on an op with no except clause — refused.
 7. An `except` keyword followed by no patterns — refused ("except clause has no
    patterns").
 
-### R-27 — zero-match interplay (per repo)
+### R-28 — zero-match interplay (per repo)
 
 Two emptiness questions exist, and they are **ordered**:
 
@@ -129,7 +129,7 @@ Two emptiness questions exist, and they are **ordered**:
      precedence-escalation hole (S-8), reopened silently. Exit 2 is the tool
      saying "normalize this repo first".
    - `allow`: proceed; the inert pattern is listed in the JSON record
-     (`except_unmatched`, R-31) and as a warning. **This is a declare-class
+     (`except_unmatched`, R-32) and as a warning. **This is a declare-class
      weakening of INV-1 and is marked like one**: the grant is written with no
      carve for the unmatched pattern, so a matching file created later falls
      under the grant — nothing in the repo today can verify the carve-out you
@@ -138,7 +138,7 @@ Two emptiness questions exist, and they are **ordered**:
      [guarantees.md](guarantees.md#what-on_except_zero_match-allow-costs) beside
      declare's. No dead rule is written for the unmatched pattern (R-5).
 
-### R-28 — carve synthesis
+### R-29 — carve synthesis
 
 Applies to **every line an except-carrying op writes or amends**, whatever the
 verb — `set_owners` and `remove_owner` amendments capture excepted paths exactly
@@ -179,7 +179,7 @@ restore "unmatched" once a broad line captures the path, so the op refuses
 (exit 2, "matches no rule") rather than quietly converting "nobody owns this"
 into "a rule says nobody owns this".
 
-### R-29 — `declare` cannot carry an except
+### R-30 — `declare` cannot carry an except
 
 A declared rule is one literal CODEOWNERS line, and CODEOWNERS has no negation
 (S-2): the moment a file matching both the scope and the except comes into
@@ -187,7 +187,7 @@ existence, the declared line governs it — the except would be a comment, not a
 constraint. Policy error, exit 3 (a static fact about the syntax, identical in
 every repo).
 
-### R-30 — R-8 runs on effective scopes
+### R-31 — R-8 runs on effective scopes
 
 The tree-path form of R-8 (overlap and commutation over tracked paths) uses
 **effective scopes**, as does the rename-widening fixpoint that feeds it. Ops
@@ -213,21 +213,21 @@ shouldn't.
 Ops whose effective scopes still overlap without commuting refuse exactly as
 today. Nothing that R-8 accepts today becomes a refusal.
 
-### R-31 — the record explains the carve-outs
+### R-32 — the record explains the carve-outs
 
 Under `--format json`, a per-op result with an except clause additionally
 reports:
 
 - `excepted`: every tracked excepted path with its resolved owners **in the
   final after-batch state** — `[{"path": "...", "owners": ["..."]}]`. For a path
-  no sibling op governs this equals the before state (R-25); when a sibling op
-  reassigns a carved path (R-30's layered policy), the after-batch owners are
+  no sibling op governs this equals the before state (R-26); when a sibling op
+  reassigns a carved path (R-31's layered policy), the after-batch owners are
   the ones an operator auditing "who ended up holding the carve-outs" needs.
   This is also the per-repo surface for the *don't-touch-≠-revoke* misread: a
   grantee already owning an excepted path is visible here, not silent.
 - `except_unmatched`: except patterns that matched zero tracked files (present
   only under `on_except_zero_match: allow`, which is the only way to reach that
-  state with a written file), alongside `proven: "structural"` (R-27).
+  state with a written file), alongside `proven: "structural"` (R-28).
 
 `--dry-run`, human output, and `--summary-out` render the same facts. Schema
 changes are additive and `omitempty`; records for ops without an except clause
@@ -237,8 +237,8 @@ are byte-identical to today's.
 
 A repo with no CODEOWNERS plus `--create` meets `except` fail-closed. Under the
 default `on_except_zero_match: require`, an except-carrying op refuses before the
-file is created: either the excepted paths are untracked (zero-match, R-27) or
-they are tracked but resolve to no rule in an empty file (unmatched, R-28's
+file is created: either the excepted paths are untracked (zero-match, R-28) or
+they are tracked but resolve to no rule in an empty file (unmatched, R-29's
 refusal edge) — and a refusal creates nothing (`created: false`). Under `allow`,
 a created file receives the grant with no carve, marked `proven: "structural"`
 like any other allow-path write. The motivating fleet case should not pass
@@ -249,7 +249,7 @@ which is a human decision, not a default.
 
 Given a repo whose file is at `.github/CODEOWNERS` — the highest-precedence
 location (S-8); a root- or docs/-located file plus this op refuses under the
-R-27 default until the repo is normalized, which is deliberate:
+R-28 default until the repo is normalized, which is deliberate:
 
 ```
 * @org/original_team

@@ -10,7 +10,7 @@ import (
 	"github.com/jordonpeterson/codeowners-tool/internal/resolve"
 )
 
-// Carve synthesis (R-28).
+// Carve synthesis (R-29).
 //
 // An except-carrying op's verb synthesis runs over the EFFECTIVE scope, but
 // the lines it writes or amends are patterns, and a pattern does not know
@@ -36,7 +36,7 @@ import (
 // derives differently now. For an except-carrying op the union is required
 // for soundness's mirror image — availability: a narrowing line legitimately
 // matches the excepted paths, because the carve synthesized immediately after
-// it restores them (R-28); proven over the effective scope alone, the
+// it restores them (R-29); proven over the effective scope alone, the
 // motivating candidate "/.github/" fails tree-exactness at exactly the
 // excepted CODEOWNERS path and the op refuses on every repo.
 func deriveDomain(op ops.Op, scope map[string]bool, tree []string) map[string]bool {
@@ -62,7 +62,7 @@ func deriveDomain(op ops.Op, scope map[string]bool, tree []string) map[string]bo
 }
 
 // exceptBaseline is one excepted path's resolution on the evolving file
-// before its op ran: the owners a carve must restate (R-28 — the EVOLVING
+// before its op ran: the owners a carve must restate (R-29 — the EVOLVING
 // file, not the before-batch snapshot: a sibling rename ordered earlier must
 // see its rename respected, and restating stale before-batch owners would
 // force a spurious gate refusal), and the rule that granted them, which is
@@ -76,7 +76,7 @@ type exceptBaseline struct {
 }
 
 // exceptedBaseline captures every excepted path's pre-op resolution, and
-// enforces R-28's one unfixable edge: an excepted path that currently matches
+// enforces R-29's one unfixable edge: an excepted path that currently matches
 // no rule. Unmatched (nil) and explicitly zero-owned ([], S-9) are distinct
 // resolved states and never equal (OwnersEqual); no writable line can restore
 // "unmatched" once a broad line captures the path, so the op refuses rather
@@ -95,7 +95,7 @@ func exceptedBaseline(f *file.File, tree []string, op ops.Op, excepted map[strin
 		r := res[p]
 		if !r.Matched {
 			return nil, &RefusalError{Msg: fmt.Sprintf(
-				"refusing: excepted path %q matches no rule, so no carve can restore it — unmatched and explicitly zero-owned are different states (S-9), and writing %s would quietly convert \"nobody owns this\" into \"a rule says nobody owns this\" (R-28)",
+				"refusing: excepted path %q matches no rule, so no carve can restore it — unmatched and explicitly zero-owned are different states (S-9), and writing %s would quietly convert \"nobody owns this\" into \"a rule says nobody owns this\" (R-29)",
 				p, op.Raw)}
 		}
 		base[p] = exceptBaseline{
@@ -148,7 +148,7 @@ func synthCarves(f *file.File, tree []string, op ops.Op, excepted map[string]boo
 				// A rule deletion (R-6 inherit) dropped the excepted path to
 				// "no rule matches"; same unfixable edge as the baseline one.
 				return &RefusalError{Msg: fmt.Sprintf(
-					"refusing: %s leaves excepted path %q matching no rule, and no carve can restore an unmatched state (R-28)", op.Raw, p)}
+					"refusing: %s leaves excepted path %q matching no rule, and no carve can restore an unmatched state (R-29)", op.Raw, p)}
 			}
 			if resolve.OwnersEqual(post[p].Owners, base[p].owners) {
 				continue // untouched (e.g. a pre-existing later rule still wins) — except means don't touch, and nothing needs correcting
@@ -206,7 +206,7 @@ func carveRegions(f *file.File, tree []string, ep *pattern.Pattern, exceptPat st
 		cand, exact, ok := deriveCarvePattern(exceptPat, ep, rulePat, region, tree)
 		if !ok {
 			return &RefusalError{Msg: fmt.Sprintf(
-				"refusing: except pattern %q spans paths whose current owners differ, and no sound carve pattern is derivable for the region governed by %q — writing the line would capture the excepted paths (R-28)",
+				"refusing: except pattern %q spans paths whose current owners differ, and no sound carve pattern is derivable for the region governed by %q — writing the line would capture the excepted paths (R-29)",
 				exceptPat, rulePat)}
 		}
 		if !exact {
@@ -294,7 +294,7 @@ func insertCarve(f *file.File, pl *Plan, myCarves map[*file.Rule]bool, l int, ca
 		Action: "insert", Line: at + 1, Pattern: carvePat,
 		NewOwners: restated, NewLine: f.LineText(at),
 		Reason: fmt.Sprintf(
-			"carve for `except %s`: the line above would otherwise govern the excepted path(s) by last-match-wins (S-1); this restates their current owners immediately after it, before any pre-existing rule (R-28)",
+			"carve for `except %s`: the line above would otherwise govern the excepted path(s) by last-match-wins (S-1); this restates their current owners immediately after it, before any pre-existing rule (R-29)",
 			exceptPat),
 	})
 }

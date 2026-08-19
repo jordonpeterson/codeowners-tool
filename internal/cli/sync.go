@@ -627,7 +627,7 @@ func renderRecordText(w io.Writer, rec SyncRecord) {
 		default:
 			fmt.Fprintf(w, "  %s  %s\n", label, o.Status)
 		}
-		// R-31: the carve-out facts render in every format, not just JSON — an
+		// R-32: the carve-out facts render in every format, not just JSON — an
 		// operator reading the text output must see who ended up holding the
 		// excepted paths without re-running under --format json.
 		for _, e := range o.Excepted {
@@ -695,7 +695,7 @@ func renderSummary(rec SyncRecord, r *syncRun) string {
 		}
 	}
 
-	// R-31: the PR reviewer reads this file, not results.jsonl, so the
+	// R-32: the PR reviewer reads this file, not results.jsonl, so the
 	// carve-out facts have to be here too — who ended up holding each excepted
 	// path, and any except pattern that bit nothing.
 	var carve []string

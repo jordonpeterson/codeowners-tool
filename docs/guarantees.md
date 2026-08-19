@@ -65,7 +65,7 @@ in `--summary-out`, so a reviewer can find them without reading the diff.
 
 ## What `on_except_zero_match: allow` costs
 
-The same class of weakening, reachable from `except` ([except.md](except.md), R-27): an
+The same class of weakening, reachable from `except` ([except.md](except.md), R-28): an
 except pattern that matches nothing tracked means the carve-out the policy promises does
 not exist in this repo. The default (`require`) refuses the repo. `allow` writes the
 grant with **no carve line** for the unmatched pattern, so a matching file created later

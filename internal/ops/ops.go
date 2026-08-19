@@ -35,13 +35,13 @@ type Op struct {
 	// preserves R-5 exactly, which is why adding this changes nothing for
 	// ops built by Parse.
 	OnZeroMatch string `json:"on_zero_match,omitempty"`
-	// Except is the op's scope-subtraction patterns (R-25a): tracked paths
+	// Except is the op's scope-subtraction patterns (R-26a): tracked paths
 	// matching any of them are out of the op's scope. Parsed from the one
 	// spelling `<scope> except <pat> [<pat> ...]`; there is no JSON field
 	// carrying excepts, so an op built any other way has none.
 	Except []string `json:"except,omitempty"`
 	// OnExceptZeroMatch selects behavior when an except pattern matches zero
-	// tracked files AND the op will write (R-27): "" (== "require") |
+	// tracked files AND the op will write (R-28): "" (== "require") |
 	// "require" | "allow". Policy object form only, like OnZeroMatch.
 	OnExceptZeroMatch string `json:"on_except_zero_match,omitempty"`
 	// ID is a policy-file label used in results and errors; "" from --op.
@@ -55,7 +55,7 @@ const (
 	ZeroMatchDeclare = "declare"
 )
 
-// Except zero-match policies (R-27). Require shares R-21's spelling — the
+// Except zero-match policies (R-28). Require shares R-21's spelling — the
 // default posture has one name across both knobs.
 const (
 	ExceptZeroMatchRequire = "require"
@@ -115,12 +115,12 @@ func Parse(s string) (Op, error) {
 			return Op{}, fmt.Errorf("rename_owner takes (old, new), got %d args", len(args))
 		}
 		for _, a := range args {
-			// R-26.4: an except clause on a rename has to be named as such.
+			// R-27.4: an except clause on a rename has to be named as such.
 			// Falling through to "invalid owner token \"@a except @b\"" would
 			// leave the operator hunting a typo in an owner name instead of
 			// learning that the clause has no meaning here.
 			if _, _, isExcept := splitExceptClause(a); isExcept {
-				return Op{}, fmt.Errorf("rename_owner takes no scope, so it cannot carry an except clause (R-26)")
+				return Op{}, fmt.Errorf("rename_owner takes no scope, so it cannot carry an except clause (R-27)")
 			}
 			if !file.ValidOwnerToken(a) {
 				return Op{}, fmt.Errorf("invalid owner token %q", a)
@@ -179,7 +179,7 @@ func checkScope(scope string) error {
 }
 
 // splitUnescapedWS splits s on runs of UNESCAPED spaces and tabs, keeping
-// escape sequences inside their token. This is the except delimiter (R-25a):
+// escape sequences inside their token. This is the except delimiter (R-26a):
 // unescaped whitespace is otherwise illegal in a scope (checkScope), so every
 // op string legal today yields one token here and parses identically. A
 // strings.Fields splitter would split `/a\ except\ b/` — a directory literally
@@ -220,7 +220,7 @@ func splitUnescapedWS(s string) []string {
 // unescaped-whitespace token that is lowercase `except`, exactly. Any other
 // unescaped-whitespace form (including `EXCEPT`) reports isExcept=false and is
 // left for checkScope's existing whitespace refusal — the spec promises no new
-// acceptance for near-misses (R-25a).
+// acceptance for near-misses (R-26a).
 func splitExceptClause(arg string) (scope string, excepts []string, isExcept bool) {
 	toks := splitUnescapedWS(arg)
 	if len(toks) < 2 || toks[1] != "except" {
@@ -230,7 +230,7 @@ func splitExceptClause(arg string) (scope string, excepts []string, isExcept boo
 }
 
 // parseScopeArg parses a scope argument, with or without an except clause,
-// and runs every R-26 check that is a property of the op string alone. These
+// and runs every R-27 check that is a property of the op string alone. These
 // live here rather than in the policy validator so `--op` and a policy file
 // refuse identically — two validation paths for one grammar is how they
 // drift apart.
@@ -243,7 +243,7 @@ func parseScopeArg(arg string) (scope string, excepts []string, err error) {
 		return arg, nil, nil
 	}
 	if len(excepts) == 0 {
-		return "", nil, fmt.Errorf("except clause has no patterns in %q: write `<scope> except <pat> [<pat> ...]` (R-25a)", arg)
+		return "", nil, fmt.Errorf("except clause has no patterns in %q: write `<scope> except <pat> [<pat> ...]` (R-26a)", arg)
 	}
 	if err := checkScope(scope); err != nil {
 		return "", nil, err
@@ -253,23 +253,23 @@ func parseScopeArg(arg string) (scope string, excepts []string, err error) {
 			return "", nil, fmt.Errorf("invalid except pattern: %v", err)
 		}
 	}
-	// R-26 comparisons are over the pattern LANGUAGE (containment both ways),
+	// R-27 comparisons are over the pattern LANGUAGE (containment both ways),
 	// never string equality: `/x/**` and `/x/` are one language spelled two
 	// ways, and a string check would wave through a policy that empties its
 	// own scope in every repo, then fail per-repo at exit 2 a hundred times
 	// where the contract demands one exit 3.
 	for _, e := range excepts {
 		if pattern.Contains(e, scope) {
-			return "", nil, fmt.Errorf("except pattern %q covers the entire scope %q — the op is emptied by construction (R-26)", e, scope)
+			return "", nil, fmt.Errorf("except pattern %q covers the entire scope %q — the op is emptied by construction (R-27)", e, scope)
 		}
 		if !pattern.Contains(scope, e) {
-			return "", nil, fmt.Errorf("except pattern %q is not provably contained in scope %q (R-26: unprovable containment is refused, so a carve can never bite a foreign subtree)", e, scope)
+			return "", nil, fmt.Errorf("except pattern %q is not provably contained in scope %q (R-27: unprovable containment is refused, so a carve can never bite a foreign subtree)", e, scope)
 		}
 	}
 	for i := 0; i < len(excepts); i++ {
 		for j := i + 1; j < len(excepts); j++ {
 			if pattern.Contains(excepts[i], excepts[j]) && pattern.Contains(excepts[j], excepts[i]) {
-				return "", nil, fmt.Errorf("duplicate except pattern: %q and %q match the same paths — a generator bug, not a choice (R-26)", excepts[i], excepts[j])
+				return "", nil, fmt.Errorf("duplicate except pattern: %q and %q match the same paths — a generator bug, not a choice (R-27)", excepts[i], excepts[j])
 			}
 		}
 	}

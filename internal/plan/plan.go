@@ -96,19 +96,19 @@ type OpResult struct {
 	Proven string `json:"proven,omitempty"` // tree | structural
 	Reason string `json:"reason,omitempty"`
 
-	// R-31, additive and omitempty so records for ops without an except
+	// R-32, additive and omitempty so records for ops without an except
 	// clause stay byte-identical to before the feature existed. Excepted is
 	// every tracked excepted path with its resolved owners in the final
 	// after-batch state; ExceptUnmatched lists except patterns that matched
 	// zero tracked files (reachable with a written file only under
-	// on_except_zero_match=allow, R-27).
+	// on_except_zero_match=allow, R-28).
 	Excepted        []ExceptedPath `json:"excepted,omitempty"`
 	ExceptUnmatched []string       `json:"except_unmatched,omitempty"`
 }
 
 // ExceptedPath is one carved-out path and who holds it after the batch — the
 // per-repo surface for the don't-touch-≠-revoke misread: a grantee already
-// owning an excepted path is visible here, not silent (R-31).
+// owning an excepted path is visible here, not silent (R-32).
 type ExceptedPath struct {
 	Path   string   `json:"path"`
 	Owners []string `json:"owners"`
@@ -156,7 +156,7 @@ func Build(content []byte, tree []string, opList []ops.Op, opts Options) (*Plan,
 	// Per-op scope path sets (R-5: empty scope is invalid input, unless a
 	// policy op opts out per R-21). For an except-carrying op the set is the
 	// EFFECTIVE scope — {tracked scope matches} \ {tracked except matches}
-	// (R-25) — and every mechanism downstream of here (R-8, the rename
+	// (R-26) — and every mechanism downstream of here (R-8, the rename
 	// fixpoint, synthesis, the INV-1/INV-2 gate) ranges over it unchanged:
 	// excepted paths are simply out of the op's scope, so the existing
 	// invariants, not new machinery, prove them untouched.
@@ -212,7 +212,7 @@ func Build(content []byte, tree []string, opList []ops.Op, opts Options) (*Plan,
 			}
 			exceptSets[i] = excepted
 			if len(set) == 0 {
-				// R-27's two emptiness questions are ORDERED, and this arm is
+				// R-28's two emptiness questions are ORDERED, and this arm is
 				// the first: an empty EFFECTIVE scope is disposed of by
 				// on_zero_match, and on_except_zero_match (the else-if below)
 				// is never consulted — an op that writes nothing can reopen
@@ -245,28 +245,28 @@ func Build(content []byte, tree []string, opList []ops.Op, opts Options) (*Plan,
 					// matches nothing" sends the operator to the scope, while
 					// "everything in scope is excepted" is how a too-broad
 					// except announces itself — blaming the scope there sends
-					// them hunting a typo in the wrong argument (R-27).
+					// them hunting a typo in the wrong argument (R-28).
 					if raw > 0 {
 						return nil, &InvalidError{Msg: fmt.Sprintf(
-							"scope %q matches %d tracked file(s), but every one of them is excepted — the except clause empties the op in this repo (R-27)", op.Scope, raw)}
+							"scope %q matches %d tracked file(s), but every one of them is excepted — the except clause empties the op in this repo (R-28)", op.Scope, raw)}
 					}
 					return nil, &InvalidError{Msg: fmt.Sprintf("scope %q matches zero tracked files (R-5: refusing to create a dead rule)", op.Scope)}
 				}
 			} else if len(zeroPats) > 0 {
-				// R-27's second question, reached only when the op WILL write.
+				// R-28's second question, reached only when the op WILL write.
 				switch op.OnExceptZeroMatch {
 				case ops.ExceptZeroMatchAllow:
 					// Declare-class weakening of INV-1, marked like one: the
 					// grant goes in with no carve for the unmatched pattern,
 					// so nothing in this repo can verify the carve-out — the
 					// op is proven "structural", listed in except_unmatched
-					// (R-31), and warned about. No dead rule is written for
+					// (R-32), and warned about. No dead rule is written for
 					// the pattern (R-5).
 					exceptUnmatched[i] = zeroPats
 					structural[i] = true
 					for _, e := range zeroPats {
 						allowWarnings = append(allowWarnings, fmt.Sprintf(
-							"except pattern %q matches zero tracked files; on_except_zero_match=allow writes the grant with NO carve for it, so a matching file created later falls under the grant — a declare-class weakening of INV-1, marked proven=structural (R-27)", e))
+							"except pattern %q matches zero tracked files; on_except_zero_match=allow writes the grant with NO carve for it, so a matching file created later falls under the grant — a declare-class weakening of INV-1, marked proven=structural (R-28)", e))
 					}
 				default:
 					// "" and "require" are one state, exactly as above. An
@@ -277,7 +277,7 @@ func Build(content []byte, tree []string, opList []ops.Op, opts Options) (*Plan,
 					// precedence-escalation hole for a later-created
 					// /.github/CODEOWNERS.
 					return nil, &RefusalError{Msg: fmt.Sprintf(
-						"refusing: except pattern %q matches zero tracked files — the carve-out this policy promises does not exist in this repo, and writing the grant without it would reopen the hole the except exists to close (R-27); normalize this repo first, or set on_except_zero_match=allow to accept the weakening", zeroPats[0])}
+						"refusing: except pattern %q matches zero tracked files — the carve-out this policy promises does not exist in this repo, and writing the grant without it would reopen the hole the except exists to close (R-28); normalize this repo first, or set on_except_zero_match=allow to accept the weakening", zeroPats[0])}
 				}
 			}
 		}
@@ -417,7 +417,7 @@ func Build(content []byte, tree []string, opList []ops.Op, opts Options) (*Plan,
 		case declared[i]:
 			err = synthDeclare(f, op, batch, &declares, pl)
 		default:
-			// R-28's baseline: the excepted paths' owners on the EVOLVING file,
+			// R-29's baseline: the excepted paths' owners on the EVOLVING file,
 			// captured before this op edits it — not the before-batch snapshot.
 			// A sibling rename ordered earlier must see its rename respected;
 			// restating stale before-batch owners in a carve would force a
@@ -488,9 +488,9 @@ func Build(content []byte, tree []string, opList []ops.Op, opts Options) (*Plan,
 		return nil, err
 	}
 
-	// R-31: the record explains the carve-outs. Owners come from the FINAL
+	// R-32: the record explains the carve-outs. Owners come from the FINAL
 	// after-batch state, not the before snapshot: when a sibling op reassigns
-	// a carved path (R-30's layered policy), the after-batch owners are the
+	// a carved path (R-31's layered policy), the after-batch owners are the
 	// ones an operator auditing "who ended up holding the carve-outs" needs.
 	// Populated before the converged early-return below, because run 2 of a
 	// nightly job must keep disclosing the same facts run 1 did (R-19).

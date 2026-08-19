@@ -493,7 +493,7 @@ func (v *validator) checkZeroMatchLegality(m *member, kind ops.Kind, zero string
 	}
 }
 
-// exceptZeroMatch validates the R-27 enum. Like zeroMatch, it reports whether
+// exceptZeroMatch validates the R-28 enum. Like zeroMatch, it reports whether
 // the value is usable, so a rejected value is never written onto the op.
 //
 // The legal pair is rendered as `"require" or "allow"` rather than through
@@ -520,25 +520,25 @@ func (v *validator) exceptZeroMatch(m *member, i int, id string) (string, bool) 
 	return "", false
 }
 
-// checkExceptLegality enforces the two R-26 rules that need the PARSED op next
+// checkExceptLegality enforces the two R-27 rules that need the PARSED op next
 // to the policy fields — both repo-independent, both caught on repo 0:
 //
-//   - R-29: on_zero_match=declare cannot ride on an op with an except clause. A
+//   - R-30: on_zero_match=declare cannot ride on an op with an except clause. A
 //     declared rule is one literal CODEOWNERS line and CODEOWNERS has no
 //     negation (S-2), so the moment a file matching both scope and except comes
 //     into existence the declared line governs it — the except would be a
 //     comment, not a constraint.
-//   - R-26.6: on_except_zero_match on an op with no except clause. The field
+//   - R-27.6: on_except_zero_match on an op with no except clause. The field
 //     governs an except pattern that matched nothing; on an op without one it
 //     can never apply, and accepting-and-ignoring it is the same class of
 //     failure as a typo'd field name.
 func (v *validator) checkExceptLegality(zeroM, exceptM *member, parsed ops.Op, zero string, i int, id string) {
 	if zeroM != nil && zero == ops.ZeroMatchDeclare && len(parsed.Except) > 0 {
-		v.at(zeroM.val.off, i, id, `on_zero_match %q cannot be combined with an except clause: a declared rule is one literal CODEOWNERS line, and CODEOWNERS has no negation (S-2), so the line cannot encode subtraction (R-29) — split the carve into its own op or drop the declare`,
+		v.at(zeroM.val.off, i, id, `on_zero_match %q cannot be combined with an except clause: a declared rule is one literal CODEOWNERS line, and CODEOWNERS has no negation (S-2), so the line cannot encode subtraction (R-30) — split the carve into its own op or drop the declare`,
 			ops.ZeroMatchDeclare)
 	}
 	if exceptM != nil && len(parsed.Except) == 0 {
-		v.at(exceptM.val.off, i, id, `field "on_except_zero_match" is set, but this op has no except clause, so the field can never apply — remove it, or add `+"`except <pat>`"+` to the scope (R-26)`)
+		v.at(exceptM.val.off, i, id, `field "on_except_zero_match" is set, but this op has no except clause, so the field can never apply — remove it, or add `+"`except <pat>`"+` to the scope (R-27)`)
 	}
 }
 

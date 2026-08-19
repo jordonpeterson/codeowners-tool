@@ -574,7 +574,7 @@ func opResultFor(op ops.Op, skipped, declared, structural, changed bool) OpResul
 	}
 	// INV-6's disclosure: "structural" says a rule went in without a single
 	// tracked file to check it against — a declare's whole write, or the
-	// missing carve of an except allowed past its zero match (R-27). A fleet
+	// missing carve of an except allowed past its zero match (R-28). A fleet
 	// operator reading 100 JSON records cannot otherwise tell a checked
 	// rollout from an unchecked one.
 	r.Proven = "tree"
