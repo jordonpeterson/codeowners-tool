@@ -12,6 +12,12 @@
 // `sync` and `check` run under a coarser three-code contract of their own
 // (R-19: only 0, 2 and 3), because their question is "did this repo converge?"
 // rather than "what exactly happened?". See sync.go.
+//
+// `audit --lint` narrows 0 and 4 rather than redefining them: it never returns
+// 1, because a file that needs no repair is that verb's SUCCESS and exiting
+// no-op would make every healthy repo in a fleet read as a failure under
+// `set -e`; and its 4 is still "findings present", counting a fix computed but
+// not written (--dry-run) as one. See lint.go.
 package cli
 
 import (
@@ -72,16 +78,42 @@ func flagParseCode(err error) int {
 	return ExitInvalid
 }
 
+// isFlagSet reports whether the operator actually PASSED a flag, as opposed to
+// inheriting its default. --cache-ttl has a non-zero default, so "did you ask
+// for this?" cannot be read off its value.
+func isFlagSet(fs *flag.FlagSet, name string) bool {
+	seen := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == name {
+			seen = true
+		}
+	})
+	return seen
+}
+
 // SyncRecord is one `sync` run, rendered as one JSON object (R-24). One line
 // per repo is what lets `jq -s` aggregate a fleet without parsing stderr.
 type SyncRecord struct {
-	Repo         string          `json:"repo"`
-	Status       string          `json:"status"` // applied|unchanged|skipped|refused|error
-	Ops          []plan.OpResult `json:"ops,omitempty"`
-	OpsApplied   int             `json:"ops_applied"`
-	OpsSkipped   int             `json:"ops_skipped"`
-	PathsChanged int             `json:"paths_changed"`
-	Created      bool            `json:"created"`
+	Repo string `json:"repo"`
+	// CodeownersPath is the repo-relative file this run CHANGED, or under
+	// --dry-run would have. A rollout has to stage and commit that file, and
+	// which of the three legal locations it is differs per repo (S-8), so a
+	// loop without this field can only `git add -A` and hope nothing else moved
+	// in the clone.
+	//
+	// It is emitted only when Status is StatusApplied. Absent therefore means
+	// "this run wrote nothing", NOT "no file was chosen": an `unchanged` repo
+	// has a perfectly good CODEOWNERS and simply nothing to stage. A refusal
+	// names its file in Error instead. One caveat the fleet script has to
+	// respect: a --dry-run record reports `applied` for a run that would have
+	// written, so DryRun must be checked before anything is staged.
+	CodeownersPath string          `json:"codeowners_path,omitempty"`
+	Status         string          `json:"status"` // applied|unchanged|skipped|refused|error
+	Ops            []plan.OpResult `json:"ops,omitempty"`
+	OpsApplied     int             `json:"ops_applied"`
+	OpsSkipped     int             `json:"ops_skipped"`
+	PathsChanged   int             `json:"paths_changed"`
+	Created        bool            `json:"created"`
 	// DryRun marks a record produced under --dry-run. Without it a preview row
 	// and a row from a real rollout are byte-identical, so an operator holding
 	// results.jsonl cannot tell whether the fleet was changed or only modelled —
@@ -129,6 +161,8 @@ func Run(argv []string, stdout, stderr io.Writer) int {
 		return cmdApply(argv[1:], stdout, stderr)
 	case "audit":
 		return cmdAudit(argv[1:], stdout, stderr)
+	case "lint":
+		return cmdLint(argv[1:], stdout, stderr)
 	case "verify":
 		return cmdVerify(argv[1:], stdout, stderr)
 	case "snapshot":
@@ -154,17 +188,32 @@ func usage(w io.Writer) {
 
   sync     (--op 'OP' ... | --policy FILE) [--on-empty error|inherit|unowned]
            [--repo DIR] [--branch REF] [--file PATH] [--create] [--dry-run]
-           [--format text|json] [--out FILE] [--summary-out FILE]
+           [--max-paths-changed N] [--format text|json] [--out FILE] [--summary-out FILE]
   check    (--op 'OP' ... | --policy FILE) [--format text|json]
   plan     --op 'add_owner(/services/api, @org/team-1)' [--op ...] [--on-empty error|inherit|unowned]
            [--repo DIR] [--branch REF] [--file PATH] [--out plan.json]
   apply    --plan plan.json [--repo DIR]
-  audit    [--checks a1,a3,a6] [--format json|text] [--github-repo owner/name]
-           [--token T | $GITHUB_TOKEN] [--api-url URL] [--cache-dir D] [--cache-ttl DUR]
-           [--repo DIR] [--branch REF]
+  audit    [--checks a1,a3,a6] [--fail-on any|warning|error|never] [--format json|text]
+           [--github-repo owner/name] [--token T | $GITHUB_TOKEN] [--api-url URL]
+           [--cache-dir D] [--cache-ttl DUR] [--repo DIR] [--branch REF] [--file PATH]
+  lint     --github-repo owner/name [--token T | $GITHUB_TOKEN] [--api-url URL]
+           [--remove-stale-paths] [--on-empty error|inherit|unowned] [--dry-run]
+           [--repo DIR] [--branch REF] [--file PATH] [--format text|json]
   snapshot [--repo DIR] [--branch REF] [--out snap.json]
   verify   --before before.json --after after.json [--scope PATTERN ...]
   version  print the build this binary was stamped with
+
+audit REPORTS — twelve checks, and it never writes. lint REPAIRS three of the
+things audit reports: @handles that whitespace has split, owners that no longer
+exist, and (only with --remove-stale-paths) rules matching nothing. It rewrites
+the WORKING-TREE file, so it needs a token and --github-repo; one lookup it
+cannot answer and nothing is written at all. Start with --dry-run.
+
+audit --lint is the older spelling of lint and still works.
+
+Exit 4 from lint means the file still needs a person — fixes pending under
+--dry-run, or a line lint would not guess at. A successful write can also exit
+4 for that reason, so gate CI on lint --dry-run, not on the writing run.
 
 Exit codes: 0 ok · 1 no-op · 2 refused (invariant/size) · 3 invalid input
             4 audit findings · 5 inconclusive (fail-closed) · 6 rolled back
@@ -548,6 +597,7 @@ func cmdAudit(args []string, stdout, stderr io.Writer) int {
 	branch := fs.String("branch", "HEAD", "ref to audit")
 	filePath := fs.String("file", "", "CODEOWNERS path override")
 	checksFlag := fs.String("checks", "", "comma-separated subset, e.g. a1,a3,a6 (default: all)")
+	failOn := fs.String("fail-on", auditFailOnAny, "lowest severity that exits 4: any|warning|error|never (report is unaffected)")
 	format := fs.String("format", "text", "text|json")
 	githubRepo := fs.String("github-repo", "", "owner/name on GitHub, for A-1..A-3")
 	// The default is "" and the environment is read AFTER Parse, never before.
@@ -561,14 +611,75 @@ func cmdAudit(args []string, stdout, stderr io.Writer) int {
 	apiURL := fs.String("api-url", "", "API base URL (GHES), default https://api.github.com")
 	cacheDir := fs.String("cache-dir", "", "disk cache directory (R-15); empty = memory only")
 	cacheTTL := fs.Duration("cache-ttl", 24*time.Hour, "disk cache TTL")
+	lintMode := fs.Bool("lint", false, "repair the whole file instead of only reporting: rejoin @handles split by whitespace, then remove owners that do not exist (needs --token and --github-repo)")
+	removeStale := fs.Bool("remove-stale-paths", false, "with --lint, also delete rules whose pattern matches zero tracked files (R-11 keeps this off by default)")
+	onEmpty := fs.String("on-empty", "", "with --lint, R-6 policy when removing a dead owner empties a set: error|inherit|unowned (no default)")
+	dryRun := fs.Bool("dry-run", false, "with --lint, compute and report the fixes but write nothing (exit 4 if any are pending)")
 	if err := fs.Parse(args); err != nil {
 		return flagParseCode(err)
+	}
+	// The three lint-only flags are rejected rather than ignored when --lint is
+	// absent. `audit --remove-stale-paths` silently reporting instead of
+	// deleting is the shape of mistake that only surfaces months later, when
+	// somebody notices the rules they believed were cleaned up are all still
+	// there.
+	if !*lintMode {
+		var only []string
+		if *removeStale {
+			only = append(only, "--remove-stale-paths")
+		}
+		if *onEmpty != "" {
+			only = append(only, "--on-empty")
+		}
+		if *dryRun {
+			only = append(only, "--dry-run")
+		}
+		if len(only) > 0 {
+			verb := "applies"
+			if len(only) > 1 {
+				verb = "apply"
+			}
+			fmt.Fprintf(stderr, "error: %s %s only to the `lint` verb (or `audit --lint`); plain audit reports and never writes, so there is nothing for them to govern\n", strings.Join(only, " and "), verb)
+			return ExitInvalid
+		}
+	}
+	// Symmetrically, --fail-on governs the REPORT's exit code and means nothing
+	// to a repair pass, which reports what it fixed. Rejected rather than
+	// ignored, for the reason above.
+	failOnSet := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "fail-on" {
+			failOnSet = true
+		}
+	})
+	if *lintMode && failOnSet {
+		fmt.Fprintln(stderr, "error: --fail-on applies to the audit report, not to a repair pass; drop it, or drop --lint")
+		return ExitInvalid
+	}
+	gate, ok := auditFailOnLevel(*failOn)
+	if !ok {
+		// Never a fallback to the permissive end: `--fail-on eror` quietly
+		// meaning "never" is a CI gate that reports green while checking
+		// nothing, on every repo, until someone reads the workflow file.
+		fmt.Fprintf(stderr, "error: unknown --fail-on %q; want any, warning, error or never\n", *failOn)
+		return ExitInvalid
 	}
 	// $GITHUB_TOKEN remains the documented fallback; it is just resolved past
 	// the point where anything can render it. An explicit --token still wins.
 	authToken := *token
 	if authToken == "" {
 		authToken = os.Getenv("GITHUB_TOKEN")
+	}
+
+	if *lintMode {
+		return runLint(lintRun{
+			repo: *repo, branch: *branch, filePath: *filePath,
+			githubRepo: *githubRepo, token: authToken,
+			apiURL: *apiURL, cacheDir: *cacheDir, cacheTTL: *cacheTTL,
+			cacheTTLSet: isFlagSet(fs, "cache-ttl"),
+			format:      *format, checks: *checksFlag,
+			removeStale: *removeStale, onEmpty: *onEmpty, dryRun: *dryRun,
+		}, stdout, stderr)
 	}
 
 	tree, coPath, all, err := locate(*repo, *branch, *filePath)
@@ -650,10 +761,63 @@ func cmdAudit(args []string, stdout, stderr io.Writer) int {
 		return ExitInconclusive
 	}
 	if len(rep.Findings) > 0 {
-		return ExitFindings
+		if auditGateTripped(rep.Findings, gate) {
+			return ExitFindings
+		}
+		// Exiting 0 with findings on screen needs saying out loud, or the next
+		// person to read the log concludes the checks found nothing.
+		fmt.Fprintf(stderr, "note: %d finding(s) reported, none at or above --fail-on %s; exiting 0\n",
+			len(rep.Findings), *failOn)
+		return ExitOK
 	}
 	fmt.Fprintln(stdout, "audit clean")
 	return ExitOK
+}
+
+// The --fail-on thresholds, and the severity ladder they are compared on.
+//
+// A baseline rolled out with `on_zero_match: declare` writes a rule matching
+// zero files into every repo — that is what a baseline IS — and A-4 reports
+// each one forever, at `warning` and explicitly report-only. With exit 4 as the
+// only verdict the documented rollout and the documented CI gate contradict
+// each other. `--checks` is not the answer: naming the other eleven silently
+// opts out of any check added later.
+//
+// The flag moves the GATE and never the report — every finding prints under
+// every setting — and leaves exit 5 alone (R-12): an API that could not be
+// reached is not a finding whose severity you can weigh.
+const (
+	auditFailOnAny = "any"
+)
+
+var auditFailOnLevels = map[string]int{
+	auditFailOnAny: 1,
+	"warning":      2,
+	"error":        3,
+	"never":        4, // above every severity, so nothing ever reaches it
+}
+
+var auditSeverityRank = map[string]int{"info": 1, "warning": 2, "error": 3}
+
+func auditFailOnLevel(name string) (int, bool) {
+	level, ok := auditFailOnLevels[name]
+	return level, ok
+}
+
+// auditGateTripped reports whether any finding is at or above the threshold.
+// A severity this build does not know ranks as `error`: a new, unrecognized
+// severity must fail a gate rather than slip under one.
+func auditGateTripped(findings []audit.Finding, level int) bool {
+	for _, f := range findings {
+		rank, known := auditSeverityRank[f.Severity]
+		if !known {
+			rank = auditSeverityRank["error"]
+		}
+		if rank >= level {
+			return true
+		}
+	}
+	return false
 }
 
 func fmtOwners(o []string) string {

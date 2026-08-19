@@ -17,7 +17,7 @@ import (
 // The synthetic fleet.
 //
 // Every test in this file runs ONE policy across a set of deliberately
-// heterogeneous repositories, exactly as the README's fleet script does. The
+// heterogeneous repositories, exactly as docs/FLEET.md's script does. The
 // repos are the shapes a real 100-repo rollout meets on day one: repos that
 // converge, repos that are already correct, repos missing the directory an op
 // names, repos with no CODEOWNERS at all, repos whose file shape makes the
@@ -202,8 +202,8 @@ func fleetBuild(t *testing.T, names ...string) (map[string]string, []string) {
 	return dirs, order
 }
 
-// fleetPolicyFile writes a policy OUTSIDE every clone — the README is explicit
-// that anything written inside one is a `git add -A` away from being
+// fleetPolicyFile writes a policy OUTSIDE every clone — docs/FLEET.md is
+// explicit that anything written inside one is a `git add -A` away from being
 // committed.
 func fleetPolicyFile(t *testing.T, src string) string {
 	t.Helper()
@@ -243,7 +243,7 @@ func fleetSnapshot(t *testing.T, dirs map[string]string) map[string]string {
 	return snap
 }
 
-// fleetOutcome is one pass of the README's loop over the fleet. A code of -1
+// fleetOutcome is one pass of docs/FLEET.md's loop over the fleet. A code of -1
 // means the loop never reached that repo.
 type fleetOutcome struct {
 	codes     map[string]int
@@ -253,7 +253,7 @@ type fleetOutcome struct {
 	jsonl     string   // the concatenated records, i.e. results.jsonl
 }
 
-// fleetRunPolicy walks the fleet exactly as the README's script does: run
+// fleetRunPolicy walks the fleet exactly as docs/FLEET.md's script does: run
 // sync, append stdout to results.jsonl, continue on 0 and 2, and abort the
 // whole run on anything else. The abort is the contract under test — a fleet
 // script cannot be more forgiving than the tool's exit codes let it be.
@@ -329,7 +329,7 @@ func fleetByRepo(t *testing.T, recs []cli.SyncRecord, dirs map[string]string) ma
 }
 
 // fleetGroupByStatus mirrors `jq -s 'group_by(.status)|map({status, n:length})'`
-// — the last line of the README's script, and the only view an operator of a
+// — the last line of docs/FLEET.md's script, and the only view an operator of a
 // 100-repo rollout actually reads.
 func fleetGroupByStatus(recs []cli.SyncRecord) map[string]int {
 	counts := map[string]int{}
@@ -370,7 +370,7 @@ func fleetRuleLines(content string) []string {
 // standardized policy can be pushed at a heterogeneous fleet, that each repo
 // gets the outcome its own shape earns, and that the aggregate is readable
 // afterwards. If any single repo's failure can change another repo's outcome,
-// the fleet script in the README is a lie.
+// the fleet script in docs/FLEET.md is a lie.
 func TestFleet_OnePolicyAcrossHeterogeneousRepos(t *testing.T) {
 	t.Parallel()
 	dirs, order := fleetBuild(t)
@@ -693,7 +693,7 @@ func TestFleet_RefusalIsRecoverableAndIsolated(t *testing.T) {
 // never absolutized, never symlink-resolved.
 //
 // Six tests in this file join records back to repos through fleetByRepo, which
-// keys on exactly that field; so does the README's fleet script, which pairs
+// keys on exactly that field; so does docs/FLEET.md's script, which pairs
 // `needs-human` entries with the paths it passed in. Deriving `.repo` from the
 // repository instead of from the argument breaks every one of them, and it
 // breaks them on developer laptops only: on macOS `t.TempDir()` hands out
@@ -736,7 +736,7 @@ func TestFleet_RecordRepoIsTheArgumentVerbatim(t *testing.T) {
 
 // SPEC R-24: `skipped` is a status of its own. A policy with a typo'd path
 // prefix matches nothing in any repo; if those runs reported `unchanged`, the
-// jq recipe in the README would show a wall of "already correct" and the
+// jq recipe in docs/FLEET.md would show a wall of "already correct" and the
 // operator would read a no-op rollout as a success.
 func TestFleet_NothingMatchesAnywhereIsSkippedNotUnchanged(t *testing.T) {
 	t.Parallel()
@@ -888,11 +888,11 @@ func TestFleet_DryRunChangesNothingButStillEmits(t *testing.T) {
 	}
 }
 
-// SPEC R-19/R-22/R-24: the facts the README's copy-paste fleet script depends
-// on, pinned one by one. Every assertion here corresponds to a line of that
-// script; if this test fails, someone who pasted the script gets a halted
+// SPEC R-19/R-22/R-24: the facts the copy-paste fleet script in docs/FLEET.md
+// depends on, pinned one by one. Every assertion here corresponds to a line of
+// that script; if this test fails, someone who pasted the script gets a halted
 // rollout, a silent no-op, or an empty PR body.
-func TestFleet_ReadmeScriptContract(t *testing.T) {
+func TestFleet_DocumentedScriptContract(t *testing.T) {
 	t.Parallel()
 	dirs, order := fleetBuild(t, "plain", "correct", "no-file", "refuse")
 	policy := fleetPolicyFile(t, fleetPolicySrc)

@@ -135,7 +135,7 @@ Two emptiness questions exist, and they are **ordered**:
      under the grant — nothing in the repo today can verify the carve-out you
      asked for. Ops that take this path report `proven: "structural"`, exactly
      as `declare` does, and the cost is documented in
-     [guarantees.md](guarantees.md#what-on_except_zero_match-allow-costs) beside
+     [REFERENCE.md](REFERENCE.md#what-on_except_zero_match-allow-costs) beside
      declare's. No dead rule is written for the unmatched pattern (R-5).
 
 ### R-29 — carve synthesis
@@ -274,5 +274,5 @@ documented as the escape hatch for sequences `except` cannot express.
 Flat subtraction only. No unions, no nested or grouped excepts, no
 except-of-except, no scope boolean algebra — the day `except` becomes an
 expression language it stops being the simple spelling of one intent, which is
-its entire reason to exist. These join the non-goals list in
-[design.md](design.md).
+its entire reason to exist. The Operations section of
+[REFERENCE.md](REFERENCE.md#operations) carries the same limits.

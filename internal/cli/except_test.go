@@ -12,8 +12,8 @@
 // through every Contains-based oracle in the first draft).
 //
 // Three cases pass against today's binary by design and are labeled as pins
-// (TestR26_UppercaseExceptStaysRefused, TestR31_NonExceptRecordsCarryNoExceptFields,
-// and the escaped-scope subtest of TestR25_EscapedSpaceIsNotAnExceptDelimiter):
+// (TestR27_UppercaseExceptStaysRefused, TestR32_NonExceptRecordsCarryNoExceptFields,
+// and the escaped-scope subtest of TestR26_EscapedSpaceIsNotAnExceptDelimiter):
 // they freeze current behavior the spec promises to preserve, rather than
 // specify new behavior. Everything else fails until the feature lands.
 package cli_test
@@ -114,7 +114,7 @@ func exceptWantFile(t *testing.T, path, want string) {
 // must restate the original owners and sit after the broad grant (R-29
 // structural placement), so last-match-wins (S-1) resolves the excepted path
 // to them.
-func TestR25_ExceptCarveOutEndToEnd(t *testing.T) {
+func TestR26_ExceptCarveOutEndToEnd(t *testing.T) {
 	repo := exceptRepo(t)
 	code, out, errOut := runCLI(t, "sync", "--repo", repo,
 		"--op", "add_owner(/.github/ except /.github/CODEOWNERS, @org/team_a)",
@@ -140,7 +140,7 @@ func TestR25_ExceptCarveOutEndToEnd(t *testing.T) {
 // anywhere: an append-at-EOF implementation leaves the asserted LINE intact
 // while the appended grant steals the path by last-match (INV-2 violation
 // invisible to a substring check).
-func TestR25_ExceptDoesNotRevokeExistingOwnership(t *testing.T) {
+func TestR26_ExceptDoesNotRevokeExistingOwnership(t *testing.T) {
 	repo := initRepo(t, map[string]string{
 		".github/CODEOWNERS":       "* @org/original_team\n/.github/CODEOWNERS @org/team_a\n",
 		".github/workflows/ci.yml": "name: ci\n",
@@ -179,7 +179,7 @@ func TestR25_ExceptDoesNotRevokeExistingOwnership(t *testing.T) {
 // correct. Exact bytes also pin that the grant line itself EXISTS — the
 // first draft never asserted it, so a carve-only implementation that never
 // granted anything passed (adversarial-review finding).
-func TestR25_MultipleExceptsEachKeepOwners(t *testing.T) {
+func TestR26_MultipleExceptsEachKeepOwners(t *testing.T) {
 	repo := initRepo(t, map[string]string{
 		".github/CODEOWNERS":       "* @org/original_team\n",
 		".github/workflows/ci.yml": "name: ci\n",
@@ -204,7 +204,7 @@ func TestR25_MultipleExceptsEachKeepOwners(t *testing.T) {
 // bytes pin both halves: the base mutation actually happened (the first
 // draft never checked, so a carve-only no-op implementation passed) and the
 // excepted path kept its owners.
-func TestR25_SetOwnersAndRemoveOwnerHonorExcept(t *testing.T) {
+func TestR26_SetOwnersAndRemoveOwnerHonorExcept(t *testing.T) {
 	t.Run("set_owners", func(t *testing.T) {
 		repo := initRepo(t, map[string]string{
 			"CODEOWNERS": "/x/ @a @b\n",
@@ -243,7 +243,7 @@ func TestR25_SetOwnersAndRemoveOwnerHonorExcept(t *testing.T) {
 // breaks exactly here (adversarial-review finding): a directory literally
 // named "a except b" must stay one scope, and an except pattern containing
 // an escaped space must stay one pattern.
-func TestR25_EscapedSpaceIsNotAnExceptDelimiter(t *testing.T) {
+func TestR26_EscapedSpaceIsNotAnExceptDelimiter(t *testing.T) {
 	// Pin, passes today: escaped-space scopes already parse; the future
 	// tokenizer must keep treating escaped whitespace as part of the token.
 	t.Run("scope containing escaped ' except '", func(t *testing.T) {
@@ -333,7 +333,7 @@ func TestR19_ExceptAllowIsIdempotent(t *testing.T) {
 // 3, identical in every repo, caught by `check` before repo 1 — and each
 // message names its defect, because "fix the policy" is only actionable when
 // the operator can tell WHICH of the R-27 rules fired.
-func TestR26_StaticExceptDefectsAreExit3(t *testing.T) {
+func TestR27_StaticExceptDefectsAreExit3(t *testing.T) {
 	cases := []struct {
 		name     string
 		policy   string
@@ -432,7 +432,7 @@ func TestR22_CheckAcceptsValidExceptPolicies(t *testing.T) {
 // keeps hitting checkScope's whitespace refusal — the spec promises no new
 // acceptance for near-misses, so this test freezes the current refusal
 // against an implementation that tokenizes case-insensitively.
-func TestR26_UppercaseExceptStaysRefused(t *testing.T) {
+func TestR27_UppercaseExceptStaysRefused(t *testing.T) {
 	repo := exceptRepo(t)
 	code, _, errOut := runCLI(t, "sync", "--repo", repo,
 		"--op", "add_owner(/.github/ EXCEPT /.github/CODEOWNERS, @a)")
@@ -451,7 +451,7 @@ func TestR26_UppercaseExceptStaysRefused(t *testing.T) {
 // fragments are required: "matches zero tracked files" alone is verbatim in
 // today's R-5/R-21 scope messages, and a diagnosis blaming the SCOPE sends
 // the operator hunting a typo in the wrong argument.
-func TestR27_UnmatchedExceptRefusesByDefault(t *testing.T) {
+func TestR28_UnmatchedExceptRefusesByDefault(t *testing.T) {
 	repo := initRepo(t, map[string]string{
 		"CODEOWNERS":               "* @org/original_team\n",
 		".github/workflows/ci.yml": "name: ci\n",
@@ -474,7 +474,7 @@ func TestR27_UnmatchedExceptRefusesByDefault(t *testing.T) {
 // unmatched pattern is the "wall of silent green" this knob must not
 // become), records the inert pattern, warns, and marks the op
 // proven:"structural" — the declare-class weakening made visible.
-func TestR27_UnmatchedExceptAllowProceedsAndSurfaces(t *testing.T) {
+func TestR28_UnmatchedExceptAllowProceedsAndSurfaces(t *testing.T) {
 	repo := initRepo(t, map[string]string{
 		"CODEOWNERS":               "* @org/original_team\n",
 		".github/workflows/ci.yml": "name: ci\n",
@@ -507,7 +507,7 @@ func TestR27_UnmatchedExceptAllowProceedsAndSurfaces(t *testing.T) {
 // op first, and on_except_zero_match is consulted only if the op will write.
 // When the excepts swallow every in-scope path, the require message must say
 // the emptiness came from the excepts, not the scope.
-func TestR27_FullySweptScopeFollowsOnZeroMatch(t *testing.T) {
+func TestR28_FullySweptScopeFollowsOnZeroMatch(t *testing.T) {
 	files := map[string]string{
 		"CODEOWNERS": "* @org/original_team\n",
 		"x/only.md":  "x\n",
@@ -562,7 +562,7 @@ func TestR27_FullySweptScopeFollowsOnZeroMatch(t *testing.T) {
 // untracked → zero-match require) and creates nothing — because a created
 // file would have no original owners to preserve and the grant would land
 // carve-free, which is the S-8 hole again (adversarial-review finding).
-func TestR27_CreateWithExceptRefusesByDefault(t *testing.T) {
+func TestR28_CreateWithExceptRefusesByDefault(t *testing.T) {
 	repo := initRepo(t, map[string]string{
 		".github/workflows/ci.yml": "name: ci\n",
 		"src/main.go":              "package main\n",
@@ -588,7 +588,7 @@ func TestR27_CreateWithExceptRefusesByDefault(t *testing.T) {
 // precedence; every comment and blank survives verbatim. The changes[]
 // entry for the carve must name the except — reviewers must never meet an
 // unexplained owner in a diff.
-func TestR28_CarveLineExplainsItselfAndPreservesBytes(t *testing.T) {
+func TestR29_CarveLineExplainsItselfAndPreservesBytes(t *testing.T) {
 	repo := initRepo(t, map[string]string{
 		".github/CODEOWNERS":       "# fallback\n* @org/original_team\n\n# infra's pipeline\n/.github/workflows/ @org/infra\n",
 		".github/workflows/ci.yml": "name: ci\n",
@@ -634,7 +634,7 @@ func TestR28_CarveLineExplainsItselfAndPreservesBytes(t *testing.T) {
 // path there is no writable line that restores "unmatched" — INV-2 is
 // unsatisfiable and the tool must refuse rather than quietly convert "nobody
 // owns this" into "a rule says nobody owns this".
-func TestR28_UnmatchedExceptedPathRefuses(t *testing.T) {
+func TestR29_UnmatchedExceptedPathRefuses(t *testing.T) {
 	repo := initRepo(t, map[string]string{
 		"CODEOWNERS": "/x/owned.go @a\n",
 		"x/owned.go": "package x\n",
@@ -660,7 +660,7 @@ func TestR28_UnmatchedExceptedPathRefuses(t *testing.T) {
 // run for both op orders, which is the literal meaning of "these commute"
 // (first-draft gap: one order, substring oracles, and a mixed-machinery
 // placement bug passed).
-func TestR30_ExceptMakesLayeredBatchDisjoint(t *testing.T) {
+func TestR31_ExceptMakesLayeredBatchDisjoint(t *testing.T) {
 	policies := map[string]string{
 		"grant first": `{"version":1,"ops":[
 			{"id":"grant","op":"add_owner(/.github/ except /.github/CODEOWNERS, @org/team_a)"},
@@ -712,17 +712,24 @@ func gitCommitAll(t *testing.T, repo string) {
 }
 
 // SPEC R-31: excepts relax R-8 only where they actually create disjointness.
-// Two ops still overlapping on a non-excepted path without commuting refuse
-// exactly as today — the relaxation must not become a hole.
-func TestR30_ResidualOverlapStillRefuses(t *testing.T) {
+// Two ops still overlapping on a non-excepted path without commuting refuse —
+// the relaxation must not become a hole. The refusal is exit 3, not 2: the
+// grant's scope provably governs the workflows scope over the pattern language
+// and no except removes it, so ops.StaticConflict decides the pair at the
+// policy level, before any repo is opened — identically on check and sync.
+func TestR31_ResidualOverlapStillRefuses(t *testing.T) {
 	repo := exceptRepo(t)
 	snap := checkDirSnapshot(t, repo)
 	pol := syncWritePolicy(t, `{"version":1,"on_empty":"error","ops":[
 		{"id":"grant","op":"add_owner(/.github/ except /.github/CODEOWNERS, @org/team_a)"},
 		{"id":"rm","op":"remove_owner(/.github/workflows/, @org/team_a)"}]}`)
-	code, _, errOut := runCLI(t, "sync", "--repo", repo, "--policy", pol)
-	if code != cli.ExitRefused {
-		t.Fatalf("want exit 2 (R-8 overlap on workflows paths), got %d\nstderr:\n%s", code, errOut)
+	code, _, errOut := runCLI(t, "check", "--policy", pol)
+	if code != cli.ExitInvalid {
+		t.Fatalf("check: want exit 3 (static R-8), got %d\nstderr:\n%s", code, errOut)
+	}
+	code, _, errOut = runCLI(t, "sync", "--repo", repo, "--policy", pol)
+	if code != cli.ExitInvalid {
+		t.Fatalf("sync: want exit 3 (static R-8, residual overlap on workflows), got %d\nstderr:\n%s", code, errOut)
 	}
 	exceptWantFragment(t, "stderr", errOut, "R-8")
 	if after := checkDirSnapshot(t, repo); !reflect.DeepEqual(snap, after) {
@@ -734,7 +741,7 @@ func TestR30_ResidualOverlapStillRefuses(t *testing.T) {
 // changes — and writes nothing. The fleet preview ("who ends up holding the
 // carve-outs, in all 100 repos") must not require mutating a single repo,
 // and must not be an except-special-cased EMPTY preview either.
-func TestR31_DryRunSurfacesExceptedWithoutWriting(t *testing.T) {
+func TestR32_DryRunSurfacesExceptedWithoutWriting(t *testing.T) {
 	repo := exceptRepo(t)
 	snap := checkDirSnapshot(t, repo)
 	code, out, errOut := runCLI(t, "sync", "--repo", repo,
@@ -768,7 +775,7 @@ func TestR31_DryRunSurfacesExceptedWithoutWriting(t *testing.T) {
 // SPEC R-32: human output and --summary-out render the carve-out facts too.
 // An implementation surfacing excepted paths only in JSON leaves the fleet
 // PR reviewer — who reads the summary, not results.jsonl — blind to them.
-func TestR31_HumanAndSummaryRenderExcepts(t *testing.T) {
+func TestR32_HumanAndSummaryRenderExcepts(t *testing.T) {
 	repo := exceptRepo(t)
 	summary := filepath.Join(t.TempDir(), "summary.md")
 	code, out, errOut := runCLI(t, "sync", "--repo", repo,
@@ -785,7 +792,7 @@ func TestR31_HumanAndSummaryRenderExcepts(t *testing.T) {
 // without an except clause carry no excepted/except_unmatched keys, so
 // existing jq pipelines parse byte-identical records. Freezes the field
 // names against an implementation that emits them empty on every op.
-func TestR31_NonExceptRecordsCarryNoExceptFields(t *testing.T) {
+func TestR32_NonExceptRecordsCarryNoExceptFields(t *testing.T) {
 	repo := syncSmallRepo(t)
 	code, out, errOut := runCLI(t, "sync", "--repo", repo,
 		"--op", "add_owner(/x/, @b)", "--format", "json")
@@ -807,7 +814,7 @@ func TestR31_NonExceptRecordsCarryNoExceptFields(t *testing.T) {
 // gate refuses and the exit-0 assertion goes red; a snapshot oracle would
 // re-use the same matcher and prove nothing more (that cross-engine question
 // belongs to the differential fuzz, not e2e).
-func TestR25_GlobExcept(t *testing.T) {
+func TestR26_GlobExcept(t *testing.T) {
 	repo := initRepo(t, map[string]string{
 		"CODEOWNERS":        "* @org/original_team\n",
 		"src/a.go":          "package a\n",

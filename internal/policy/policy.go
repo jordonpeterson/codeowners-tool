@@ -37,7 +37,7 @@ const MaxPolicyBytes = 1 << 20
 // the top and meaningless on an op; accepting it in both places would let a
 // generator put the policy's description on op 17 and nothing would notice.
 var (
-	topFields = []string{"version", "name", "description", "on_empty", "ops"}
+	topFields = []string{"version", "name", "description", "on_empty", "max_paths_changed", "ops"}
 	opFields  = []string{"op", "id", "on_zero_match", "on_except_zero_match", "note"}
 )
 
@@ -68,8 +68,14 @@ type Policy struct {
 	Name        string
 	Description string
 	OnEmpty     string // "" | error | inherit | unowned
-	Ops         []ops.Op
-	Notes       map[string]string // op ID -> note
+	// MaxPathsChanged is R-25's blast-radius ceiling, -1 when the policy sets
+	// none. The ceiling belongs in the reviewed artifact rather than in one
+	// call site's flags: "this wave touches dozens of files per repo, not
+	// thousands" is a claim about the intent, and a ceiling that lives in a
+	// shell line survives exactly as long as that shell line.
+	MaxPathsChanged int
+	Ops             []ops.Op
+	Notes           map[string]string // op ID -> note
 }
 
 // Error is one located problem in a policy file.
@@ -218,7 +224,7 @@ type opInfo struct {
 }
 
 func (v *validator) policy(root *jsonValue) *Policy {
-	p := &Policy{}
+	p := &Policy{MaxPathsChanged: -1}
 
 	// Unknown keys are reported where they appear; known ones are collected and
 	// then validated in a fixed order, so the error list reads the same way twice
@@ -239,6 +245,7 @@ func (v *validator) policy(root *jsonValue) *Policy {
 	p.Name = v.optString(fields["name"], "name", -1, "")
 	p.Description = v.optString(fields["description"], "description", -1, "")
 	v.onEmpty(p, fields["on_empty"])
+	v.maxPathsChanged(p, fields["max_paths_changed"])
 	infos := v.opsArray(p, fields["ops"], root.off)
 	v.checkDuplicateIDs(infos)
 	v.checkOnEmptyRequired(fields["on_empty"] != nil, infos)
@@ -314,6 +321,32 @@ func (v *validator) onEmpty(p *Policy, m *member) {
 		v.at(val.off, -1, "", `field "on_empty" has unknown value %q%s; legal values are %s`, val.str, hint(val.str, onEmptyValues), list(onEmptyValues))
 	default:
 		p.OnEmpty = val.str
+	}
+}
+
+// maxPathsChanged validates R-25's ceiling at LOAD time, so a policy carrying
+// a nonsense one fails on repo 0 rather than on whichever repo first exceeds
+// it. Zero is legal and means "this wave may change no ownership at all",
+// which is a coherent thing to assert about a policy of pure `declare` ops;
+// negative is not, because -1 is how an absent ceiling is spelled internally
+// and the two must never be confusable.
+func (v *validator) maxPathsChanged(p *Policy, m *member) {
+	if m == nil {
+		return
+	}
+	val := m.val
+	if val.kind != kNumber {
+		v.at(val.off, -1, "", `field "max_paths_changed" must be a number of paths, got %s`, val.describe())
+		return
+	}
+	n, err := strconv.Atoi(val.num.String())
+	switch {
+	case err != nil:
+		v.at(val.off, -1, "", `field "max_paths_changed" must be a whole number, got %s`, val.raw())
+	case n < 0:
+		v.at(val.off, -1, "", `field "max_paths_changed" must be zero or positive, got %s; omit the field to set no ceiling`, val.raw())
+	default:
+		p.MaxPathsChanged = n
 	}
 }
 

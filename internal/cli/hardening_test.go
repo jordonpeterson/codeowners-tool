@@ -245,9 +245,9 @@ func TestHardening_NonHeadBranchMayNotWrite(t *testing.T) {
 // but left ops, ops_applied, paths_changed and the changes array exactly as the
 // planner produced them. The row then said a repo whose CODEOWNERS is
 // byte-for-byte unchanged had applied N ops and changed M paths, so the
-// README's `jq '[.[].ops_applied] | add'` overcounted the rollout by precisely
-// the repos where nothing was written — the operator reads a total that
-// includes the failures and believes more of the fleet moved than did.
+// fleet report's `jq '[.[].ops_applied] | add'` overcounted the rollout by
+// precisely the repos where nothing was written — the operator reads a total
+// that includes the failures and believes more of the fleet moved than did.
 func TestHardening_RefusedWriteRecordCountsNothing(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("running as root: a read-only directory does not stop the write")

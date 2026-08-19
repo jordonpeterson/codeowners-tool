@@ -12,8 +12,18 @@ name: Release
 #
 # Runs when a merge to main changes the binary — the command or its internal
 # packages, the module files, or the VERSION file (for a manual minor/major
-# bump). Docs- or CI-config-only merges don't cut a release. Can also be run
-# on demand from the Actions tab (workflow_dispatch) to publish the next patch.
+# bump) — or when it changes this file, since a merge that repairs the release
+# pipeline has to be able to publish the releases the broken pipeline dropped.
+# Docs- or CI-config-only merges don't cut a release. Can also be run on demand
+# from the Actions tab (workflow_dispatch) to publish the next patch.
+#
+# Publishing the release is where this workflow's job ends. The Homebrew formula
+# in jordonpeterson/homebrew-tap is bumped by a workflow in THAT repository, which
+# polls for the newest release and verifies its provenance before writing the
+# formula. Pushing the bump from here needed a personal access token with write on
+# the tap, and when that secret was absent the step logged a notice and exited 0 —
+# so the formula sat four releases stale behind a green job. Nothing here should
+# hold a credential for another repository again.
 on:
   push:
     branches: [main]
@@ -23,6 +33,7 @@ on:
       - 'go.mod'
       - 'go.sum'
       - 'VERSION'
+      - '.github/workflows/release.yml'
   workflow_dispatch: {}
 
 permissions:
@@ -43,9 +54,11 @@ jobs:
     permissions:
       contents: write # create tags and releases
       id-token: write # mint the OIDC token the provenance attestation is signed with
-    outputs:
-      tag: ${{ steps.ver.outputs.tag }}
-      published: ${{ steps.guard.outputs.exists == 'false' }}
+      # Writing the signed statement to the repository's attestation store is a
+      # separate permission from minting the token that signs it. Without it the
+      # attest step fails with "Resource not accessible by integration" — and
+      # because it runs before `gh release create`, the whole release is lost.
+      attestations: write
     steps:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -157,49 +170,3 @@ jobs:
             --target "$GITHUB_SHA" \
             --title "${{ steps.ver.outputs.tag }}" \
             --generate-notes
-
-  # Bumps the Homebrew formula in jordonpeterson/homebrew-tap to the new
-  # release. Inactive until a HOMEBREW_TAP_TOKEN secret (a PAT/fine-grained
-  # token with contents:write on the tap repo) is added — without it this job
-  # logs a notice and exits cleanly, and the formula must be bumped by hand.
-  homebrew:
-    name: bump homebrew tap
-    needs: release
-    if: needs.release.outputs.published == 'true'
-    runs-on: ubuntu-latest
-    # This job only reads tools/gen-formula.sh here and writes to the tap with its
-    # own PAT. Without a block it inherits the workflow-level contents: write.
-    permissions:
-      contents: read # read tools/gen-formula.sh; the tap is written with TAP_TOKEN
-    steps:
-      - name: Checkout (for tools/gen-formula.sh)
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          persist-credentials: false # nothing here needs a token for this repo
-
-      - name: Update tap formula
-        env:
-          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
-          TAG: ${{ needs.release.outputs.tag }}
-        run: |
-          set -euo pipefail
-          if [ -z "${TAP_TOKEN:-}" ]; then
-            echo "::notice::HOMEBREW_TAP_TOKEN not set — skipping Homebrew formula bump for ${TAG}."
-            exit 0
-          fi
-          curl -fsSL "https://github.com/jordonpeterson/codeowners-tool/releases/download/${TAG}/checksums.txt" -o checksums.txt
-          # Via gh's credential helper, never a URL: the old form wrote the PAT in
-          # cleartext to tap/.git/config and into any git error echoing the remote.
-          echo "${TAP_TOKEN}" | gh auth login --with-token
-          gh auth setup-git
-          git clone --depth 1 "https://github.com/jordonpeterson/homebrew-tap.git" tap
-          sh tools/gen-formula.sh "${TAG}" checksums.txt > tap/Formula/codeowners-tool.rb
-          cd tap
-          if git diff --quiet; then
-            echo "::notice::Formula already up to date for ${TAG}."
-            exit 0
-          fi
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git commit -am "codeowners-tool ${TAG#v}"
-          git push
