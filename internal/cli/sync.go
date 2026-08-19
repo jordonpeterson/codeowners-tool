@@ -627,6 +627,15 @@ func renderRecordText(w io.Writer, rec SyncRecord) {
 		default:
 			fmt.Fprintf(w, "  %s  %s\n", label, o.Status)
 		}
+		// R-31: the carve-out facts render in every format, not just JSON — an
+		// operator reading the text output must see who ended up holding the
+		// excepted paths without re-running under --format json.
+		for _, e := range o.Excepted {
+			fmt.Fprintf(w, "    excepted: %s stays with %s\n", e.Path, fmtOwners(e.Owners))
+		}
+		for _, pat := range o.ExceptUnmatched {
+			fmt.Fprintf(w, "    except %s matched no tracked file; the grant carries no carve for it (on_except_zero_match=allow)\n", pat)
+		}
 	}
 	if rec.Created {
 		fmt.Fprintln(w, "  created a new CODEOWNERS file")
@@ -686,6 +695,24 @@ func renderSummary(rec SyncRecord, r *syncRun) string {
 		}
 	}
 
+	// R-31: the PR reviewer reads this file, not results.jsonl, so the
+	// carve-out facts have to be here too — who ended up holding each excepted
+	// path, and any except pattern that bit nothing.
+	var carve []string
+	for i, o := range rec.Ops {
+		label := policy.OpLabel(o.ID, i)
+		for _, e := range o.Excepted {
+			carve = append(carve, fmt.Sprintf("- `%s`: `%s` stays with %s", label, e.Path, fmtOwners(e.Owners)))
+		}
+		for _, pat := range o.ExceptUnmatched {
+			carve = append(carve, fmt.Sprintf("- `%s`: except `%s` matched no tracked file — the grant carries NO carve for it (`on_except_zero_match: allow`)", label, pat))
+		}
+	}
+	if len(carve) > 0 {
+		b.WriteString("\n## Carve-outs (`except`)\n\n")
+		b.WriteString(strings.Join(carve, "\n") + "\n")
+	}
+
 	var structural []string
 	for i, o := range rec.Ops {
 		if o.Proven == "structural" {
@@ -694,9 +721,10 @@ func renderSummary(rec SyncRecord, r *syncRun) string {
 	}
 	if len(structural) > 0 {
 		b.WriteString("\n## Proven structurally, not against the tree (INV-6)\n\n")
-		b.WriteString("Nothing tracked in this repository matches these scopes, so the rule was appended\n" +
-			"at EOF where no later rule can override it, and that ordering is the whole proof —\n" +
-			"the tool cannot show the rule does what you meant. Read these lines in the diff.\n\n")
+		b.WriteString("Nothing tracked in this repository matches these scopes (or, for an `except` op\n" +
+			"allowed past its zero match, matches the promised carve-out), so structure is the\n" +
+			"whole proof — the tool cannot show the rule does what you meant. Read these lines\n" +
+			"in the diff.\n\n")
 		b.WriteString(strings.Join(structural, "\n") + "\n")
 	}
 	return b.String()
