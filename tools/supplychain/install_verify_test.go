@@ -12,7 +12,9 @@ import (
 
 const (
 	installScript = "../../install.sh"
-	readmePath    = "../../README.md"
+	// The doc that documents the direct-download path; the README links to it
+	// rather than describing installation itself.
+	installDoc = "../../docs/installation.md"
 )
 
 func readRepoFile(t *testing.T, path string) string {
@@ -55,9 +57,9 @@ func TestSupplyChain_InstallScriptHandlesAMachineWithoutGH(t *testing.T) {
 
 // The direct-download path bypasses install.sh, so a reader told only about
 // checksums.txt gets the weaker check as though it were the whole story.
-func TestSupplyChain_ReadmeDocumentsVerifyingTheDirectDownload(t *testing.T) {
-	body := readRepoFile(t, readmePath)
+func TestSupplyChain_InstallDocDocumentsVerifyingTheDirectDownload(t *testing.T) {
+	body := readRepoFile(t, installDoc)
 	if !strings.Contains(body, "gh attestation verify") {
-		t.Errorf("README.md documents the direct-download path but never mentions `gh attestation verify`, so the reader who skips install.sh is sent to the check that proves integrity in transit while the one that proves origin goes unmentioned.")
+		t.Errorf("docs/installation.md documents the direct-download path but never mentions `gh attestation verify`, so the reader who skips install.sh is sent to the check that proves integrity in transit while the one that proves origin goes unmentioned.")
 	}
 }

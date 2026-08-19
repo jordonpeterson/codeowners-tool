@@ -1869,6 +1869,28 @@ matches files under a DIRECTORY named `.gradle`. The narrowing rule is exact
 for every tracked file, so it is emitted, but the residual must be disclosed
 rather than silently presented as proven.
 
+### `TestR2_NarrowingIsIndependentOfScopeSpelling`
+
+R-2, shape 4: narrowing must depend on what a scope MATCHES, not on how it is
+spelled.
+
+`build.gradle` and `**/build.gradle` are the same pattern — CODEOWNERS gives a
+slashless pattern basename semantics, so both select every build.gradle at
+every depth. The planner disagrees. It derives the narrowing
+`/.github/**/build.gradle` for the bare spelling and refuses the `**/` one with
+"no sound narrowing pattern is derivable", so the operator's choice of two
+interchangeable spellings decides whether an expressible intent is expressed
+or exits 2.
+
+The repo shape is the common one: a catch-all `*`, with `/.github/` locked to
+a release-engineering team. Adding a build owner to every build.gradle crosses
+that lockdown at `.github/build.gradle`, which is what forces a narrowing
+rather than a plain amend.
+
+basenameGlob rejects any pattern containing "/", so `**/build.gradle` never
+reaches the candidate logic — even though deriveIntersection already strips a
+`**/` prefix when it normalizes RULE patterns.
+
 ### `TestR2_ScopeNestedInsideBroaderAnchoredRule`
 
 A scope nested INSIDE a broader anchored rule: the broad rule governs
@@ -2447,6 +2469,13 @@ lack Terraform" is answerable only if each op reports itself, by id, in the
 order the policy lists them — a bare count cannot answer it, and a reordered
 list attributes the wrong outcome to the wrong op.
 
+### `TestBasenameSpellingsSelectTheSameFiles`
+
+The equivalence the test above rests on: nothing in the planner is allowed to
+treat these two spellings as selecting different files. If this ever fails,
+TestR2_NarrowingIsIndependentOfScopeSpelling is asserting the wrong thing and
+the spelling-sensitivity finding needs rereading, not the matcher fixing.
+
 ## internal/policy
 
 **`bounds_test.go`**
@@ -2887,4 +2916,4 @@ DIFFERENT states; transitioning between them is a real ownership change.
 
 ---
 
-334 documented test cases across 12 packages.
+336 documented test cases across 12 packages.
