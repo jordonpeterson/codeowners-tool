@@ -29,8 +29,9 @@ What the tool does, in the words you need to follow everything else.
 
 ## Doing the work
 
-* **Create a file** : `sync --op '...' --create` — only `sync` can bootstrap; `plan` and `apply` cannot.
-* **Update a file** : the same command. `--create` is safe to leave on permanently: it writes a file where none exists and otherwise just applies the ops, so one fleet command handles both cases.
+* **Create a file** : `"create": true` in the policy, or `--create` on an `--op` run — only `sync` can bootstrap; `plan` and `apply` cannot.
+* **Update a file** : the same command. Permission to create is safe to leave on permanently: it writes a file where none exists and otherwise just applies the ops, so one fleet command handles both cases.
+* **`--create` is not allowed with `--policy`** : exit 3. Whether a repository gets a CODEOWNERS file is a decision the reviewed artifact makes, so it is stated in the JSON (R-34).
 * **Many changes at once** : `--policy file.json` instead of repeated `--op`; the policy file is the only form that scales to a fleet.
 * **Rehearse** : add `--dry-run` — nothing is written, but `--out` and `--summary-out` still emit.
 * **Review before writing** : `plan --out plan.json`, read it, then `apply --plan plan.json`.
@@ -53,7 +54,7 @@ verify --before before.json --after after.json --scope '/services/api/'
 * **Triage a fleet by exit code, not by log.** 0 converged, 2 needs a human on that repo, 3 stop the rollout.
 * **Reach for `add_owner` by default.** `set_owners` is correct only when you mean "these and nobody else".
 * **Gate CI on `lint --dry-run`.** A successful write can still exit 4 when a line needs a person, so the writing run is the wrong signal.
-* **Re-run freely.** Applying the same ops or policy twice is a no-op: the second run reports `unchanged` at exit 0 and the file is byte-identical. `--create` is included in that.
+* **Re-run freely.** Applying the same ops or policy twice is a no-op: the second run reports `unchanged` at exit 0 and the file is byte-identical. Permission to create is included in that.
 * **Start `lint` with `--dry-run` always.** It rewrites files and needs network; one lookup it cannot answer and nothing is written.
 
 ## Exit codes

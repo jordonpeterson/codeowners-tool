@@ -116,8 +116,7 @@ Ops in one batch must **commute**. Two ops whose scopes overlap on a path and wh
 would change the outcome are refused rather than resolved by position (R-8):
 
 ```
-error: ops "set_owners(*, [@org/everyone])" and "add_owner(/services/api/, @org/api-team)"
-overlap on "services/api/main.go" and do not commute (R-8: refusing order-dependent batch)
+error: ops "set_owners(*, [@org/everyone])" and "add_owner(/services/api/, @org/api-team)" do not commute, and "*" provably governs every path "/services/api/" does — so the batch is order-dependent on every repository that has one (R-8); run "set_owners(*, [@org/everyone])" on its own first and the narrower op(s) in a second run — but preview that first run with --dry-run or `plan --out`: "set_owners(*, [@org/everyone])" REPLACES the owners of every path in scope, so anyone owning those paths today and not listed in it loses them
 ```
 
 `add_owner` ops commute with each other, so any number of them can share a run. A
