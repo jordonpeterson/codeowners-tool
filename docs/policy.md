@@ -91,6 +91,12 @@ meant the co-owning one.
 - **R-36c** `sync` ignores the `lint` block, and `lint` ignores `ops`. One committed
   file serves both commands; neither may fail because the other's section is present.
 - **R-36d** An unknown key inside `lint` is exit 3.
+- **R-36e** Every command validates the whole file, including the sections it does
+  not act on: `sync` exits 3 on a malformed `lint` block and `lint` exits 3 on a
+  malformed op. "Ignores" in R-36c means *does not act on*, never *does not
+  validate*. One artifact is reviewed once and run everywhere, so a defect that only
+  surfaces when someone happens to run the other command is precisely the
+  fleet-scale failure the exit-3 class exists to prevent.
 
 ## R-37 — `except` as a JSON array
 
