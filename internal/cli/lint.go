@@ -60,6 +60,11 @@ type lintRun struct {
 	removeStale            bool
 	onEmpty                string
 	dryRun                 bool
+	// policy records that a --policy file configured this run, not flags. It
+	// governs only how a refusal is WORDED: the remedy for an unset R-6 policy
+	// is a field in the file here and a flag under `audit --lint`, and naming
+	// the wrong one sends the operator to a second refusal (R-36b).
+	policy bool
 }
 
 // lintDoc is `--format json`: one object, so a CI step can gate on it without
@@ -131,6 +136,7 @@ func cmdLint(args []string, stdout, stderr io.Writer) int {
 		repo: *repo, branch: *branch, filePath: *filePath,
 		githubRepo: *githubRepo, token: authToken, apiURL: *apiURL,
 		format: *format, removeStale: removeStalePaths, onEmpty: onEmptyPolicy, dryRun: *dryRun,
+		policy: len(policyPaths) > 0,
 	}, stdout, stderr)
 }
 
@@ -155,18 +161,6 @@ func flagsPassed(fs *flag.FlagSet) map[string]bool {
 // diagnosed would ride through the fleet unseen until someone happened to run
 // the other command.
 func lintPrefs(policyPaths []string, passed map[string]bool) (removeStale bool, onEmpty string, err error) {
-	// R-36b, the rule `sync` already applies to --on-empty and
-	// --max-paths-changed. Unconditional, and deliberately not "only when the
-	// block sets the field": "the flag agreed with the file this time" is not
-	// something a reviewer reading the artifact can see.
-	for _, dup := range []struct{ flag, field string }{
-		{"remove-stale-paths", "remove_stale_paths"},
-		{"on-empty", "on_empty"},
-	} {
-		if passed[dup.flag] {
-			return false, "", fmt.Errorf("--%s is not allowed with --policy: set %q in the policy file's \"lint\" block instead, or the artifact in git is not the policy that ran (R-20/R-36)", dup.flag, dup.field)
-		}
-	}
 	pol, opList, err := opSource(nil, policyPaths)
 	if err != nil {
 		return false, "", err
@@ -179,7 +173,52 @@ func lintPrefs(policyPaths []string, passed map[string]bool) (removeStale bool, 
 	if err := ops.StaticConflict(opList); err != nil {
 		return false, "", err
 	}
+	// R-36b, the rule `sync` already applies to --on-empty and
+	// --max-paths-changed. Unconditional, and deliberately not "only when the
+	// block sets the field": "the flag agreed with the file this time" is not
+	// something a reviewer reading the artifact can see.
+	//
+	// AFTER the policy is loaded and validated, which is where `sync` moved
+	// its own bans in db7fc71: a policy that does not load is the more
+	// fundamental problem on the same command line, and reporting the flag
+	// first let "the broken policy halted the run" be proven by the flag with
+	// the policy never read at all. The operator pays for it twice — they drop
+	// the flag, re-run, and meet a completely different failure.
+	for _, dup := range []struct{ flag, field string }{
+		{"remove-stale-paths", "remove_stale_paths"},
+		{"on-empty", "on_empty"},
+	} {
+		if passed[dup.flag] {
+			return false, "", fmt.Errorf("--%s is not allowed with --policy: set %q in the policy file's \"lint\" block instead, or the artifact in git is not the policy that ran (R-20/R-36)", dup.flag, dup.field)
+		}
+	}
 	return pol.Lint.RemoveStalePaths, pol.Lint.OnEmpty, nil
+}
+
+// The two remedies for one refusal: R-6 has no default, and the way to state a
+// policy differs by how this run was configured. `sync`'s noCodeownersError is
+// the same shape for the same reason — under --policy the flag named by the
+// flag-mode sentence is itself exit 3 (R-36b), so an operator who followed the
+// advice met a second and worse refusal at the moment they could least tell a
+// broken policy from an awkward repository.
+const (
+	onEmptyRemedyFlag   = "an explicit --on-empty policy (error|inherit|unowned) is required"
+	onEmptyRemedyPolicy = `an explicit R-6 policy is required: set "on_empty" (error|inherit|unowned) in the policy file's "lint" block`
+)
+
+// policyRemedy re-points that advice at the reviewed artifact. It matches the
+// sentence rather than an error type because the refusal is raised inside
+// lint.Build, which is handed an OnEmpty and knows nothing about where it came
+// from. The cost of that is drift: a reworded refusal upstream would make this
+// a silent no-op and hand the illegal advice back. The flag-mode control in
+// TestR36a_TheR6RemedyNamesTheBlockUnderPolicy pins the sentence for exactly
+// that reason — the drift fails a test instead of reaching an operator.
+func policyRemedy(err error) error {
+	var inv *plan.InvalidError
+	if !errors.As(err, &inv) || !strings.Contains(inv.Msg, onEmptyRemedyFlag) {
+		return err
+	}
+	return &plan.InvalidError{Msg: strings.Replace(inv.Msg, onEmptyRemedyFlag, onEmptyRemedyPolicy, 1)}
 }
 
 func runLint(r lintRun, stdout, stderr io.Writer) int {
@@ -343,6 +382,9 @@ func runLint(r lintRun, stdout, stderr io.Writer) int {
 		emitLint(res, coPath, false, r, stdout)
 		return lintCode(res, false)
 	case buildErr != nil:
+		if r.policy {
+			buildErr = policyRemedy(buildErr)
+		}
 		return errExit(buildErr, stderr)
 	}
 

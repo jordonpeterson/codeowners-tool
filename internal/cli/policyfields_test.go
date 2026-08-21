@@ -548,6 +548,118 @@ func TestR35b_CheckEchoesTheResolvedValue(t *testing.T) {
 	}
 }
 
+// pfCheckDoc is `check --format json`'s document as a CONSUMER sees it. It is
+// declared here rather than reused from the CLI so the wire names are compared
+// to something external: a test that decodes into the producer's own struct
+// asserts nothing about the key a jq script selects.
+type pfCheckDoc struct {
+	Valid    bool              `json:"valid"`
+	Policy   string            `json:"policy"`
+	Name     string            `json:"name"`
+	Ops      int               `json:"ops"`
+	Resolved []pfCheckResolved `json:"resolved"`
+}
+
+type pfCheckResolved struct {
+	ID                    string `json:"id"`
+	OnZeroMatch           string `json:"on_zero_match"`
+	OnZeroMatchNote       string `json:"on_zero_match_note,omitempty"`
+	OnExceptZeroMatch     string `json:"on_except_zero_match,omitempty"`
+	OnExceptZeroMatchNote string `json:"on_except_zero_match_note,omitempty"`
+}
+
+// SPEC R-35b: `check --format json` echoes the resolved value too.
+//
+// R-35b is unqualified by format, and docs/FLEET.md makes
+// `check --format json | jq` the first line of a fleet script — the gate that
+// runs before a hundred repos are touched. That document said
+// `{"valid":true,"policy":"p.json","ops":1}`: nothing about a `defaults` block,
+// so the gate could not assert "no op in this wave runs under `declare`" and
+// the only place the resolution appeared was human text nobody parses.
+//
+// `ops` stays a COUNT and every existing key keeps its meaning: the echo is a
+// new array beside them, because the JSON document is consumed and reshaping
+// it breaks the scripts that read it today.
+func TestR35b_CheckJSONEchoesTheResolvedValue(t *testing.T) {
+	pol := syncWritePolicy(t, `{"version":1,
+		"defaults":{"on_zero_match":"declare"},
+		"ops":[{"id":"deploy","op":"add_owner(/deploy/, @org/sre)"},
+		       {"id":"charts","op":"add_owner(/charts/, @org/platform)","on_zero_match":"skip"}]}`)
+	code, out, errOut := runCLI(t, "check", "--policy", pol, "--format", "json")
+	if code != cli.ExitOK {
+		t.Fatalf("want exit 0, got %d\nstderr:\n%s", code, errOut)
+	}
+	var doc pfCheckDoc
+	if err := json.Unmarshal([]byte(out), &doc); err != nil {
+		t.Fatalf("check --format json is not valid JSON: %v\n%s", err, out)
+	}
+	// The keys the fleet gate already selects on, unchanged.
+	if !doc.Valid || doc.Policy != pol || doc.Ops != 2 {
+		t.Errorf("existing keys changed: valid=%v policy=%q ops=%d, want true/%q/2 — `ops` is a count, not the op list", doc.Valid, doc.Policy, doc.Ops, pol)
+	}
+	want := []pfCheckResolved{
+		{ID: "deploy", OnZeroMatch: "declare"},
+		{ID: "charts", OnZeroMatch: "skip"},
+	}
+	if !reflect.DeepEqual(doc.Resolved, want) {
+		t.Errorf("resolved echo:\n got: %+v\nwant: %+v\nraw: %s", doc.Resolved, want, out)
+	}
+}
+
+// SPEC R-35b: the JSON echo states where an unstated value came from, and says
+// so for an op the defaults block cannot reach (R-35e).
+//
+// `remove_owner` cannot carry `declare`, so the block does not reach it and the
+// op runs under the built-in `require`. A document that echoed the block's
+// value for that op would tell the reviewer the opposite of what will happen;
+// one that echoed `require` with nothing else would hide that a default was
+// declared at all. The note carries exactly what the human render puts in
+// parentheses, so the two formats cannot drift apart.
+func TestR35b_CheckJSONEchoNamesTheBuiltInWhereTheDefaultCannotReach(t *testing.T) {
+	pol := syncWritePolicy(t, `{"version":1,"on_empty":"inherit",
+		"defaults":{"on_zero_match":"declare"},
+		"ops":[{"id":"drop","op":"remove_owner(/deploy/, @org/sre)"},
+		       {"id":"carve","op":"add_owner(/.github/ except /.github/CODEOWNERS, @org/team_a)"}]}`)
+	code, out, errOut := runCLI(t, "check", "--policy", pol, "--format", "json")
+	if code != cli.ExitOK {
+		t.Fatalf("want exit 0, got %d\nstderr:\n%s", code, errOut)
+	}
+	var doc pfCheckDoc
+	if err := json.Unmarshal([]byte(out), &doc); err != nil {
+		t.Fatalf("check --format json is not valid JSON: %v\n%s", err, out)
+	}
+	want := []pfCheckResolved{
+		{ID: "drop", OnZeroMatch: "require", OnZeroMatchNote: "built-in; the default does not reach this op"},
+		{ID: "carve", OnZeroMatch: "require", OnZeroMatchNote: "built-in; the default does not reach this op",
+			OnExceptZeroMatch: "require", OnExceptZeroMatchNote: "built-in"},
+	}
+	if !reflect.DeepEqual(doc.Resolved, want) {
+		t.Errorf("resolved echo:\n got: %+v\nwant: %+v\nraw: %s", doc.Resolved, want, out)
+	}
+}
+
+// SPEC R-35b: `--op` carries no resolved settings, so the key is absent.
+//
+// There is no artifact under review on an ad-hoc `--op` run and nothing was
+// resolved from anything, which is why the human render prints no echo either.
+// An empty array would invite a gate to conclude the wave has no ops.
+func TestR35b_CheckJSONOmitsTheEchoWithoutAPolicy(t *testing.T) {
+	code, out, errOut := runCLI(t, "check", "--op", "add_owner(/docs/, @org/docs)", "--format", "json")
+	if code != cli.ExitOK {
+		t.Fatalf("want exit 0, got %d\nstderr:\n%s", code, errOut)
+	}
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(out), &m); err != nil {
+		t.Fatalf("check --format json is not valid JSON: %v\n%s", err, out)
+	}
+	if raw, ok := m["resolved"]; ok {
+		t.Errorf("--op run emitted resolved=%s; there is no policy whose values could have been resolved", raw)
+	}
+	if _, ok := m["ops"]; !ok {
+		t.Errorf("the op count disappeared from an --op run: %s", out)
+	}
+}
+
 // SPEC R-35a/R-28: the default carries `on_except_zero_match` too. This repo
 // has no .github/CODEOWNERS, so the promised carve-out does not exist; under
 // the block's `allow` the grant is written anyway, the inert pattern is

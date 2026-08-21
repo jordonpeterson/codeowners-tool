@@ -143,6 +143,10 @@ func schemaFullChange() plan.Change {
 func schemaFullRecord() cli.SyncRecord {
 	return cli.SyncRecord{
 		Repo: "work/org/foo",
+		// The artifact this record came from (R-20). Populated for the same
+		// reason every other omitempty field here is: a field left at its zero
+		// value is a field the key enumeration cannot see.
+		Policy: "waves/api-ownership.json",
 		// Populated like every other omitempty field: a field missing HERE is a
 		// field the key enumeration below cannot see, so the pin passes and the
 		// addition goes unnoticed — which is the failure that test is for.
@@ -226,6 +230,7 @@ func schemaStatusConstsFromSource(t *testing.T) map[string]string {
 func TestR24_SyncRecordTopLevelKeys(t *testing.T) {
 	schemaWantKeys(t, "cli.SyncRecord", schemaTopLevelKeys(t, schemaFullRecord()), []string{
 		"repo",
+		"policy",
 		"codeowners_path",
 		"status",
 		"ops",
@@ -251,6 +256,7 @@ func TestR24_SyncRecordFieldTypes(t *testing.T) {
 	got := schemaFieldKinds(t, schemaFullRecord())
 	want := map[string]string{
 		"repo":            "string",
+		"policy":          "string",
 		"codeowners_path": "string",
 		"status":          "string",
 		"ops":             "array<object>",
@@ -270,13 +276,17 @@ func TestR24_SyncRecordFieldTypes(t *testing.T) {
 
 // SPEC R-24 (omitempty): which keys DISAPPEAR from a minimal record, pinned
 // explicitly, and which are unconditional. The split is not cosmetic. The
-// optional five (ops, warnings, changes, error, codeowners_path) are absent
-// when there is nothing to say, so a consumer reads their absence as "empty",
-// and a clean run's line stays short enough to eyeball. `codeowners_path`
-// earns its place in that set: absent means no file was ever chosen, so
-// `git add "$(jq -r .codeowners_path)"` on such a record stages nothing rather
-// than staging a path the run never wrote. The unconditional six are the
-// aggregation keys: absence there is a malformed record, not an empty result.
+// optional six (ops, warnings, changes, error, codeowners_path, policy) are
+// absent when there is nothing to say, so a consumer reads their absence as
+// "empty", and a clean run's line stays short enough to eyeball.
+// `codeowners_path` earns its place in that set: absent means no file was ever
+// chosen, so `git add "$(jq -r .codeowners_path)"` on such a record stages
+// nothing rather than staging a path the run never wrote. `policy` earns it the
+// same way: absent means no policy file was involved at all, which is what
+// separates an ad-hoc `--op` run from a wave, and an empty string would bucket
+// every such run together under `group_by(.policy)`. The unconditional six are
+// the aggregation keys: absence there is a malformed record, not an empty
+// result.
 func TestR24_OmitEmptyKeysDisappear(t *testing.T) {
 	got := schemaTopLevelKeys(t, cli.SyncRecord{})
 	schemaWantKeys(t, "minimal cli.SyncRecord", got, []string{
@@ -286,7 +296,7 @@ func TestR24_OmitEmptyKeysDisappear(t *testing.T) {
 	for _, k := range got {
 		present[k] = true
 	}
-	for _, k := range []string{"ops", "warnings", "changes", "error", "codeowners_path"} {
+	for _, k := range []string{"ops", "warnings", "changes", "error", "codeowners_path", "policy"} {
 		if present[k] {
 			t.Errorf("minimal record: key %q should be omitted when empty but was emitted", k)
 		}

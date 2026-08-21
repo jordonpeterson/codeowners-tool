@@ -104,6 +104,37 @@ func opSource(opSpecs, policyPaths []string) (*policy.Policy, []ops.Op, error) {
 	}
 }
 
+// refuseGitDirPath rejects a --file naming anything inside a git directory.
+//
+// containedRelPath closes the spellings that leave --repo; this one closes the
+// spelling that stays inside it and is still not the repository's content.
+// `--file .git/CODEOWNERS --create` was accepted with only the "GitHub does not
+// read this path" warning and exit 0, and wrote a real file into git's own
+// storage — once per clone across a fleet, in the one directory nobody diffs.
+// Nothing GitHub loads can live there (S-8 reads three paths, none of them under
+// .git), so the write governs nothing by construction, which makes accepting it
+// the "applied, dead on arrival" outcome these verbs exist to prevent.
+//
+// Any component matches, not just the first: `vendor/lib/.git/CODEOWNERS` is a
+// submodule's git directory, and the comparison is case-insensitive because on a
+// case-folding filesystem `.GIT/x` is the same directory git protects.
+//
+// Exit 3, matching `--file ../escape/…`: decidable from the argument alone with
+// no repository open, so the verdict is identical on all 100 repos and the run
+// halts at the first rather than recording the same refusal a hundred times.
+func refuseGitDirPath(p string) error {
+	if p == "" {
+		return nil
+	}
+	for _, part := range strings.Split(filepath.ToSlash(filepath.Clean(filepath.FromSlash(p))), "/") {
+		if strings.EqualFold(part, ".git") {
+			return fmt.Errorf("--file %q names a path inside a .git directory: GitHub loads CODEOWNERS only from %s, so a file written there governs nothing, and git's own directory is not somewhere this tool may deposit one — name a path in the repository's content instead",
+				p, strings.Join(gittree.CodeownersLocations, ", "))
+		}
+	}
+	return nil
+}
+
 // validateScopes rejects a scope the matcher cannot compile — a property of the op
 // string alone, so it belongs to the exit-3 class and is settled before any repo
 // is opened. Draining it here is what lets everything plan.Build can still call
@@ -132,6 +163,13 @@ type syncRun struct {
 	onEmpty  string
 	ops      []ops.Op
 	policy   *policy.Policy // nil under --op
+	// policyPath is that policy's path as the operator spelled it, and is what
+	// the record and the PR body name. Both have to say WHICH artifact ran:
+	// R-20's claim is that the policy file is the complete statement of what
+	// happened, and a record that cannot name it makes the claim uncheckable a
+	// week later, when two waves have landed and results.jsonl is all anyone
+	// kept.
+	policyPath string
 	// maxPaths is R-25's ceiling, -1 when unset, and maxPathsSource names where
 	// it came from. The source is in the refusal text because the operator's
 	// next decision is "raise the wave's ceiling" or "exempt this one repo",
@@ -201,6 +239,11 @@ func cmdSync(args []string, stdout, stderr io.Writer) int {
 	// and it is checked BEFORE the repository is opened, because with --create
 	// the write happens outside the repository the moment we get that far.
 	if err := containedRelPath(*filePath); err != nil {
+		return exit3(stderr, err)
+	}
+	// The third spelling of the same mistake, and the one containment cannot
+	// see because it stays inside --repo: see refuseGitDirPath.
+	if err := refuseGitDirPath(*filePath); err != nil {
 		return exit3(stderr, err)
 	}
 	// Argument-only, hence exit 3: a fleet run halts at repo 0 rather than
@@ -277,6 +320,7 @@ func cmdSync(args []string, stdout, stderr io.Writer) int {
 		run.onEmpty = pol.OnEmpty
 		run.maxPaths = pol.MaxPathsChanged
 		run.maxPathsSource = fmt.Sprintf("\"max_paths_changed\" in %s", policyPaths[0])
+		run.policyPath = policyPaths[0]
 	}
 
 	rec, code := run.execute()
@@ -294,7 +338,10 @@ func cmdSync(args []string, stdout, stderr io.Writer) int {
 // 0 and 2 — every remaining failure is a fact about THIS repo, and a fleet script
 // records it and steps to the next clone.
 func (r *syncRun) execute() (SyncRecord, int) {
-	rec := SyncRecord{Repo: r.repoArg, DryRun: r.dryRun}
+	// Policy is set on EVERY record this run can produce, refusals included:
+	// the refused rows are the ones an operator re-reads afterwards, and "which
+	// wave was this?" is the first question asked of a `needs-human` pile.
+	rec := SyncRecord{Repo: r.repoArg, Policy: r.policyPath, DryRun: r.dryRun}
 
 	tree, err := gittree.ListTracked(r.repoArg, r.branch)
 	if err != nil {
@@ -630,12 +677,79 @@ func resolveDir(p string) (string, error) {
 // statusForReadFailure separates the two ways reading a repo can fail. A missing
 // CODEOWNERS is a considered refusal — the tool read the repo and declined,
 // because --create is off by default; an I/O failure is one it never got to read.
+// A file tracked in the ref but absent from the working tree is the first kind:
+// the repository was read, the disagreement between the two was noticed, and the
+// tool declined to write over a file it could not read.
 func statusForReadFailure(err error) string {
 	var missing *noCodeownersError
 	if errors.As(err, &missing) {
 		return StatusRefused
 	}
+	var absent *trackedButAbsentError
+	if errors.As(err, &absent) {
+		return StatusRefused
+	}
 	return StatusError
+}
+
+// trackedButAbsentError is the ref and the working tree disagreeing: this
+// CODEOWNERS is tracked at rel, and there is no file there on disk.
+//
+// The two answers come from different places by design — discovery runs over
+// `git ls-tree` (S-8/D5) while the bytes come from the working tree — and when
+// they disagree a create is the one thing that must not happen. os.ErrNotExist
+// meant "this repo has no CODEOWNERS", so `create` planned against an empty
+// file and wrote the result: a sparse clone that excludes /.github/ had its
+// entire ownership file replaced by the policy's ops, reported "applied",
+// created:true, paths_changed:1, exit 0. Nothing downstream could catch it —
+// a reviewed max_paths_changed ceiling counts changed paths, and one rule
+// replacing a whole file is one path.
+//
+// Exit 2, not 3: which paths a clone has checked out is a fact about THIS
+// repository, so the fleet loop records it and steps to the next one.
+type trackedButAbsentError struct {
+	rel string
+	ref string
+}
+
+func (e *trackedButAbsentError) Error() string {
+	// Deliberately offers no create advice of either spelling. Following it
+	// here is what destroys the file: the tracked rules are exactly the ones
+	// this run cannot see.
+	return fmt.Sprintf("refusing: CODEOWNERS is tracked at %s in %s but is missing from the working tree, so this run cannot read the rules it would be rewriting and would replace a file whose contents it never saw. This is a checkout problem — a sparse-checkout that excludes that path, a partial clone, or a file deleted locally — not a repository that has no CODEOWNERS yet. Restore it (`git sparse-checkout` to include %s, or `git checkout -- %s`) and re-run",
+		e.rel, e.ref, e.rel, e.rel)
+}
+
+// unreadableCodeownersError is a read that failed for any reason that is NOT
+// absence: EISDIR, a permission denial, an I/O error.
+//
+// Absence is the only read failure that can mean "this repo has no CODEOWNERS",
+// and treating the others as absence puts trackedButAbsentError's data loss back
+// with a different errno in front of it — the file is there, unread, and the run
+// writes over it from an empty starting point. Naming the failure also keeps the
+// operator from adding a create setting to a policy that was never the problem.
+type unreadableCodeownersError struct {
+	rel string
+	err error
+}
+
+func (e *unreadableCodeownersError) Error() string {
+	return fmt.Sprintf("refusing: %s could not be read (%v) — every write this tool makes is proven against the file's current bytes, and a read that fails for a reason other than the file being absent leaves nothing to prove against; fix that path in this checkout and re-run", e.rel, e.err)
+}
+
+func (e *unreadableCodeownersError) Unwrap() error { return e.err }
+
+// trackedAt reports whether rel is one of the paths git lists for the ref.
+// Comparison is against the cleaned, slash-separated spelling because rel can
+// come from --file, where `./docs/CODEOWNERS` names the tracked `docs/CODEOWNERS`.
+func trackedAt(tree []string, rel string) bool {
+	want := filepath.ToSlash(filepath.Clean(filepath.FromSlash(rel)))
+	for _, p := range tree {
+		if p == want {
+			return true
+		}
+	}
+	return false
 }
 
 // noCodeownersError is R-23: this repo has no CODEOWNERS and --create was not
@@ -666,6 +780,12 @@ func (e *noCodeownersError) Error() string {
 // and there is no third outcome — a nightly job could never converge. Bytes come
 // from the working tree for the same reason `plan` reads them there: that is what
 // apply mutates.
+//
+// Those two sources can disagree, and that disagreement is a refusal, not a
+// create: see trackedButAbsentError (tracked in the ref, absent on disk) and
+// unreadableCodeownersError (present and unreadable). "Creating" is reserved
+// for the case where NEITHER source has a file, which is the only one where
+// planning against empty bytes destroys nothing.
 func (r *syncRun) governing(tree []string) (rel string, content []byte, creating bool, err error) {
 	switch {
 	case r.filePath != "":
@@ -685,7 +805,15 @@ func (r *syncRun) governing(tree []string) (rel string, content []byte, creating
 	case readErr == nil:
 		return rel, b, false, nil
 	case !errors.Is(readErr, os.ErrNotExist):
-		return "", nil, false, readErr
+		// Absence is the ONLY read failure that can mean "this repo has no
+		// CODEOWNERS"; everything else is a file that exists and was not read.
+		return "", nil, false, &unreadableCodeownersError{rel: rel, err: readErr}
+	case trackedAt(tree, rel):
+		// The ref says the file is there and the disk says it is not. Refused
+		// ahead of the create branch AND of the no-CODEOWNERS branch: the
+		// latter's advice ("re-run with --create") is precisely what replaces
+		// the tracked rules with the ops alone.
+		return "", nil, false, &trackedButAbsentError{rel: rel, ref: r.branch}
 	case !r.create:
 		return "", nil, false, &noCodeownersError{ref: r.branch, policy: r.policy != nil}
 	default:
@@ -1042,11 +1170,21 @@ func renderSummary(rec SyncRecord, r *syncRun) string {
 	// here contradicted the --dry-run bullet three lines below in the same PR
 	// body ("a new CODEOWNERS file was written" … "nothing was written"). A
 	// reviewer reading a preview cannot be left to guess which sentence is true.
+	// The spelling that ACTUALLY applied. `--policy p.json --create` is exit 3
+	// (R-34b), so on a policy run the flag cannot have been passed and the
+	// reviewed `"create": true` is what wrote the file — crediting the flag
+	// sent the reviewer of this body looking for it in a fleet script that
+	// never contained it, and gave the artifact no credit for the one setting
+	// that mattered.
+	how := "`--create`"
+	if r.policy != nil {
+		how = fmt.Sprintf("`\"create\": true` in `%s`", r.policyPath)
+	}
 	if rec.Created && !r.dryRun {
-		fmt.Fprintf(&b, "- a new CODEOWNERS file was written (`--create`)\n")
+		fmt.Fprintf(&b, "- a new CODEOWNERS file was written (%s)\n", how)
 	}
 	if rec.Created && r.dryRun {
-		fmt.Fprintf(&b, "- a new CODEOWNERS file WOULD be created (`--create`)\n")
+		fmt.Fprintf(&b, "- a new CODEOWNERS file WOULD be created (%s)\n", how)
 	}
 	if r.dryRun {
 		fmt.Fprintf(&b, "- `--dry-run`: nothing was written; this is what the run would do\n")
@@ -1158,12 +1296,17 @@ func cmdCheck(args []string, stdout, stderr io.Writer) int {
 			Policy string `json:"policy,omitempty"`
 			Name   string `json:"name,omitempty"`
 			Ops    int    `json:"ops"`
+			// Resolved is R-35b in the machine format. `ops` stays a COUNT —
+			// it is a published key and `jq .ops` on a fleet gate must keep
+			// meaning what it meant — so the echo is a new array beside it.
+			Resolved []checkResolvedOp `json:"resolved,omitempty"`
 		}{Valid: true, Ops: len(opList)}
 		if len(policyPaths) == 1 {
 			doc.Policy = policyPaths[0]
 		}
 		if pol != nil {
 			doc.Name = pol.Name
+			doc.Resolved = resolvedOps(pol, opList)
 		}
 		b, err := json.Marshal(doc)
 		if err != nil {
@@ -1222,16 +1365,79 @@ func renderCheckOps(w io.Writer, pol *policy.Policy, list []ops.Op) {
 	}
 }
 
+// resolvedSetting is one echoed value: what the op will actually do, plus the
+// note the human render shows in parentheses after it. Both formats render from
+// this one value, so `check --format text` and `check --format json` cannot come
+// to say different things about the same op — which, for a value whose whole
+// purpose is to be reviewed before a fleet runs, is the failure that matters.
+type resolvedSetting struct {
+	Value string
+	Note  string
+}
+
+func (s resolvedSetting) String() string {
+	if s.Note == "" {
+		return s.Value
+	}
+	return s.Value + " (" + s.Note + ")"
+}
+
+// checkResolvedOp is one op's resolved settings in `check --format json` (R-35b).
+//
+// The op is named by the same label sync's per-op lines use, so an id-less op is
+// `ops[3]` in both verbs and a jq report can be read against a sync record. The
+// value is the bare setting a gate compares against ("declare", "skip",
+// "require"), or "n/a" for a rename, whose scope comes from current ownership
+// and can never zero-match; the note carries the parenthetical the human render
+// shows, which is where "the defaults block does not reach this op" lives.
+//
+// on_except_zero_match appears only on an op that carries an `except` clause:
+// R-27.6 makes the field illegal anywhere else, so emitting "require" there
+// would name a setting the op cannot have.
+type checkResolvedOp struct {
+	ID                    string `json:"id"`
+	OnZeroMatch           string `json:"on_zero_match"`
+	OnZeroMatchNote       string `json:"on_zero_match_note,omitempty"`
+	OnExceptZeroMatch     string `json:"on_except_zero_match,omitempty"`
+	OnExceptZeroMatchNote string `json:"on_except_zero_match_note,omitempty"`
+}
+
+// resolvedOps is the JSON echo, one entry per op in policy order.
+//
+// Unlike the human render it does not suppress the all-built-in case. The
+// suppression there is a reading aid — forty identical lines bury the one that
+// differs — and a fleet gate has the opposite need: `check --format json | jq`
+// is the documented first line of a fleet script, and an assertion like "no op
+// in this wave runs under declare" needs a row for every op, not only for the
+// ops someone remembered to configure.
+func resolvedOps(pol *policy.Policy, list []ops.Op) []checkResolvedOp {
+	out := make([]checkResolvedOp, 0, len(list))
+	for i, o := range list {
+		zero := resolvedZeroMatch(pol, o)
+		entry := checkResolvedOp{
+			ID:              policy.OpLabel(o.ID, i),
+			OnZeroMatch:     zero.Value,
+			OnZeroMatchNote: zero.Note,
+		}
+		if len(o.Except) > 0 {
+			except := resolvedExceptZeroMatch(o)
+			entry.OnExceptZeroMatch, entry.OnExceptZeroMatchNote = except.Value, except.Note
+		}
+		out = append(out, entry)
+	}
+	return out
+}
+
 // resolvedZeroMatch is what this op will actually do at zero match, after the
 // defaults block has been folded in by the loader.
-func resolvedZeroMatch(pol *policy.Policy, o ops.Op) string {
+func resolvedZeroMatch(pol *policy.Policy, o ops.Op) resolvedSetting {
 	if o.OnZeroMatch != "" {
-		return o.OnZeroMatch
+		return resolvedSetting{Value: o.OnZeroMatch}
 	}
 	if o.Kind == ops.RenameOwner {
 		// R-35e: a rename's scope comes from current ownership, so zero match
 		// can never fire and no value is legal on it in the first place.
-		return "n/a (a rename has no scope to match)"
+		return resolvedSetting{Value: "n/a", Note: "a rename has no scope to match"}
 	}
 	if pol.Defaults.OnZeroMatch != "" {
 		// R-35e, value level: the block states a value this op cannot carry
@@ -1239,14 +1445,14 @@ func resolvedZeroMatch(pol *policy.Policy, o ops.Op) string {
 		// keeps the built-in. Naming the block's value on this line would read
 		// as if it had reached the op, which is the misreading that ends in a
 		// repo refused for a reason the reviewer thought was configured away.
-		return ops.ZeroMatchRequire + " (built-in; the default does not reach this op)"
+		return resolvedSetting{Value: ops.ZeroMatchRequire, Note: "built-in; the default does not reach this op"}
 	}
-	return ops.ZeroMatchRequire + " (built-in)"
+	return resolvedSetting{Value: ops.ZeroMatchRequire, Note: "built-in"}
 }
 
-func resolvedExceptZeroMatch(o ops.Op) string {
+func resolvedExceptZeroMatch(o ops.Op) resolvedSetting {
 	if o.OnExceptZeroMatch != "" {
-		return o.OnExceptZeroMatch
+		return resolvedSetting{Value: o.OnExceptZeroMatch}
 	}
-	return ops.ExceptZeroMatchRequire + " (built-in)"
+	return resolvedSetting{Value: ops.ExceptZeroMatchRequire, Note: "built-in"}
 }
