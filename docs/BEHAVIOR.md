@@ -158,6 +158,59 @@ a bare line deletion.
 
 ## internal/cli
 
+**`checkout_test.go`**
+
+> The ref and the working tree can disagree, and `create` believed the working
+> tree.
+>
+> `governing` resolves WHICH file to edit from the tracked tree (S-8 discovery
+> runs over `git ls-tree`) and then reads its BYTES from disk. When those two
+> answers disagree — the path is tracked, the file is not on disk — the read
+> failed with os.ErrNotExist and `create` read that as "this repo has no
+> CODEOWNERS", planned against an empty file, and wrote the result. The
+> original rules were not merged, not backed up and not mentioned: a
+> sparse-checkout that excludes `/.github/`, a partial clone, or a file someone
+> deleted locally was enough to have a fleet run replace a repository's entire
+> ownership file with one rule and report `"status":"applied"`, exit 0.
+>
+> R-23/R-34d say create "never overwrites an existing file", and the O_EXCL in
+> `write` is what makes that a property of the syscall — but O_EXCL only sees
+> the working tree, which is exactly the half that was empty. The rules below
+> close it at the other end: the tool refuses when the two answers disagree,
+> because it cannot tell what it would be destroying.
+>
+> Exit 2, not 3: which files a clone has checked out is a fact about ONE
+> repository, so a fleet loop records it and steps to the next clone. Exit 3
+> would halt a hundred-repo rollout on the first sparse clone in the list.
+
+> FINDING 5 — `--file` may not name a path inside the git directory.
+>
+> `containedRelPath` rejects `--file ../ESCAPED/CODEOWNERS` and
+> `--file /abs/path`, both because the write lands somewhere the repository
+> does not own. `.git/CODEOWNERS` is the third spelling of that and was
+> accepted: with `--create` the tool wrote a real file INSIDE `.git`, warned
+> that GitHub does not read it, and exited 0. Nothing GitHub loads lives there,
+> git's own directory is not a place a tool may deposit files, and a fleet loop
+> pointed at 100 clones does it 100 times.
+
+> FINDING 3 — the PR body credited a flag that could not have been passed.
+>
+> `--policy p.json --create` is exit 3 (R-34b), so on a policy run the flag is
+> unpassable and `"create": true` in the file is what ran. The body said
+> ``a new CODEOWNERS file was written (`--create`)`` anyway. R-24's body is the
+> review surface R-20 exists to produce: a reviewer who reads it and goes
+> looking for `--create` in the fleet script finds nothing, and the reviewed
+> artifact gets no credit for the one setting that mattered.
+
+> FINDING 10 — the sync record did not name the policy that produced it.
+>
+> `check --format json` emits `"policy":"<path>"`; the record a fleet
+> aggregates did not, so a directory of `--out records/$repo.json` files could
+> not be attributed to the artifact that produced them. R-20's whole claim is
+> that the policy file is the complete statement of what ran; a record that
+> cannot name it makes that claim uncheckable a week later, when two waves have
+> landed and results.jsonl is all anyone kept.
+
 **`cli_test.go`**
 
 > Package cli_test exercises the end-to-end contract: real git repo, real
@@ -191,6 +244,27 @@ a bare line deletion.
 > Refusing outright and containing to the repo root are both acceptable fixes; these
 > tests pin only that the bytes outside the repository are never touched and that no
 > record claims otherwise.
+
+**`except_roundtrip_test.go`**
+
+> R-37's round trip, end to end: the `except` array is validated, applied and
+> REPORTED as the `<scope> except <pat> …` string spelling it claims to be
+> equivalent to (R-37a/R-37e), so anything an operator can see must be the same
+> between the two.
+>
+> The tests here came out of an adversarial review that ran the two spellings
+> side by side and diffed what each produced. Three of the four defects it
+> found were invisible to a test that only asserted the array's own result:
+> a pre-escaped element applied a carve to a subtree nobody named at exit 0,
+> an array-spelled op echoed itself WITHOUT its carve in the R-8 remedy, and a
+> pattern the op string cannot carry was refused with an arity error about an
+> owner list the operator never wrote. So the last test in this file is the
+> differential harness itself: same carve, both spellings, every visible
+> artifact compared.
+>
+> Vacuity, per CONTRIBUTING.md: policy.Error prints the FILE first and
+> t.TempDir embeds the test's own name in the path, so no fixture and no
+> subtest below is named with a fragment any assertion looks for.
 
 **`except_test.go`**
 
@@ -367,6 +441,38 @@ a bare line deletion.
 > SPEC S-6: CODEOWNERS is case-sensitive, so a rule that misses only by case is
 > a TYPO, not a dead rule. Deleting it would silently un-own the files it was
 > aimed at, which is the opposite of what --remove-stale-paths was asked to do.
+
+**`lintpolicy_remedy_test.go`**
+
+> Adversarial-review findings against `lint --policy` (R-36), each one a
+> mismatch between what the run refuses and what it tells the operator to do
+> about it.
+>
+> Both tests here assert EXACT stderr rather than a fragment, because both
+> claims are about wording that another package produces. A `strings.Contains`
+> on "on_empty" would go green on the very message the finding is about, since
+> the flag-mode sentence names the field too.
+>
+> The control in TestR36a_TheR6RemedyNamesTheBlockUnderPolicy is load-bearing:
+> the policy-mode sentence is built by rewriting the flag-mode one, so a
+> reworded refusal in internal/lint would silently stop matching and hand the
+> operator back the illegal advice with nothing failing. Pinning the flag-mode
+> bytes is what turns that drift into a red test.
+
+**`ownerdup_test.go`**
+
+> R-33c end to end: an owner named twice in one list is a fact about the op
+> string, so every command that reads that string refuses it — before any
+> repository is opened.
+>
+> Adversarial-review finding: only add_owner and remove_owner routed through
+> the owner-list grammar. set_owners had a hand-rolled loop with no duplicate
+> check, so the defect passed `check` at exit 0 and reached disk, and the
+> duplicate line then made `verify` report an invariant violation over a
+> semantic no-op.
+>
+> Vacuity, per CONTRIBUTING.md: no test name here contains a fragment any
+> assertion looks for.
 
 **`ownerlist_test.go`**
 
@@ -630,6 +736,84 @@ no-op code would abort the run before the loop starts.
 SPEC R-22: `check` writes nothing. It sits one token away from --dry-run,
 where the failure mode is exit 0 across all 100 repos having read and
 written nothing — silent success, the worst outcome this design produces.
+
+### `TestCheckout_CreateRefusesWhenTrackedFileIsMissingFromWorkingTree`
+
+SPEC R-23/R-34d: `create` REFUSES (exit 2) when the CODEOWNERS path is
+tracked in the ref but missing from the working tree, and writes nothing.
+
+The concrete loss: `.github/CODEOWNERS` holds `* @org/everyone` and
+`/services/ @org/platform`, the clone is sparse and does not check
+`/.github/` out, and a policy with `"create": true` adds one rule for
+`/docs/`. Before this rule the run wrote a file containing that one rule and
+nothing else — both original rules gone, `"created":true`, `paths_changed:1`
+and exit 0, so neither a reviewed `max_paths_changed` ceiling nor the record
+showed that a whole file had been replaced.
+
+The bytes are the assertion: the file must not exist on disk afterwards, and
+the tracked bytes at HEAD must be unchanged. A test that only read the exit
+code would pass against an implementation that refused AFTER truncating.
+
+### `TestCheckout_DryRunRefusesTheSameCheckoutInsteadOfPreviewingACreate`
+
+SPEC R-23/R-34d: `--dry-run` refuses the same checkout rather than previewing
+a creation.
+
+The preview is the review surface: it said "a new CODEOWNERS file WOULD be
+created" and showed one rule, disclosing nothing about the two rules the real
+run would drop. An operator reading that body approves the rollout.
+
+### `TestCheckout_ExplicitFileFlagIsRefusedOnTheSameRule`
+
+SPEC R-23: an explicit `--file` naming a tracked-but-absent path is refused
+on the same rule.
+
+Discovery is not the only way to reach the path — `--file .github/CODEOWNERS`
+reaches it directly — and the loss is identical, so the guard belongs where
+the two answers are compared and not in the discovery branch alone.
+
+### `TestCheckout_FileInsideTheGitDirectoryIsRefused`
+
+SPEC R-23: `--file` naming anything inside the git directory is exit 3, and
+nothing is written there.
+
+Exit 3 rather than 2, matching `--file ../escape/…`: it is decidable from the
+argument alone with no repository open, so it is the same verdict on every
+repo in the fleet and the run should halt at repo 0 instead of recording the
+identical refusal a hundred times.
+
+### `TestCheckout_SparseCheckoutIsRefusedNotTreatedAsAnEmptyRepo`
+
+SPEC R-23: the real sparse-checkout, end to end.
+
+The rule above is proven with a deleted file because that is portable and
+fast, but the reported failure was a sparse clone, and the two must reach the
+same code. `git sparse-checkout` needs git 2.25; the test skips rather than
+fails where it is unavailable, since an old git is not a defect in this tool.
+
+### `TestCheckout_TrackedDanglingSymlinkSaysWhatIsActuallyWrong`
+
+SPEC R-23: a tracked CODEOWNERS that is a symlink to a missing target is
+refused, and the refusal says so rather than claiming the file is absent.
+
+The read fails with os.ErrNotExist exactly as a sparse checkout's does, and
+the same rule applies — nothing was read, so nothing may be written over it.
+The wording is the part worth pinning: something IS at that path, and telling
+the operator to restore a file they can see with `ls` sends them looking for
+the wrong thing. (Containment still refuses a link that leaves the clone; this
+refusal comes first because it is true whether the target is inside or out.)
+
+### `TestCheckout_UnreadableFileIsRefusedAndNotReportedAsAbsent`
+
+SPEC R-23: a read that fails for a reason other than absence is its own
+refusal, never a create.
+
+`governing` reads the file and interprets the error. os.ErrNotExist means
+"absent"; EISDIR and a permission denial do not, and treating them as absence
+would put the whole finding above back with a different errno in front of it.
+The message has to say the file could not be READ, because "no CODEOWNERS
+found" sends the operator to add `create` to a policy that is already
+correct.
 
 ### `TestContainment_ApplyNeverWritesThroughASymlinkLeavingTheRepo`
 
@@ -1220,6 +1404,17 @@ they are on by default and this one is not — and the default must be pinned
 here, because a lint pass that quietly pruned "dead" rules across a fleet
 would be discovered only when the directory finally arrives unowned.
 
+### `TestR8_ArraySpelledOpRemedyNamesTheOpThatWasReviewed`
+
+SPEC R-8/R-37e: the remedy names the op that was REVIEWED, carve included.
+
+`ops.StaticConflict` quotes Op.Raw, and an array-spelled op stored the op
+string without its carve — so the exit-3 advice was to run
+`set_owners(*, [@org/every])` on its own first: an op that drops `except
+/src/` and displaces the owners of the subtree the reviewed op protected.
+The warning attached to that same sentence exists because an operator
+followed such advice on a security repo and stripped two teams from it.
+
 ### `TestR11_SeverityLadderIsTotal`
 
 SPEC R-11: the severity ladder is total and ordered — every severity the
@@ -1456,13 +1651,17 @@ unmarshal-based test.
 
 SPEC R-24 (omitempty): which keys DISAPPEAR from a minimal record, pinned
 explicitly, and which are unconditional. The split is not cosmetic. The
-optional five (ops, warnings, changes, error, codeowners_path) are absent
-when there is nothing to say, so a consumer reads their absence as "empty",
-and a clean run's line stays short enough to eyeball. `codeowners_path`
-earns its place in that set: absent means no file was ever chosen, so
-`git add "$(jq -r .codeowners_path)"` on such a record stages nothing rather
-than staging a path the run never wrote. The unconditional six are the
-aggregation keys: absence there is a malformed record, not an empty result.
+optional six (ops, warnings, changes, error, codeowners_path, policy) are
+absent when there is nothing to say, so a consumer reads their absence as
+"empty", and a clean run's line stays short enough to eyeball.
+`codeowners_path` earns its place in that set: absent means no file was ever
+chosen, so `git add "$(jq -r .codeowners_path)"` on such a record stages
+nothing rather than staging a path the run never wrote. `policy` earns it the
+same way: absent means no policy file was involved at all, which is what
+separates an ad-hoc `--op` run from a wave, and an empty string would bucket
+every such run together under `group_by(.policy)`. The unconditional six are
+the aggregation keys: absence there is a malformed record, not an empty
+result.
 
 ### `TestR24_PerOpResultsRenderUnderOps`
 
@@ -1871,6 +2070,10 @@ Case-variant handles (`@A` vs `@a`) are deliberately NOT asserted here:
 GitHub's case-insensitivity is audit's A-5 question, and R-33c says nothing
 about it. A test that guessed would be specifying by accident.
 
+### `TestR33c_OneOwnerNamedTwiceNeverReachesDisk`
+
+(no doc comment)
+
 ### `TestR33d_EmptyListIsExit3`
 
 SPEC R-33d: an empty list on add_owner/remove_owner is exit 3 — "add
@@ -2016,6 +2219,41 @@ satisfy that while telling the reviewer nothing about which op runs which
 way. Human output rather than JSON, because `check --format json` reports
 `ops` as a COUNT and R-35b must not be read as a demand to reshape it.
 
+### `TestR35b_CheckJSONEchoNamesTheBuiltInWhereTheDefaultCannotReach`
+
+SPEC R-35b: the JSON echo states where an unstated value came from, and says
+so for an op the defaults block cannot reach (R-35e).
+
+`remove_owner` cannot carry `declare`, so the block does not reach it and the
+op runs under the built-in `require`. A document that echoed the block's
+value for that op would tell the reviewer the opposite of what will happen;
+one that echoed `require` with nothing else would hide that a default was
+declared at all. The note carries exactly what the human render puts in
+parentheses, so the two formats cannot drift apart.
+
+### `TestR35b_CheckJSONEchoesTheResolvedValue`
+
+SPEC R-35b: `check --format json` echoes the resolved value too.
+
+R-35b is unqualified by format, and docs/FLEET.md makes
+`check --format json | jq` the first line of a fleet script — the gate that
+runs before a hundred repos are touched. That document said
+`{"valid":true,"policy":"p.json","ops":1}`: nothing about a `defaults` block,
+so the gate could not assert "no op in this wave runs under `declare`" and
+the only place the resolution appeared was human text nobody parses.
+
+`ops` stays a COUNT and every existing key keeps its meaning: the echo is a
+new array beside them, because the JSON document is consumed and reshaping
+it breaks the scripts that read it today.
+
+### `TestR35b_CheckJSONOmitsTheEchoWithoutAPolicy`
+
+SPEC R-35b: `--op` carries no resolved settings, so the key is absent.
+
+There is no artifact under review on an ad-hoc `--op` run and nothing was
+resolved from anything, which is why the human render prints no echo either.
+An empty array would invite a gate to conclude the wave has no ops.
+
 ### `TestR35b_PerOpExceptValueWinsOverTheDefault`
 
 SPEC R-35b/R-28: the per-op value wins in the RESTRICTIVE direction too. A
@@ -2107,6 +2345,17 @@ default still holds — `remove_stale_paths` off in particular (R-11). A block
 that switched a repair on merely by existing would prune "dead" rules across
 a fleet the first time anyone committed one.
 
+### `TestR36a_TheR6RemedyNamesTheBlockUnderPolicy`
+
+SPEC R-36a/R-36b/R-6: under `--policy`, the refusal for an unset R-6 policy
+must name the policy file's "lint" block, because the flag it named instead
+is exit-3 illegal in that mode (R-36b). An operator who did as they were told
+got a second refusal — "--on-empty is not allowed with --policy" — at the
+moment they could least tell a broken policy from an awkward repository.
+
+`sync`'s noCodeownersError is the precedent this mirrors: one refusal, two
+remedies, chosen by whether a policy drove the run.
+
 ### `TestR36b_FlagDuplicatingABlockFieldIsExit3`
 
 SPEC R-36b: a flag that duplicates a block field alongside --policy is exit 3
@@ -2163,6 +2412,21 @@ a NON-ACTING command diagnose this defect lives — together with the control
 that keeps that requirement from being met by blanket refusal. Repeating the
 sync leg here would restate it more weakly: R-36e snapshots the whole tree,
 this test only reads CODEOWNERS.
+
+### `TestR36e_ABrokenPolicyOutranksTheFlagBanUnderLint`
+
+SPEC R-36e/R-36b: a policy defect outranks the ban on a flag that sits next
+to --policy, exactly as it does under `sync` (commit db7fc71, and the
+precedence pin in TestFleet_BrokenPolicyHaltsOnTheFirstRepo).
+
+The order is the whole point. With the ban first, "the broken policy stopped
+the run" can be satisfied by the flag, with the policy never read at all —
+a vacuous pass that hides a defect riding through the fleet, and an operator
+who drops the flag and re-runs meets a completely different failure.
+
+The control is the other half: the ban must still fire on a policy that
+loads, or "the defect is reported first" would be reachable by removing the
+ban altogether.
 
 ### `TestR36e_LintRefusesAMalformedOp`
 
@@ -2255,6 +2519,24 @@ spelling is still refused.
 The written carve line is the CODEOWNERS spelling — the space escaped —
 because the file has its own grammar; the JSON does not.
 
+### `TestR37c_LiteralArrayElementCarvesTheDirectoryItNames`
+
+SPEC R-37c: the literal spelling of the same intent still carves what it
+names. The half that was already tested and the half that was not are
+asserted together, because that asymmetry is what let the defect through.
+
+### `TestR37c_PreEscapedArrayElementIsRefusedEndToEnd`
+
+SPEC R-37c: a pre-escaped array element is refused, and nothing is written.
+
+The reviewer's reproduction, verbatim. `"my\\ dir/"` in JSON is the pattern
+text `my\ dir/`; escaping it again for the file's grammar produces an escaped
+backslash followed by a BARE space, which the string grammar splits in two.
+Before the fix this repo came back at exit 0 with a carve line for `dir/` —
+a directory the policy never named — while `my dir/x.txt`, the path the carve
+existed for, resolved to the grantee. The refusal has to name the escaping,
+because the likely author is a generator that escaped defensively.
+
 ### `TestR37d_EmptyArrayIsExit3`
 
 SPEC R-37d: an empty array is exit 3 — state no `except`, not an empty one.
@@ -2275,6 +2557,24 @@ it visible (proven: "structural", except_unmatched, a warning) must not go
 missing merely because the carve-out was spelled as an array. Exact bytes
 pin that `allow` APPLIES the grant rather than quietly skipping the op.
 
+### `TestR37e_BothSpellingsAreIndistinguishable`
+
+SPEC R-37a/R-37e: equivalent in every respect, checked by running both
+spellings and diffing everything visible — exit code, stdout, stderr, the
+written CODEOWNERS bytes, the --out record and the --summary-out body.
+
+This is the harness the adversarial review used, kept as a test because
+three of the four defects it found were differences no single-spelling
+assertion could see. The op string is NOT redacted here, unlike the
+per-requirement tests: R-37e's promise is that an array-spelled op renders
+the intent that was reviewed, so a difference there is the finding, not
+noise.
+
+Exit 3 is the one comparison that has to be narrower. A policy error names
+the FIELD it came from — file:line:col, and the array's own wrapper — so the
+two cannot be byte-equal without lying about where the defect is. What must
+match there is the diagnosis.
+
 ### `TestR37e_ZeroMatchRefusalIsIdenticalBetweenSpellings`
 
 SPEC R-37e/R-28: an except pattern matching zero tracked files refuses this
@@ -2283,6 +2583,33 @@ depend on which spelling the policy used — a fleet that mixes the two would
 otherwise produce two different diagnoses for one condition. The stderrs are
 compared with the op string redacted, since that is the one difference R-37
 licenses.
+
+### `TestRecord_OpRunOmitsThePolicyKey`
+
+SPEC R-20/R-24: an `--op` run emits no `policy` key at all.
+
+Absence has to mean "no policy file was involved", the same way `check`'s
+omitempty spelling does. An empty string would make
+`jq 'group_by(.policy)'` bucket every ad-hoc run under "" alongside a policy
+that genuinely has no name.
+
+### `TestRecord_PolicyRunNamesThePolicy`
+
+SPEC R-20/R-24: a record from a `--policy` run carries `policy`, spelled as
+the path the operator passed and keyed exactly as `check` keys it.
+
+Asserted through a raw JSON map rather than through cli.SyncRecord: every
+other test in this package unmarshals into the struct, so the struct tag sits
+on both sides of the assertion and a rename would keep them all green.
+
+### `TestRecord_RefusedRecordStillNamesThePolicy`
+
+SPEC R-20/R-24: a REFUSED record names the policy too.
+
+The refused rows are the ones an operator re-reads afterwards, and "which
+wave was this?" is the first question asked of a `needs-human` pile. A field
+present only on success would be missing from exactly the records anyone
+goes back to.
 
 ### `TestRollout_AuditGateAfterADeclareBaseline`
 
@@ -2651,6 +2978,25 @@ a CODEOWNERS that had nothing to do with the mistake. A flag value is
 decidable with no repository open, which is the definition of the exit-3
 class, and `on_empty` in a policy has been validated at load time all along:
 two spellings of one setting disagreeing is the defect.
+
+### `TestSummary_CreateCreditsTheFlagOnAnOpRun`
+
+SPEC R-24/R-34a: the `--op` spelling still credits the flag, and under
+--dry-run both spellings stay in the future tense.
+
+The flag half is the control: a fix that simply renamed the string would
+mis-credit the other half of the same sentence, and an operator reading a
+body from an `--op` run would go looking for a policy file that does not
+exist.
+
+### `TestSummary_CreateCreditsThePolicyFieldNotTheFlag`
+
+SPEC R-24/R-34a: the PR body names the spelling that actually applied — the
+policy field on a `--policy` run, the flag on an `--op` run.
+
+Asserted as a whole LINE rather than as a substring of the body: the body
+carries the policy path in several places, so "the text mentions the policy
+somewhere" is satisfied by a body that still credits the flag.
 
 ### `TestSync_AlreadyCorrectIsZeroNotNoOp`
 
@@ -3703,6 +4049,21 @@ it claimed to be. Only an org owner sees secret teams.
 
 (no doc comment)
 
+### `TestParse_DuplicateOwnersFoldCase`
+
+SPEC R-33c: two owner tokens are duplicates under the identity the rest of
+the codebase uses for owners — @handles fold to lowercase, because GitHub
+does.
+
+Exact-string identity let `add_owner(/x/, [@Org/Team, @org/team])` through,
+and syncing it onto a file already holding @org/team wrote
+`/x/ @org/team @Org/Team`: one owner, twice. The dangerous half is removal —
+`remove_owner(/x/, [@Org/Team])` against a file holding @org/team reports
+"unchanged" at exit 0 while the owner still owns the path, so a fleet run of
+"revoke the departed team" reports converged on every repo that capitalised
+the handle. This test fixes the duplicate half; the matching half is a
+broader change (see the report accompanying this commit).
+
 ### `TestParse_Malformed`
 
 SPEC R-17 exit 3: malformed ops are invalid input, rejected at parse time.
@@ -3731,6 +4092,19 @@ set.
 set_owners with an empty list is legal: it is the explicit S-9 "un-own this
 subtree" intent.
 
+### `TestParse_SetOwnersSharesTheOwnerListGrammar`
+
+SPEC R-33c/R-33d: one grammar covers every verb that names owners.
+
+set_owners had its own hand-rolled list loop with no duplicate check, so
+`set_owners(/x/, [@org/a, @org/a])` passed `check` at exit 0 and `sync` wrote
+`/services/api/ @org/a @org/a` — after which `verify` reported {@org/a} →
+{@org/a, @org/a} as an invariant violation, the fleet's rollback signal
+firing on a semantic no-op. The pair of set_owners ops differing only by a
+duplicate also split check (exit 0) from sync (exit 2 per repo, with an R-8
+message), which is precisely the repo-independent split ops.StaticConflict
+exists to prevent.
+
 ### `TestParse_TrailingEscapedSpacePreserved`
 
 Second-review finding: a trailing ESCAPED space (`a\ ` — a path ending in
@@ -3744,6 +4118,19 @@ Unescaped whitespace in a scope cannot survive serialization: the written
 line "a b @x" re-parses as pattern "a" owned by "b" — a different, valid
 rule that silently breaks both invariants (review finding). CODEOWNERS
 spells such patterns with escaped spaces, and so must ops.
+
+### `TestWithExcept_RoundTripsOrRefuses`
+
+SPEC R-37a/R-37e: WithExcept writes the one string the array spelling is
+validated, applied and reported as — so what it returns has to be an op that
+re-parses to the same intent, and it has to REFUSE what an op string cannot
+carry rather than return something that parses as a different op.
+
+The refusals are the adversarial-review findings: a comma re-splits the
+clause as another argument (the arity error that followed named an owner
+list nobody wrote), and a trailing backslash escapes the space in front of
+the next pattern, silently merging two carve-outs into one pattern that
+matches nothing.
 
 ## internal/pattern
 
@@ -5087,6 +5474,17 @@ carries both halves of the policy. Nothing here acts on it — `sync` never
 will (R-36c) — but the loader is the only place that can prove the block a
 reviewer approved is the block `lint` will run.
 
+### `TestR37_ARefusedArrayDoesNotAlsoAccuseTheOpOfHavingNoCarve`
+
+SPEC R-27.6/R-37: a refused `except` array does not go on to accuse the op of
+having no except clause.
+
+Semantic errors accumulate on purpose, but the second one here is a
+CONSEQUENCE of the first: the array failed, so the op carries no parsed
+carve, so the R-27.6 check reports `on_except_zero_match` as inapplicable —
+telling the operator to remove the one field that is not the problem. The
+reviewer's own reproduction printed both.
+
 ### `TestR35e_DefaultDeclareSkipsTheOpsThatRefuseIt`
 
 SPEC R-35e: a default reaches only the ops that can carry the VALUE, not
@@ -5102,6 +5500,51 @@ parse: a default that reached the op and was silently downgraded to `skip`
 would also make the file load, and would then pass over a repo the policy
 meant to refuse.
 
+### `TestR37a_ArraySpelledOpRawCarriesTheCarve`
+
+SPEC R-37a/R-37e: an array-spelled op's Raw renders the intent that was
+reviewed, carve included.
+
+Raw is what every report echoes: the R-8 static-conflict remedy, the sync
+record's ops[].op, the --summary-out Ops table and plan.Plan.Ops. Before the
+fix the array spelling stored the op string WITHOUT its carve, so the R-8
+remedy read `run "set_owners(*, [@org/every])" on its own first` — an op that
+drops the carve and displaces the owners of the very subtree the reviewed op
+protected.
+
+### `TestR37a_WhitespaceOnlyArrayElementIsNotEmpty`
+
+SPEC R-37a: a whitespace-only element is whatever the string spelling makes
+of it, because the two are equivalent in every respect.
+
+`add_owner(* except \ , @org/a)` parses today and writes a carve, so the
+array's `[" "]` cannot be exit 3 — that puts one input in two different exit
+classes depending on spelling. The message was wrong as well: an element
+holding a space is not empty.
+
+### `TestR37c_ArrayElementEndingInABackslashIsRefused`
+
+SPEC R-37c: an element ending in a backslash cannot swallow the pattern after
+it.
+
+The clause is written as one string, so a trailing backslash escapes the
+space that separates this pattern from the next. Before the fix, `["/docs/a\
+", "/docs/b"]` became the SINGLE pattern `/docs/a\ /docs/b` — a path that
+exists nowhere, carving nothing, while the two paths the operator named
+stayed inside the grant. The same element alone is already refused as a
+dangling backslash; two of them must not be quietly accepted.
+
+### `TestR37c_ArrayPatternWithACharacterTheOpStringCannotCarry`
+
+SPEC R-37c: a pattern the op-string spelling cannot carry is refused by
+NAMING the character, not by leaking how the array is validated.
+
+`/docs/a,b.md` is an ordinary filename. The array is validated by re-spelling
+it as the `<scope> except <pat> …` string it is equivalent to, where a comma
+separates arguments — so before the fix the operator, who wrote no owner
+list, was told `add_owner takes (scope, owner) or (scope, [owners]), got 3
+args`: an arity error about a construct invented inside the validator.
+
 ### `TestR37c_ArrayPatternWithASpaceBecomesEscapedPatternText`
 
 SPEC R-37c: the array drops the DELIMITER, so a pattern containing a space is
@@ -5110,6 +5553,20 @@ uses, with the space escaped. The file has its own grammar; the JSON does
 not. An unescaped space stored here would re-parse as a pattern plus an owner
 token the moment the carve line was written (the refusal checkScope exists
 for), so the conversion is the whole point of the field.
+
+### `TestR37c_PreEscapedArrayElementIsRefused`
+
+SPEC R-37c: a PRE-ESCAPED array element is refused, and the refusal names
+pre-escaping as the cause.
+
+The array has no delimiter, so an element IS the path (R-37c). Escaping it
+anyway — the JSON `"my\\ dir/"`, whose value is the pattern text `my\ dir/`
+— is not the same string: a backslash is the pattern language's own escape,
+so converting it for the file's grammar yields an escaped BACKSLASH followed
+by a bare space, and the string grammar splits that into two patterns.
+Observed before the fix, at exit 0 on a repo holding `my dir/x.txt` and
+`dir/y.txt`: a carve line for `dir/` — a directory nobody named — while
+`my dir/x.txt`, the path the carve existed for, stayed inside the grant.
 
 ## internal/resolve
 
@@ -5183,4 +5640,4 @@ DIFFERENT states; transitioning between them is a real ownership change.
 
 ---
 
-510 documented test cases across 13 packages.
+541 documented test cases across 13 packages.

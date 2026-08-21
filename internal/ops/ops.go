@@ -119,15 +119,15 @@ func Parse(s string) (Op, error) {
 			return Op{}, err
 		}
 		op.Scope, op.Except = scope, excepts
-		listStr := strings.TrimSpace(strings.Join(args[1:], ","))
-		listStr = strings.TrimSuffix(strings.TrimPrefix(listStr, "["), "]")
-		op.Owners = []string{}
-		for _, tok := range strings.FieldsFunc(listStr, func(r rune) bool { return r == ',' || r == ' ' || r == '\t' }) {
-			if !file.ValidOwnerToken(tok) {
-				return Op{}, fmt.Errorf("invalid owner token %q", tok)
-			}
-			op.Owners = append(op.Owners, tok)
+		// One grammar, every verb that names owners (R-33): a second copy
+		// here is how set_owners came to accept `[@org/a, @org/a]` a year
+		// after add_owner stopped, write it, and leave `verify` reporting a
+		// rollback-worthy invariant violation over a semantic no-op.
+		owners, err := parseOwnerList(strings.Join(args[1:], ","), kind)
+		if err != nil {
+			return Op{}, err
 		}
+		op.Owners = owners
 	case RenameOwner:
 		if len(args) != 2 {
 			return Op{}, fmt.Errorf("rename_owner takes (old, new), got %d args", len(args))
@@ -160,12 +160,17 @@ func Parse(s string) (Op, error) {
 	return op, nil
 }
 
-// parseOwnerList parses a bracketed owner list for add_owner/remove_owner
-// (R-33). It shares set_owners' tolerance for whitespace and a trailing comma
-// so one grammar covers every verb that names owners; what it adds are the two
+// parseOwnerList parses a bracketed owner list for every verb that names
+// owners (R-33): add_owner, remove_owner and set_owners all reach it, so one
+// grammar covers them and the claim is checked by the compiler rather than by
+// memory. It tolerates whitespace and a trailing comma, and adds the two
 // refusals a list makes possible and a single owner cannot: an empty list and
 // a repeated owner. Both are facts about the text alone, so both are exit 3 on
 // every repository rather than a per-repo refusal.
+//
+// The empty list is the one thing the verbs disagree about: set_owners(scope,
+// []) is how "nobody owns this" is spelled, while an empty add or remove
+// states no intent at all (R-33d).
 func parseOwnerList(listStr string, kind Kind) ([]string, error) {
 	listStr = strings.TrimSpace(listStr)
 	if !strings.HasPrefix(listStr, "[") || !strings.HasSuffix(listStr, "]") {
@@ -177,27 +182,55 @@ func parseOwnerList(listStr string, kind Kind) ([]string, error) {
 		// the operator should read one sentence for that defect, not two.
 		return nil, fmt.Errorf("invalid owner token in %s owner list: brackets do not nest, want [@owner, @owner]", kind)
 	}
-	var owners []string
-	seen := make(map[string]bool)
+	// Non-nil even when empty: set_owners(scope, []) means "nobody owns this",
+	// which is a stated intent, and a nil slice is how an op that names no
+	// owners at all would look.
+	owners := []string{}
+	seen := make(map[string]string)
 	for _, tok := range strings.FieldsFunc(inner, func(r rune) bool {
 		return r == ',' || r == ' ' || r == '\t'
 	}) {
 		if !file.ValidOwnerToken(tok) {
 			return nil, fmt.Errorf("invalid owner token %q", tok)
 		}
-		if seen[tok] {
-			return nil, fmt.Errorf("duplicate owner %q in one %s list", tok, kind)
+		if prev, dup := seen[FoldOwner(tok)]; dup {
+			if prev == tok {
+				return nil, fmt.Errorf("duplicate owner %q in one %s list", tok, kind)
+			}
+			// Spelled differently, so both spellings are shown: an operator
+			// told only "duplicate owner @org/team" cannot see which of the
+			// two entries they wrote is the other one.
+			return nil, fmt.Errorf("duplicate owner: %q and %q are one owner in the same %s list — @handles are case-insensitive on GitHub", prev, tok, kind)
 		}
-		seen[tok] = true
+		seen[FoldOwner(tok)] = tok
 		owners = append(owners, tok)
 	}
-	if len(owners) == 0 {
+	if len(owners) == 0 && kind != SetOwners {
 		// set_owners(scope, []) is legal and means "nobody owns this"; an
 		// empty add or remove states no intent at all, so it is a defect
 		// rather than a no-op that silently ships to a hundred repositories.
 		return nil, fmt.Errorf("%s has an empty owner list: name at least one owner, or delete the op", kind)
 	}
 	return owners, nil
+}
+
+// FoldOwner is the identity under which two owner tokens are the same owner.
+// @handles fold to lowercase (GitHub does); an email is left alone, because
+// the local part of an address is not ours to case-fold.
+//
+// R-33c's duplicate check has to ask this question rather than compare bytes:
+// `[@Org/Team, @org/team]` names one owner twice, and syncing it onto a file
+// that already holds @org/team wrote the handle twice in two spellings.
+//
+// internal/lint has a byte-identical unexported copy, which is where this
+// identity was first written down. Two copies of an identity is how they
+// drift; lint's should collapse into this one, but that file belongs to
+// another change.
+func FoldOwner(o string) string {
+	if strings.HasPrefix(o, "@") {
+		return strings.ToLower(o)
+	}
+	return o
 }
 
 // ParseAll parses a batch, preserving order (R-8 conflict detection is the

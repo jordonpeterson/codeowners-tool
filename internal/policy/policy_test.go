@@ -1285,3 +1285,22 @@ func TestR37a_WhitespaceOnlyArrayElementIsNotEmpty(t *testing.T) {
 	err := mustReject(t, `{"version":1,"ops":[{"op":"add_owner(*, @org/a)","except":[""]}]}`)
 	assertMentions(t, err, "empty")
 }
+
+// SPEC R-27.6/R-37: a refused `except` array does not go on to accuse the op of
+// having no except clause.
+//
+// Semantic errors accumulate on purpose, but the second one here is a
+// CONSEQUENCE of the first: the array failed, so the op carries no parsed
+// carve, so the R-27.6 check reports `on_except_zero_match` as inapplicable —
+// telling the operator to remove the one field that is not the problem. The
+// reviewer's own reproduction printed both.
+func TestR37_ARefusedArrayDoesNotAlsoAccuseTheOpOfHavingNoCarve(t *testing.T) {
+	err := mustReject(t, `{"version":1,"ops":[{"op":"add_owner(*, @org/team_a)","except":["my\\ dir/"],"on_except_zero_match":"allow"}]}`)
+	problems := flatten(err)
+	if len(problems) != 1 {
+		t.Errorf("want 1 problem, got %d:\n%v", len(problems), err)
+	}
+	if strings.Contains(err.Error(), "this op has no except clause") {
+		t.Errorf("the refusal blames the field that is not the defect:\n%s", err)
+	}
+}
