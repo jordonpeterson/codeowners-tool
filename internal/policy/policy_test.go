@@ -205,8 +205,14 @@ func TestR20_BareStringIsExactlyObjectShorthand(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := bare.Ops[0]
-	if got.Kind != direct.Kind || got.Scope != direct.Scope || got.Owner != direct.Owner || got.Raw != direct.Raw {
-		t.Errorf("policy op = %+v, want the same parse as --op: %+v", got, direct)
+	// Owners, not Owner: an add_owner carries its targets in Owners and leaves
+	// Owner empty by contract (R-33), so comparing Owner asked whether "" ==
+	// "" — a loader that dropped the owner list entirely passed this clause
+	// (adversarial-review finding).
+	if got.Kind != direct.Kind || got.Scope != direct.Scope || got.Raw != direct.Raw ||
+		!reflect.DeepEqual(got.Owners, direct.Owners) {
+		t.Errorf("policy op = {kind %q scope %q owners %q raw %q}, want the same parse as --op: {kind %q scope %q owners %q raw %q}",
+			got.Kind, got.Scope, got.Owners, got.Raw, direct.Kind, direct.Scope, direct.Owners, direct.Raw)
 	}
 	if got.OnZeroMatch != "" {
 		t.Errorf("OnZeroMatch = %q, want \"\" — the zero value must mean require, so shorthand preserves R-5 exactly", got.OnZeroMatch)
