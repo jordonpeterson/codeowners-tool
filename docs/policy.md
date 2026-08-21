@@ -102,7 +102,11 @@ meant the co-owning one.
   malformed op. "Ignores" in R-36c means *does not act on*, never *does not
   validate*. One artifact is reviewed once and run everywhere, so a defect that only
   surfaces when someone happens to run the other command is precisely the
-  fleet-scale failure the exit-3 class exists to prevent.
+  fleet-scale failure the exit-3 class exists to prevent. Validation means the
+  *whole* verdict, not just the loader's: `lint` runs the scope-compile and
+  static-conflict checks on ops it will never apply, so all three verbs reach the
+  same conclusion about the same bytes. A file that `check` calls broken must not
+  be a file `lint` calls fine.
 
 ## R-37 — `except` as a JSON array
 
