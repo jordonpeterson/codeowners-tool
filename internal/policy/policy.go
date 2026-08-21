@@ -74,8 +74,36 @@ type Policy struct {
 	// thousands" is a claim about the intent, and a ceiling that lives in a
 	// shell line survives exactly as long as that shell line.
 	MaxPathsChanged int
-	Ops             []ops.Op
-	Notes           map[string]string // op ID -> note
+	// Create is R-34: the reviewed artifact, not a flag, decides whether a
+	// repository without a CODEOWNERS file gets one. R-23 still holds, so an
+	// existing file is never overwritten and this is safe to leave true for a
+	// fleet where only some repositories have a file.
+	Create bool
+	// Defaults is R-35, supplying the per-op settings an op does not state.
+	// It reaches only ops that can carry the setting (R-35e).
+	Defaults Defaults
+	// Lint is R-36. sync does not act on it, but every command validates it
+	// (R-36e): a malformed block that only surfaced when someone ran lint
+	// would be a defect riding through the whole fleet unseen.
+	Lint  LintPrefs
+	Ops   []ops.Op
+	Notes map[string]string // op ID -> note
+}
+
+// Defaults carries the per-op settings a policy states once (R-35). Only
+// settings that are genuinely per-op belong here: on_empty stays top-level
+// because it is one policy for the run, and two spellings for one setting is
+// the ambiguity R-35c exists to remove.
+type Defaults struct {
+	OnZeroMatch       string
+	OnExceptZeroMatch string
+}
+
+// LintPrefs mirrors lint's flags so the repair policy is reviewed in the same
+// artifact as the ownership policy (R-36).
+type LintPrefs struct {
+	RemoveStalePaths bool
+	OnEmpty          string
 }
 
 // Error is one located problem in a policy file.

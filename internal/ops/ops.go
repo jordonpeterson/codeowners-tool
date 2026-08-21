@@ -23,12 +23,19 @@ const (
 
 // Op is one parsed operation.
 type Op struct {
-	Kind     Kind     `json:"kind"`
-	Scope    string   `json:"scope,omitempty"`     // pattern text; empty for rename_owner
-	Owner    string   `json:"owner,omitempty"`     // add/remove target; rename old name
-	NewOwner string   `json:"new_owner,omitempty"` // rename new name
-	Owners   []string `json:"owners,omitempty"`    // set_owners exact set (non-nil, may be empty)
-	Raw      string   `json:"raw"`
+	Kind  Kind   `json:"kind"`
+	Scope string `json:"scope,omitempty"` // pattern text; empty for rename_owner
+	// Owner is rename_owner's OLD name and nothing else. add/remove/set all
+	// carry their targets in Owners, so no site can read a stale single value
+	// off an op that names several owners (R-33) — the field is simply not
+	// set for them.
+	Owner    string `json:"owner,omitempty"`
+	NewOwner string `json:"new_owner,omitempty"` // rename new name
+	// Owners is the target set for add_owner, remove_owner and set_owners:
+	// non-nil for all three, length >= 1 for add/remove (R-33d), possibly
+	// empty for set_owners, which is how "nobody owns this" is spelled.
+	Owners []string `json:"owners,omitempty"`
+	Raw    string   `json:"raw"`
 
 	// OnZeroMatch selects behavior when Scope matches zero tracked files:
 	// "" (== "require") | "require" | "skip" | "declare". The zero value
@@ -78,20 +85,31 @@ func Parse(s string) (Op, error) {
 
 	switch kind {
 	case AddOwner, RemoveOwner:
-		if len(args) != 2 {
-			return Op{}, fmt.Errorf("%s takes (scope, owner), got %d args", kind, len(args))
+		// A bare owner is one arg; a bracketed list arrives split on its own
+		// commas, so anything from args[1] on is part of it.
+		if len(args) < 2 {
+			return Op{}, fmt.Errorf("%s takes (scope, owner) or (scope, [owners]), got %d args", kind, len(args))
 		}
 		scope, excepts, err := parseScopeArg(args[0])
 		if err != nil {
 			return Op{}, err
 		}
+		op.Scope, op.Except = scope, excepts
 		if strings.HasPrefix(args[1], "[") {
-			return Op{}, fmt.Errorf("%s takes a single owner, not a list", kind)
+			owners, err := parseOwnerList(strings.Join(args[1:], ","), kind)
+			if err != nil {
+				return Op{}, err
+			}
+			op.Owners = owners
+			break
+		}
+		if len(args) != 2 {
+			return Op{}, fmt.Errorf("%s takes (scope, owner) or (scope, [owners]), got %d args", kind, len(args))
 		}
 		if !file.ValidOwnerToken(args[1]) {
 			return Op{}, fmt.Errorf("invalid owner token %q", args[1])
 		}
-		op.Scope, op.Except, op.Owner = scope, excepts, args[1]
+		op.Owners = []string{args[1]}
 	case SetOwners:
 		if len(args) < 2 || !strings.HasPrefix(args[1], "[") || !strings.HasSuffix(args[len(args)-1], "]") {
 			return Op{}, fmt.Errorf("set_owners takes (scope, [owners]) — the list brackets are required")
@@ -115,6 +133,12 @@ func Parse(s string) (Op, error) {
 			return Op{}, fmt.Errorf("rename_owner takes (old, new), got %d args", len(args))
 		}
 		for _, a := range args {
+			// R-33f: a list on a rename has to be named as such. Falling
+			// through to `invalid owner token "[@b]"` sends the operator
+			// hunting a typo instead of learning the verb takes no list.
+			if strings.HasPrefix(a, "[") || strings.HasSuffix(a, "]") {
+				return Op{}, fmt.Errorf("rename_owner takes no list: it renames one owner to one owner (R-33f)")
+			}
 			// R-27.4: an except clause on a rename has to be named as such.
 			// Falling through to "invalid owner token \"@a except @b\"" would
 			// leave the operator hunting a typo in an owner name instead of
@@ -134,6 +158,44 @@ func Parse(s string) (Op, error) {
 		return Op{}, fmt.Errorf("unknown op %q (want add_owner, set_owners, remove_owner, rename_owner)", kind)
 	}
 	return op, nil
+}
+
+// parseOwnerList parses a bracketed owner list for add_owner/remove_owner
+// (R-33). It shares set_owners' tolerance for whitespace and a trailing comma
+// so one grammar covers every verb that names owners; what it adds are the two
+// refusals a list makes possible and a single owner cannot: an empty list and
+// a repeated owner. Both are facts about the text alone, so both are exit 3 on
+// every repository rather than a per-repo refusal.
+func parseOwnerList(listStr string, kind Kind) ([]string, error) {
+	listStr = strings.TrimSpace(listStr)
+	if !strings.HasPrefix(listStr, "[") || !strings.HasSuffix(listStr, "]") {
+		return nil, fmt.Errorf("%s owner list is not closed: want [@owner, @owner]", kind)
+	}
+	inner := listStr[1 : len(listStr)-1]
+	if strings.ContainsAny(inner, "[]") {
+		return nil, fmt.Errorf("%s owner list must not nest brackets: want [@owner, @owner]", kind)
+	}
+	var owners []string
+	seen := make(map[string]bool)
+	for _, tok := range strings.FieldsFunc(inner, func(r rune) bool {
+		return r == ',' || r == ' ' || r == '\t'
+	}) {
+		if !file.ValidOwnerToken(tok) {
+			return nil, fmt.Errorf("invalid owner token %q", tok)
+		}
+		if seen[tok] {
+			return nil, fmt.Errorf("duplicate owner %q in one %s list", tok, kind)
+		}
+		seen[tok] = true
+		owners = append(owners, tok)
+	}
+	if len(owners) == 0 {
+		// set_owners(scope, []) is legal and means "nobody owns this"; an
+		// empty add or remove states no intent at all, so it is a defect
+		// rather than a no-op that silently ships to a hundred repositories.
+		return nil, fmt.Errorf("%s has an empty owner list: name at least one owner, or delete the op", kind)
+	}
+	return owners, nil
 }
 
 // ParseAll parses a batch, preserving order (R-8 conflict detection is the
