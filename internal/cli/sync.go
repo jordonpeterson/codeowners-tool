@@ -164,6 +164,12 @@ func cmdSync(args []string, stdout, stderr io.Writer) int {
 	if err := fs.Parse(args); err != nil {
 		return flagParseCode(err)
 	}
+	// Which flags were TYPED, as opposed to which hold a non-zero value. Every
+	// "not allowed with --policy" ban below is a ban on the flag being
+	// PRESENT: `--create=false` overrides a reviewed `"create": true` exactly
+	// as `--create` overrides a reviewed `false`, and a ban that fired only on
+	// the true value would miss half of it.
+	passed := flagsPassed(fs)
 
 	if *format != "text" && *format != "json" {
 		// Never a silent fallback to text: the fleet script's `>> results.jsonl`
@@ -183,6 +189,14 @@ func cmdSync(args []string, stdout, stderr io.Writer) int {
 	}
 	if *onEmpty != "" && len(policyPaths) > 0 {
 		return exit3(stderr, errors.New("--on-empty is not allowed with --policy: set \"on_empty\" in the policy file instead, or the artifact in git is not the policy that ran (R-20)"))
+	}
+	// The third member of that family (R-34b), and the one whose false default
+	// hid it: `--policy p.json --create` used to create the file at exit 0
+	// while `--on-empty` in the same position was refused, so the artifact in
+	// git was not the policy that ran. Keyed on presence rather than value for
+	// the reason `passed` exists.
+	if passed["create"] && len(policyPaths) > 0 {
+		return exit3(stderr, errors.New("--create is not allowed with --policy: set \"create\" in the policy file instead, or the artifact in git is not the policy that ran (R-20/R-34)"))
 	}
 	// A non-HEAD --branch may not write — checkBranchIsWritable enforces that
 	// for creates and edits alike, by comparing RESOLVED COMMITS rather than
@@ -208,12 +222,7 @@ func cmdSync(args []string, stdout, stderr io.Writer) int {
 	// "no ceiling at all" on a wave that was supposed to be capped, silently,
 	// and slip past the --policy guard below while the policy field rejected
 	// the identical value at load time.
-	maxPathsSet := false
-	fs.Visit(func(f *flag.Flag) {
-		if f.Name == "max-paths-changed" {
-			maxPathsSet = true
-		}
-	})
+	maxPathsSet := passed["max-paths-changed"]
 	// After opSource, so the more fundamental problems in the same command line
 	// (--op with --policy, a policy that does not parse) are reported first
 	// rather than hidden behind this one.
@@ -258,6 +267,10 @@ func cmdSync(args []string, stdout, stderr io.Writer) int {
 		maxPathsSource: "--max-paths-changed",
 	}
 	if pol != nil {
+		// R-34a: the same code path --create drives, reached from the reviewed
+		// artifact instead. R-23 is unchanged — create never overwrites — so
+		// this stays safe on a fleet where only some repos have a file.
+		run.create = pol.Create
 		run.onEmpty = pol.OnEmpty
 		run.maxPaths = pol.MaxPathsChanged
 		run.maxPathsSource = fmt.Sprintf("\"max_paths_changed\" in %s", policyPaths[0])
@@ -625,10 +638,20 @@ func statusForReadFailure(err error) string {
 // noCodeownersError is R-23: this repo has no CODEOWNERS and --create was not
 // given. Exit 2, never 3 — --create is off by default, so treating it as a policy
 // error halted revision 1's fleet run at roughly repo 3.
-type noCodeownersError struct{ ref string }
+type noCodeownersError struct {
+	ref string
+	// policy is set on a --policy run, where R-34b makes --create exit 3.
+	// Advising it there costs the operator a second and worse failure at the
+	// moment they can least tell a broken policy from an awkward repo.
+	policy bool
+}
 
 func (e *noCodeownersError) Error() string {
-	return "no CODEOWNERS file found in .github/, root, or docs/ at " + e.ref +
+	const head = "no CODEOWNERS file found in .github/, root, or docs/ at "
+	if e.policy {
+		return head + e.ref + `; set "create": true in the policy file to write one at .github/CODEOWNERS, or --file to name a path (R-23/R-34)`
+	}
+	return head + e.ref +
 		"; re-run with --create to write one at .github/CODEOWNERS, or --file to name a path (R-23)"
 }
 
@@ -661,7 +684,7 @@ func (r *syncRun) governing(tree []string) (rel string, content []byte, creating
 	case !errors.Is(readErr, os.ErrNotExist):
 		return "", nil, false, readErr
 	case !r.create:
-		return "", nil, false, &noCodeownersError{ref: r.branch}
+		return "", nil, false, &noCodeownersError{ref: r.branch, policy: r.policy != nil}
 	default:
 		// Creating from nothing: the "before" state is an empty file, which is
 		// what INV-2 is proven against.

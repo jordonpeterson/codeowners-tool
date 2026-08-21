@@ -15,6 +15,7 @@ import (
 	"github.com/jordonpeterson/codeowners-tool/internal/ghapi"
 	"github.com/jordonpeterson/codeowners-tool/internal/gittree"
 	"github.com/jordonpeterson/codeowners-tool/internal/lint"
+	"github.com/jordonpeterson/codeowners-tool/internal/ops"
 	"github.com/jordonpeterson/codeowners-tool/internal/plan"
 )
 
@@ -97,6 +98,8 @@ type lintDoc struct {
 func cmdLint(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("lint", flag.ContinueOnError)
 	fs.SetOutput(stderr)
+	var policyPaths multiFlag
+	fs.Var(&policyPaths, "policy", "policy file (R-36): the repair preferences come from its \"lint\" block; its ops are validated and never applied")
 	repo := fs.String("repo", ".", "path to local git repository")
 	branch := fs.String("branch", "HEAD", "ref whose tracked tree governs resolution (S-7); must be what the clone has checked out unless --dry-run")
 	filePath := fs.String("file", "", "CODEOWNERS path override (repo-relative); needed for a CODEOWNERS that is not committed yet")
@@ -110,6 +113,13 @@ func cmdLint(args []string, stdout, stderr io.Writer) int {
 	if err := fs.Parse(args); err != nil {
 		return flagParseCode(err)
 	}
+	removeStalePaths, onEmptyPolicy := *removeStale, *onEmpty
+	if len(policyPaths) > 0 {
+		var err error
+		if removeStalePaths, onEmptyPolicy, err = lintPrefs(policyPaths, flagsPassed(fs)); err != nil {
+			return exit3(stderr, err)
+		}
+	}
 	// Same post-Parse read as cmdAudit, and for the same reason: making
 	// os.Getenv the flag's DEFAULT hands the live credential to the flag
 	// package, which prints non-empty string defaults in its usage text (CWE-532).
@@ -120,8 +130,56 @@ func cmdLint(args []string, stdout, stderr io.Writer) int {
 	return runLint(lintRun{
 		repo: *repo, branch: *branch, filePath: *filePath,
 		githubRepo: *githubRepo, token: authToken, apiURL: *apiURL,
-		format: *format, removeStale: *removeStale, onEmpty: *onEmpty, dryRun: *dryRun,
+		format: *format, removeStale: removeStalePaths, onEmpty: onEmptyPolicy, dryRun: *dryRun,
 	}, stdout, stderr)
+}
+
+// flagsPassed reports which flags were actually TYPED. A ban on a flag next to
+// --policy is a ban on its PRESENCE, never on its value: `--remove-stale-paths=false`
+// overrides a reviewed `"remove_stale_paths": true` just as surely as the bare
+// flag overrides a reviewed false, and the zero value of a bool flag cannot
+// tell the two apart.
+func flagsPassed(fs *flag.FlagSet) map[string]bool {
+	passed := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) { passed[f.Name] = true })
+	return passed
+}
+
+// lintPrefs resolves `lint --policy` (R-36a): the repair preferences come from
+// the file's "lint" block, and every verdict it can reach is decidable from the
+// arguments and the file alone — hence exit 3, before any repository is opened.
+//
+// The whole file is loaded and validated, ops included, even though lint never
+// applies one (R-36e). "Ignores" in R-36c means does not ACT on: one artifact
+// is reviewed once and run everywhere, so a malformed op that only `sync`
+// diagnosed would ride through the fleet unseen until someone happened to run
+// the other command.
+func lintPrefs(policyPaths []string, passed map[string]bool) (removeStale bool, onEmpty string, err error) {
+	// R-36b, the rule `sync` already applies to --on-empty and
+	// --max-paths-changed. Unconditional, and deliberately not "only when the
+	// block sets the field": "the flag agreed with the file this time" is not
+	// something a reviewer reading the artifact can see.
+	for _, dup := range []struct{ flag, field string }{
+		{"remove-stale-paths", "remove_stale_paths"},
+		{"on-empty", "on_empty"},
+	} {
+		if passed[dup.flag] {
+			return false, "", fmt.Errorf("--%s is not allowed with --policy: set %q in the policy file's \"lint\" block instead, or the artifact in git is not the policy that ran (R-20/R-36)", dup.flag, dup.field)
+		}
+	}
+	pol, opList, err := opSource(nil, policyPaths)
+	if err != nil {
+		return false, "", err
+	}
+	// The same two repo-independent op checks `sync` and `check` make, so all
+	// three verbs reach the same verdict on the same bytes (R-36e).
+	if err := validateScopes(opList); err != nil {
+		return false, "", err
+	}
+	if err := ops.StaticConflict(opList); err != nil {
+		return false, "", err
+	}
+	return pol.Lint.RemoveStalePaths, pol.Lint.OnEmpty, nil
 }
 
 func runLint(r lintRun, stdout, stderr io.Writer) int {
