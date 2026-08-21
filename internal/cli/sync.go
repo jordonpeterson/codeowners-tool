@@ -710,14 +710,25 @@ func statusForReadFailure(err error) string {
 type trackedButAbsentError struct {
 	rel string
 	ref string
+	// dangling distinguishes "nothing is at that path" from "something is, and
+	// it resolves to nothing" — a committed symlink whose target is missing.
+	// Both are the same refusal, but telling an operator to restore a file that
+	// is sitting right there sends them looking for the wrong thing.
+	dangling bool
 }
 
 func (e *trackedButAbsentError) Error() string {
 	// Deliberately offers no create advice of either spelling. Following it
 	// here is what destroys the file: the tracked rules are exactly the ones
 	// this run cannot see.
-	return fmt.Sprintf("refusing: CODEOWNERS is tracked at %s in %s but is missing from the working tree, so this run cannot read the rules it would be rewriting and would replace a file whose contents it never saw. This is a checkout problem — a sparse-checkout that excludes that path, a partial clone, or a file deleted locally — not a repository that has no CODEOWNERS yet. Restore it (`git sparse-checkout` to include %s, or `git checkout -- %s`) and re-run",
-		e.rel, e.ref, e.rel, e.rel)
+	state := "is missing from the working tree"
+	fix := fmt.Sprintf("Restore it (`git sparse-checkout` to include %s, or `git checkout -- %s`) and re-run", e.rel, e.rel)
+	if e.dangling {
+		state = "is a symlink in the working tree whose target does not exist"
+		fix = fmt.Sprintf("Restore what %s points at, or replace the link with a real file, and re-run", e.rel)
+	}
+	return fmt.Sprintf("refusing: CODEOWNERS is tracked at %s in %s but %s, so this run cannot read the rules it would be rewriting and would replace a file whose contents it never saw. This is a checkout problem — a sparse-checkout that excludes that path, a partial clone, or a file deleted locally — not a repository that has no CODEOWNERS yet. %s",
+		e.rel, e.ref, state, fix)
 }
 
 // unreadableCodeownersError is a read that failed for any reason that is NOT
@@ -813,7 +824,8 @@ func (r *syncRun) governing(tree []string) (rel string, content []byte, creating
 		// ahead of the create branch AND of the no-CODEOWNERS branch: the
 		// latter's advice ("re-run with --create") is precisely what replaces
 		// the tracked rules with the ops alone.
-		return "", nil, false, &trackedButAbsentError{rel: rel, ref: r.branch}
+		_, lstatErr := os.Lstat(filepath.Join(r.repoArg, filepath.FromSlash(rel)))
+		return "", nil, false, &trackedButAbsentError{rel: rel, ref: r.branch, dangling: lstatErr == nil}
 	case !r.create:
 		return "", nil, false, &noCodeownersError{ref: r.branch, policy: r.policy != nil}
 	default:

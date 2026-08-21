@@ -211,6 +211,31 @@ func TestCheckout_UnreadableFileIsRefusedAndNotReportedAsAbsent(t *testing.T) {
 	}
 }
 
+// SPEC R-23: a tracked CODEOWNERS that is a symlink to a missing target is
+// refused, and the refusal says so rather than claiming the file is absent.
+//
+// The read fails with os.ErrNotExist exactly as a sparse checkout's does, and
+// the same rule applies — nothing was read, so nothing may be written over it.
+// The wording is the part worth pinning: something IS at that path, and telling
+// the operator to restore a file they can see with `ls` sends them looking for
+// the wrong thing. (Containment still refuses a link that leaves the clone; this
+// refusal comes first because it is true whether the target is inside or out.)
+func TestCheckout_TrackedDanglingSymlinkSaysWhatIsActuallyWrong(t *testing.T) {
+	repo := symlinkRepo(t, ".github/CODEOWNERS", "MISSING.txt", map[string]string{
+		"docs/guide.md": "# guide\n",
+	})
+	code, out, errOut := runCLI(t, "sync", "--repo", repo, "--op", "add_owner(/docs/, @org/docs)",
+		"--create", "--format", "json")
+	if code != cli.ExitRefused {
+		t.Fatalf("exit %d, want %d\nstdout:\n%s\nstderr:\n%s", code, cli.ExitRefused, out, errOut)
+	}
+	msg := syncDecodeRecord(t, out).Error
+	if !strings.Contains(msg, "symlink") || !strings.Contains(msg, "target") {
+		t.Errorf("the refusal describes a missing file, but the path holds a symlink whose target is gone:\n%s", msg)
+	}
+	checkoutWantRefusalText(t, msg)
+}
+
 // checkoutWantRefusalText pins what the refusal has to tell the operator. The
 // four facts are the operator's whole diagnosis: WHICH file, that the REF has
 // it, that the WORKING TREE does not, and that the fix is to the checkout. The
