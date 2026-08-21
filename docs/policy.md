@@ -30,6 +30,16 @@ meant the co-owning one.
 - **R-33a Fold equivalence.** A list produces exactly the file the single-owner ops
   it replaces produce, including byte order. `add ∘ add` already commutes, so no new
   refusal case exists.
+  **One exception, and the list is the correct side of it.** Under
+  `on_empty: inherit`, removing several owners from one scope is refused as a batch —
+  the guard is pairwise and cannot prove order-independence — and run as a sequence it
+  gives the wrong answer: with `/services/ @org/a @org/keep` above
+  `/services/api/ @org/a @org/b`, removing `@org/a` then `@org/b` leaves
+  `services/api/main.go` owned by `{@org/a, @org/keep}`. The owner the operator asked
+  to remove is back, inherited from the broader rule. The list form resolves the whole
+  removal at once and yields `{@org/keep}`, which is what `remove_owner` promises:
+  after it, no named owner owns any in-scope path. So the list is not merely shorter
+  here — it expresses an intent the batch refuses and the sequence gets wrong.
 - **R-33b One intent, one hunk.** N owners on one scope produce **one** line change,
   not N. The plan artifact must never show an intermediate state that is not on disk
   at any point (this is the defect the list exists to fix).
