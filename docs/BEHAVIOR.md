@@ -2066,9 +2066,13 @@ policy, identical in every repo, so `check` catches it before repo 1 and
 cheapest duplicate check compares neighbours after a sort that the list
 grammar must not perform (R-33e: order is preserved).
 
-Case-variant handles (`@A` vs `@a`) are deliberately NOT asserted here:
-GitHub's case-insensitivity is audit's A-5 question, and R-33c says nothing
-about it. A test that guessed would be specifying by accident.
+Case-variant handles (`@A` vs `@a`) are one owner under R-33c too, and are
+asserted in internal/ops (TestParse_DuplicateOwnersFoldCase) rather than
+here. The justification this comment used to give — that case is "audit's
+A-5 question" — was simply wrong: A-5 is `rule dead only because of case`
+over pattern text, and nothing in audit looks at owner-handle case. The
+identity that decides it is ops.FoldOwner, which lint has always used
+(adversarial-review finding).
 
 ### `TestR33c_OneOwnerNamedTwiceNeverReachesDisk`
 
@@ -2384,6 +2388,20 @@ SPEC R-36c: one committed file serves both commands, so `sync` must ignore
 the lint block rather than fail on it — and `check` must validate the
 artifact as a whole. A fleet cannot be asked to keep two policy files in
 step; that is the drift this requirement exists to prevent.
+
+### `TestR36c_TheMissingOpsRefusalIsTrueForEveryCaller`
+
+SPEC R-36c/R-36e: `ops` stays required — one committed file serves both
+commands — but the refusal must be TRUE of the command that is running.
+"A policy with no ops does nothing on every repo and exits 0 on all of them"
+is a claim about `sync`; the file below fully specifies a `lint` run, and
+telling its author their policy does nothing sends them to add a dummy op
+that `sync` will apply the next time anyone runs it.
+
+Vacuity: the fragments must appear in neither the test name nor the subtest
+names, because t.TempDir puts the test name in the policy path and
+policy.Error renders that path first. Hence "EveryCaller" rather than naming
+either command.
 
 ### `TestR36d_BadEnumValueInTheBlockIsExit3`
 
@@ -5640,4 +5658,4 @@ DIFFERENT states; transitioning between them is a real ownership change.
 
 ---
 
-541 documented test cases across 13 packages.
+542 documented test cases across 13 packages.

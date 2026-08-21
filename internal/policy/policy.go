@@ -526,7 +526,13 @@ func (v *validator) unknownLintField(m *member) {
 
 func (v *validator) opsArray(p *Policy, m *member, rootOff int) []opInfo {
 	if m == nil {
-		v.at(rootOff, -1, "", `missing required field "ops"; a policy with no ops does nothing on every repo and exits 0 on all of them, which is the silent success this format exists to make impossible`)
+		// True of whichever command is running. `lint --policy` reads the same
+		// artifact, and a file carrying only a `lint` block fully specifies a
+		// lint run — so a refusal claiming the file "does nothing" was simply
+		// false there, and sent its author to add a dummy op that `sync` then
+		// applies (adversarial-review finding). What is true for every caller
+		// is the pairing: one file, one verdict (R-36c/R-36e).
+		v.at(rootOff, -1, "", `missing required field "ops"; one policy file is read by every command, so it has to state the ownership policy the rest of it is paired with (R-36c) — without "ops", `+"`sync --policy`"+` would apply nothing to every repository and exit 0 on all of them, the silent success this format exists to make impossible. A file whose only intent is a `+"`lint`"+` block has no separate spelling: state the ops the repair rides with`)
 		return nil
 	}
 	val := m.val

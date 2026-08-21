@@ -353,9 +353,13 @@ func TestR33b_ListWithExceptGrantsOnceAndCarvesOnce(t *testing.T) {
 // cheapest duplicate check compares neighbours after a sort that the list
 // grammar must not perform (R-33e: order is preserved).
 //
-// Case-variant handles (`@A` vs `@a`) are deliberately NOT asserted here:
-// GitHub's case-insensitivity is audit's A-5 question, and R-33c says nothing
-// about it. A test that guessed would be specifying by accident.
+// Case-variant handles (`@A` vs `@a`) are one owner under R-33c too, and are
+// asserted in internal/ops (TestParse_DuplicateOwnersFoldCase) rather than
+// here. The justification this comment used to give — that case is "audit's
+// A-5 question" — was simply wrong: A-5 is `rule dead only because of case`
+// over pattern text, and nothing in audit looks at owner-handle case. The
+// identity that decides it is ops.FoldOwner, which lint has always used
+// (adversarial-review finding).
 func TestR33c_DuplicateInsideOneListIsExit3(t *testing.T) {
 	cases := map[string]string{
 		"adjacent":     `{"version":1,"ops":["add_owner(/services/api/, [@org/api-team, @org/api-team])"]}`,
