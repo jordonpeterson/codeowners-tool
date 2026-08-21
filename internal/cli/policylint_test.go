@@ -34,6 +34,13 @@
 // that shaped except_test.go, and R-37's byte-equality claim is precisely a
 // claim about that order.
 //
+// The R-36e cases each carry a "control" subtest that runs the WELL-FORMED
+// counterpart of the same section through the same command and demands exit 0.
+// Without it, "validates the section it does not act on" is satisfied by
+// refusing every file that contains that section — which is R-36c's failure,
+// one requirement away. The controls restate R-36c inside the R-36e tests so
+// the two cannot be traded against each other.
+//
 // Two subtests are pins that pass today and are labeled as such, both under
 // TestR37c_ArrayPatternMayContainALiteralSpace: the escaped string spelling
 // (which R-37 promises not to change) and the refusal of the unescaped one
@@ -616,6 +623,13 @@ func TestR36c_LintIgnoresOps(t *testing.T) {
 //
 // The fragment is the misspelled key: today the whole block is one unknown
 // field, so the current message names "lint" and never the key inside it.
+//
+// `check` and `lint` are asserted here; `sync` is asserted by
+// TestR36e_SyncRefusesAMalformedLintBlock, which is where the requirement that
+// a NON-ACTING command diagnose this defect lives — together with the control
+// that keeps that requirement from being met by blanket refusal. Repeating the
+// sync leg here would restate it more weakly: R-36e snapshots the whole tree,
+// this test only reads CODEOWNERS.
 func TestR36d_UnknownKeyInTheBlockIsExit3(t *testing.T) {
 	src := `{"version":1,"lint":{"remove_stale_pathz":true},"ops":["add_owner(/x/, @org/live)"]}`
 	pol := plPolicy(t, src)
@@ -641,6 +655,9 @@ func TestR36d_UnknownKeyInTheBlockIsExit3(t *testing.T) {
 // can see which of the three R-6 outcomes they meant to type. The fragment is
 // the misspelled value, because the key name and the word "unknown" both appear
 // in today's unrelated message.
+//
+// The `sync` leg is TestR36e_SyncRefusesAMalformedLintBlock's, for the reason
+// given on TestR36d_UnknownKeyInTheBlockIsExit3.
 func TestR36d_BadEnumValueInTheBlockIsExit3(t *testing.T) {
 	src := `{"version":1,"lint":{"on_empty":"inhrit"},"ops":["add_owner(/x/, @org/live)"]}`
 	pol := plPolicy(t, src)
@@ -704,5 +721,135 @@ func TestR36_ExitFourAfterASuccessfulWriteIsUnchanged(t *testing.T) {
 			t.Fatalf("want exit 4, got %d\nstdout: %s\nstderr: %s", code, out, errb)
 		}
 		lintUnchanged(t, "--dry-run with --policy", lintOwnersPath(repo), broken)
+	})
+}
+
+// ---------- R-36e: every command validates the whole file ----------
+
+// plWantSyncPolicyError is the R-36e sync leg: a defect in the section `sync`
+// does not act on is still exit 3, and `sync` still writes nothing. The whole
+// directory is snapshotted, not just CODEOWNERS — "wrote nothing" is a claim
+// about the tree, and a policy error is decided before the repo is opened.
+func plWantSyncPolicyError(t *testing.T, src, fragment string) {
+	t.Helper()
+	repo := syncSmallRepo(t)
+	snap := checkDirSnapshot(t, repo)
+	code, _, errOut := runCLI(t, "sync", "--repo", repo, "--policy", plPolicy(t, src))
+	if code != cli.ExitInvalid {
+		t.Fatalf("sync: want exit 3, got %d\nstderr:\n%s", code, errOut)
+	}
+	exceptWantFragment(t, "sync stderr", errOut, fragment)
+	if after := checkDirSnapshot(t, repo); !reflect.DeepEqual(snap, after) {
+		t.Errorf("a policy error must write NOTHING; repo changed")
+	}
+}
+
+// plWantLintPolicyError is the mirror leg: a defect in `ops`, the section
+// `lint` does not act on, is exit 3 under `lint --policy` and leaves the file
+// byte-identical.
+func plWantLintPolicyError(t *testing.T, src, fragment string) {
+	t.Helper()
+	repo := plLintRepo(t)
+	before := lintRead(t, lintOwnersPath(repo))
+	pol := plPolicy(t, src)
+	code, out, errb := lintVerbRun(t, repo, lintAPI(t, nil, "org/live", "org/other"), "--policy", pol)
+	if code != cli.ExitInvalid {
+		t.Fatalf("lint: want exit 3, got %d\nstdout: %s\nstderr: %s", code, out, errb)
+	}
+	exceptWantFragment(t, "lint stderr", errb, fragment)
+	lintUnchanged(t, "policy error under lint --policy", lintOwnersPath(repo), before)
+}
+
+// SPEC R-36e: `sync` exits 3 on a malformed `lint` block. "Ignores" in R-36c
+// means does not ACT on, never does not VALIDATE: one artifact is reviewed once
+// and run everywhere, so a defect that surfaces only when someone happens to run
+// `lint` is exactly the fleet-scale failure the exit-3 class exists to prevent.
+// The defect is repo-independent, so it is exit 3 and not exit 2, and `sync`
+// must reach the same verdict `check` does on the same bytes (R-36d).
+//
+// The `ops` array in every case here is well-formed and would apply cleanly, so
+// the ONLY thing that can produce exit 3 is the block `sync` does not act on.
+//
+// The control subtest is load-bearing and is the reason this test cannot be
+// satisfied by rejecting every file that contains a `lint` block: it is
+// TestR36c_SyncIgnoresTheBlock's claim restated inside the R-36e test, so an
+// implementation that "satisfies" R-36e by blanket refusal fails HERE, not only
+// in a test someone might read as superseded.
+//
+// Fragments are the misspelled key and the misspelled value: today the whole
+// block is one unknown top-level field, so the current message names "lint" and
+// never what is inside it. No subtest name below contains a fragment — t.TempDir
+// puts the test name in the path and the path is in the message.
+func TestR36e_SyncRefusesAMalformedLintBlock(t *testing.T) {
+	t.Run("unknown key in the block", func(t *testing.T) {
+		plWantSyncPolicyError(t,
+			`{"version":1,"lint":{"remove_stale_pathz":true},"ops":["add_owner(/x/, @b)"]}`,
+			"remove_stale_pathz")
+	})
+
+	t.Run("bad enum value in the block", func(t *testing.T) {
+		plWantSyncPolicyError(t,
+			`{"version":1,"lint":{"on_empty":"inhrit"},"ops":["add_owner(/x/, @b)"]}`,
+			"inhrit")
+	})
+
+	t.Run("control: a well-formed block is not a refusal", func(t *testing.T) {
+		repo := syncSmallRepo(t)
+		pol := plPolicy(t, `{"version":1,"lint":{"remove_stale_paths":true,"on_empty":"inherit"},"ops":["add_owner(/x/, @b)"]}`)
+		code, _, errOut := runCLI(t, "sync", "--repo", repo, "--policy", pol, "--format", "json")
+		if code != cli.ExitOK {
+			t.Fatalf("sync: want exit 0, got %d — R-36e is validate, not refuse (R-36c)\nstderr:\n%s", code, errOut)
+		}
+		exceptWantFile(t, filepath.Join(repo, "CODEOWNERS"), "# owners\n/x/ @a @b\n")
+	})
+}
+
+// SPEC R-36e: the other direction — `lint --policy` exits 3 on a malformed op,
+// even though `lint` never applies one (R-36c). Both defects below are
+// repo-independent: the first is a string that does not parse, the second is an
+// op-object field that can never apply to the op carrying it, which only the
+// per-op validation sees. Neither depends on which repository is in front of it,
+// which is what puts them in the exit-3 class rather than exit 2.
+//
+// The `lint` block in every case is well-formed, so the only available cause of
+// exit 3 is the section `lint` does not act on.
+//
+// Vacuity: `lint` has no --policy flag today, so every case here already exits 3
+// with "flag provided but not defined: -policy" plus the usage block. The
+// fragments are the loader's own diagnosis of each defect, which appears in
+// neither. The second fragment is also why that subtest is NOT named after the
+// field it is about: the phrase would land in t.TempDir's path and satisfy the
+// assertion by accident.
+//
+// The control subtest carries TestR36c_LintIgnoresOps's claim into this test on
+// purpose, so an implementation that reaches R-36e by refusing every file with a
+// populated `ops` array fails here too.
+func TestR36e_LintRefusesAMalformedOp(t *testing.T) {
+	t.Run("op string does not parse", func(t *testing.T) {
+		plWantLintPolicyError(t,
+			`{"version":1,"lint":{"remove_stale_paths":true},"ops":["add_owner(/x/ @org/live)"]}`,
+			"takes (scope, owner)")
+	})
+
+	t.Run("op-level defect only the per-op validation sees", func(t *testing.T) {
+		plWantLintPolicyError(t,
+			`{"version":1,"lint":{"remove_stale_paths":true},"ops":[{"id":"o","op":"add_owner(/x/, @org/live)","on_except_zero_match":"require"}]}`,
+			"has no except clause")
+	})
+
+	t.Run("control: a well-formed ops array is not a refusal", func(t *testing.T) {
+		repo := plLintRepo(t)
+		pol := plPolicy(t, `{"version":1,"lint":{"remove_stale_paths":true},"ops":["add_owner(/x/, @org/other)",{"id":"o2","op":"add_owner(/y/, @org/live)","on_zero_match":"skip"}]}`)
+		code, out, errb := lintVerbRun(t, repo, lintAPI(t, nil, "org/live", "org/other"), "--policy", pol)
+		if code != cli.ExitOK {
+			t.Fatalf("lint: want exit 0, got %d — R-36e is validate, not refuse (R-36c)\nstdout: %s\nstderr: %s", code, out, errb)
+		}
+		// The stale rule is gone because the block was read; "@org/other" is
+		// absent because the ops were validated and then not acted on. The
+		// second op names a scope this repo does not have, which is a per-repo
+		// fact `lint` must never reach for.
+		if got := lintRead(t, lintOwnersPath(repo)); got != "/x/ @org/live\n" {
+			t.Errorf("CODEOWNERS = %q, want the stale rule gone and no owner from ops[]", got)
+		}
 	})
 }
