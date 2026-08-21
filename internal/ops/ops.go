@@ -214,18 +214,23 @@ func parseOwnerList(listStr string, kind Kind) ([]string, error) {
 	return owners, nil
 }
 
-// FoldOwner is the identity under which two owner tokens are the same owner.
-// @handles fold to lowercase (GitHub does); an email is left alone, because
-// the local part of an address is not ours to case-fold.
+// FoldOwner is THE identity under which two owner tokens are the same owner
+// (R-38a). @handles fold to lowercase (GitHub does); an email is left alone,
+// because the local part of an address is not ours to case-fold.
 //
-// R-33c's duplicate check has to ask this question rather than compare bytes:
-// `[@Org/Team, @org/team]` names one owner twice, and syncing it onto a file
-// that already holds @org/team wrote the handle twice in two spellings.
+// Every comparison of two owners in this repository asks this function — add,
+// remove, rename's old name, set_owners, commutation and resolution — with no
+// site free to use its own. Byte equality is what let
+// `remove_owner(/x/, @ORG/TEAM)` report "unchanged" against a file holding
+// @org/team: a fleet run of "revoke the departed team" reported converged on
+// every repository that capitalised the handle.
 //
-// internal/lint has a byte-identical unexported copy, which is where this
-// identity was first written down. Two copies of an identity is how they
-// drift; lint's should collapse into this one, but that file belongs to
-// another change.
+// Folding governs MATCHING only, never output: the spelling on the line is
+// preserved (R-38b) and only `rename_owner` writes a new one (R-38d).
+//
+// internal/lint had a byte-identical unexported copy, which is where this
+// identity was first written down; it now calls this one. Two copies of an
+// identity is how they drift.
 func FoldOwner(o string) string {
 	if strings.HasPrefix(o, "@") {
 		return strings.ToLower(o)
@@ -696,15 +701,17 @@ func ownersDisjoint(x, y []string) bool {
 
 // sameOwnerSet compares two owner lists as SETS: order carries no meaning to
 // GitHub, and two set_owners naming the same teams in different orders are the
-// same intent.
+// same intent. Membership is FoldOwner's (R-38a), so `[@Org/Team]` and
+// `[@org/team]` are the same set — otherwise set ∘ set would be called
+// order-dependent over one owner spelled two ways.
 func sameOwnerSet(x, y []string) bool {
 	seen := map[string]bool{}
 	for _, o := range x {
-		seen[o] = true
+		seen[FoldOwner(o)] = true
 	}
 	other := map[string]bool{}
 	for _, o := range y {
-		other[o] = true
+		other[FoldOwner(o)] = true
 	}
 	if len(seen) != len(other) {
 		return false
@@ -717,9 +724,13 @@ func sameOwnerSet(x, y []string) bool {
 	return true
 }
 
+// containsOwner asks FoldOwner, not byte equality: commutation is a comparison
+// of two owners, so an add and a remove of one owner spelled two ways must not
+// look disjoint — one order leaves the owner on the line and the other does
+// not, which is exactly the batch R-8 exists to refuse (R-38a).
 func containsOwner(list []string, s string) bool {
 	for _, x := range list {
-		if x == s {
+		if FoldOwner(x) == FoldOwner(s) {
 			return true
 		}
 	}

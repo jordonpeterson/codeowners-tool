@@ -624,7 +624,7 @@ func assignsOwner(op ops.Op, owner string) bool {
 		// through (R-33).
 		return contains(op.Owners, owner)
 	case ops.RenameOwner:
-		return op.NewOwner == owner
+		return sameOwner(op.NewOwner, owner)
 	}
 	return false
 }
@@ -800,10 +800,16 @@ func synthSet(f *file.File, tree []string, op ops.Op, scope map[string]bool, des
 		} else {
 			old := f.LineText(lastIntersecting)
 			oldOwners := lastRule.OwnersCopy()
-			f.SetOwners(lastIntersecting, op.Owners)
+			// The owners this set KEEPS keep the spelling the file gave them
+			// (R-38b's reason, applied to the half of set_owners that is not
+			// changing anything: restyling a handle nobody asked to change
+			// churns a diff on every repository in a fleet). Only owners the
+			// line does not already have arrive in the op's spelling.
+			newOwners := keepFileSpelling(lastRule.Owners, op.Owners)
+			f.SetOwners(lastIntersecting, newOwners)
 			pl.Changes = append(pl.Changes, Change{
 				Action: "amend", Line: lastIntersecting + 1, Pattern: lastRule.PatternText,
-				OldOwners: oldOwners, NewOwners: op.Owners,
+				OldOwners: oldOwners, NewOwners: newOwners,
 				OldLine: old, NewLine: f.LineText(lastIntersecting),
 				Reason: fmt.Sprintf("existing rule %q matches exactly the scope and is the last intersecting rule — amended in place (R-4); no later rule can recapture (R-3)", lastRule.PatternText),
 			})
@@ -1388,9 +1394,15 @@ func firstRuleIndex(f *file.File) int {
 	return len(f.Lines)
 }
 
+// contains asks the one owner identity (R-38a): every list this package tests
+// membership in is a list of owners, and byte equality here is what let
+// `remove_owner(/x/, @ORG/TEAM)` see nothing to do on a file holding
+// @org/team. Folding MATCHING never folds output — the spelling that goes
+// back on the line comes from the file (R-38b) or, for a rename, from the op
+// (R-38d).
 func contains(list []string, s string) bool {
 	for _, x := range list {
-		if x == s {
+		if sameOwner(x, s) {
 			return true
 		}
 	}
@@ -1398,6 +1410,10 @@ func contains(list []string, s string) bool {
 }
 
 func containsStr(list []string, s string) bool { return contains(list, s) }
+
+// sameOwner is the identity applied to a pair (R-38a). One function decides it
+// for the whole repository: ops.FoldOwner.
+func sameOwner(a, b string) bool { return ops.FoldOwner(a) == ops.FoldOwner(b) }
 
 // substituteOwner replaces old with new IN PLACE, keeping every other owner
 // where it was.
@@ -1410,6 +1426,12 @@ func containsStr(list []string, s string) bool { return contains(list, s) }
 //
 // When new is ALREADY on the line the earliest position is kept and the other
 // dropped: `@a @b` under rename(@a → @b) is `@b`, not `@b @b`.
+//
+// Both comparisons are the identity's, not bytes' (R-38a/R-38d): the old name
+// is matched however either side spelled it, and a differently cased copy of
+// the NEW name is the same owner, so it collapses into the one written slot
+// rather than surviving beside it. The text written is `new` exactly as the op
+// spelled it — rename is the one verb whose purpose is to change the text.
 func substituteOwner(list []string, old, new string) []string {
 	if list == nil {
 		return nil
@@ -1421,16 +1443,16 @@ func substituteOwner(list []string, old, new string) []string {
 	done := false
 	for _, x := range list {
 		switch {
-		case x == old:
+		case sameOwner(x, old):
 			if done {
 				continue // old listed twice: the second is a duplicate either way
 			}
 			done = true
 			out = append(out, new)
-		case x == new && done:
+		case sameOwner(x, new) && done:
 			// Already emitted at the renamed owner's position; this later copy
 			// would be a duplicate.
-		case x == new && hasOld:
+		case sameOwner(x, new) && hasOld:
 			// new appears BEFORE old on this line: keep it here, and the old
 			// identifier's slot collapses when we reach it.
 			done = true
@@ -1447,6 +1469,25 @@ func substituteOwner(list []string, old, new string) []string {
 // single-owner path per owner reproduces the very defect the list exists to
 // fix, a second hunk whose old_line is the first hunk's new_line, describing a
 // file state that is on disk at no point in the run (R-33b).
+
+// keepFileSpelling renders `want` in want's order, substituting the spelling
+// `have` already uses for any owner the two share (R-38a/R-38b). It is how a
+// verb that rewrites a whole owner list avoids restyling the owners that were
+// not the point of the change.
+func keepFileSpelling(have, want []string) []string {
+	out := make([]string, 0, len(want))
+	for _, o := range want {
+		spelled := o
+		for _, h := range have {
+			if sameOwner(h, o) {
+				spelled = h
+				break
+			}
+		}
+		out = append(out, spelled)
+	}
+	return out
+}
 
 // ownersMissing returns the members of want, in want's order, that are absent
 // from have. Order is R-33e: the list fixes append order in the written line.
@@ -1513,13 +1554,15 @@ func ownerArg(owners []string) string {
 // is about the owners themselves rather than about the op's syntax.
 func ownerNames(owners []string) string { return strings.Join(owners, ", ") }
 
+// minus drops every spelling of one owner (R-38c): a surviving spelling would
+// leave the owner a removal named still owning the path.
 func minus(list []string, s string) []string {
 	if list == nil {
 		return nil
 	}
 	out := make([]string, 0, len(list))
 	for _, x := range list {
-		if x != s {
+		if !sameOwner(x, s) {
 			out = append(out, x)
 		}
 	}

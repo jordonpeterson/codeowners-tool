@@ -1,8 +1,8 @@
 # The policy as the source of truth — specification
 
-**Status: R-33…R-37 implemented. R-38 specified, not implemented.** Each requirement
-is the target for e2e suites written against this document before the implementation
-exists (CONTRIBUTING.md: the failing test comes first).
+**Status: R-33…R-38 implemented.** Each requirement is the target for e2e suites
+written against this document before the implementation exists (CONTRIBUTING.md:
+the failing test comes first).
 
 ## Motivation
 

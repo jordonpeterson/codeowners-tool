@@ -474,6 +474,38 @@ a bare line deletion.
 > Vacuity, per CONTRIBUTING.md: no test name here contains a fragment any
 > assertion looks for.
 
+**`owneridentity_test.go`**
+
+> Owner-identity end-to-end tests (docs/policy.md, R-38). Written ahead of
+> the implementation per CONTRIBUTING.md.
+>
+> The vacuity trap in this area is unusually sharp: most of the broken cases
+> exit 0 today with status "unchanged", which is also exactly what a CORRECT
+> no-op produces. An assertion of the exit code or of `status == unchanged`
+> alone would pass against the bug. Every test here therefore asserts the
+> thing that actually differs — the EXACT file bytes, the resolved ownership
+> read back through `snapshot`, or `plan`'s no-op exit code (1 vs 0), which
+> is the one place the two outcomes are already distinguishable.
+>
+> Mutating tests never use strings.Contains on file content: under
+> last-match-wins (S-1) a substring check is satisfied by a file whose line
+> ORDER hands the path to the wrong owner.
+>
+> Negative cases assert a message fragment as well as an exit code, and every
+> fragment contains a space so it cannot be satisfied by `policy.Error`'s
+> leading filename or by the test name that `t.TempDir()` embeds in its path.
+>
+> Every subtest whose name begins with "pin:", plus the whole of
+> TestR38f_SyncDoesNotCollapsePreExistingDuplicates and
+> TestR38a_EmailOwnersStayCaseSensitive, PASSES against today's binary by
+> design. They freeze behavior R-38 must PRESERVE — e-mail owners staying
+> case-sensitive, a hand-written duplicate surviving an unrelated edit, a
+> rename writing its new name verbatim — rather than specify new behavior, so
+> a fix that over-folds or over-repairs turns them red. Several are also the
+> PREMISE their failing sibling rests on: without them an exit code there
+> could have come from anywhere, so they run as separate subtests and report
+> even when that sibling fails. Everything else fails until R-38 lands.
+
 **`ownerlist_test.go`**
 
 > Owner-list end-to-end tests (docs/policy.md, R-33). Written ahead of the
@@ -2601,6 +2633,121 @@ depend on which spelling the policy used — a fleet that mixes the two would
 otherwise produce two different diagnoses for one condition. The stderrs are
 compared with the op string redacted, since that is the one difference R-37
 licenses.
+
+### `TestR38a_CommutationSeesOneOwner`
+
+SPEC R-38a: commutation is a comparison of two owners, so it answers to the
+same identity. `ops.commutes` reaches it through `containsOwner`, which
+compares bytes, so today an add and a remove of ONE owner spelled two ways
+look disjoint and the batch is waved through as order-independent — the
+exact case R-8 exists to refuse, since one order leaves the owner on the
+line and the other does not. The refusal belongs at exit 3 on `check`:
+"these two tokens are one owner" is a fact about the policy, independent of
+which repository it runs against.
+
+### `TestR38a_DeclareDeclaresOneOwner`
+
+SPEC R-38a: `on_zero_match: declare` writes a rule for a scope no tracked
+file matches, and it too must ask whether the owner is ALREADY declared
+rather than whether the token is already spelled that way. Today a
+differently cased handle appends itself beside the one already there, so a
+declare-based baseline rewrites the same line on every repository that
+capitalised it, once per run.
+
+### `TestR38a_EmailOwnersStayCaseSensitive`
+
+SPEC R-38a (pin): ops.FoldOwner folds @handles ONLY. An e-mail owner is an
+address whose local part is not ours to case-fold, so dev@example.com and
+DEV@EXAMPLE.COM are two owners and must stay two. These pin the boundary a
+fix could most easily overrun — strings.ToLower on every token — in the
+direction where the damage is silent: an over-folding remove would revoke
+an address the policy never named.
+
+### `TestR38a_SetOwnersIsSatisfiedUnderTheIdentity`
+
+SPEC R-38a: `set_owners` states an EXACT set, and R-38a makes ops.FoldOwner
+the identity for every comparison of two owners, set_owners named among
+them. So `set_owners(/x/, [@ORG/TEAM])` against `/x/ @org/team` states a set
+that is ALREADY satisfied, and the right answer is to do nothing: report
+`unchanged` at exit 0, leave the bytes alone, and let `plan` exit 1.
+
+The alternative — treat the set as satisfied but rewrite the line to the
+op's spelling — is rejected for three reasons, none of them aesthetic.
+(1) R-38b settles the identical question for `add` and answers "the file's
+existing spelling wins", giving the reason: restyling churns a diff on
+every repository in a fleet. Nothing distinguishes set_owners here; the
+owner set before and after is the same set. (2) R-38d says a rename is
+"the ONE verb whose purpose is to change the text, so it is also the one
+place a spelling change is intended" — which excludes set_owners by name.
+(3) `synthSet` already short-circuits when every in-scope path resolves to
+exactly the requested set, on the stated ground that an intent-level tool
+must not edit just because no byte-identical rule exists; R-38a only makes
+that comparison ask the right question. A restyling set_owners would also
+make `unchanged` a lie: nothing about ownership changed.
+
+### `TestR38b_AddIsANoOpWhenTheOwnerAlreadyOwns`
+
+SPEC R-38b: adding an owner who already owns every in-scope path is a
+no-op WHATEVER spelling either side used, and the line is left
+byte-identical — the file's existing spelling wins, because restyling a
+handle nobody asked to change churns a diff on every repository in a fleet.
+Both halves are asserted: exact bytes catch a rewrite-to-my-spelling
+implementation, which would also leave the owner owning and so satisfy any
+resolution-only oracle. `plan`'s exit code carries the no-op claim, since
+sync answers 0 either way.
+
+### `TestR38b_ExceptGrantIsANoOpWhenTheGranteeAlreadyOwns`
+
+SPEC R-38b with R-26: an except-carrying grant whose grantee already owns
+every NON-excepted in-scope path is a no-op too, and the carve line is part
+of what must not be written. Today the op applies, appends a second
+spelling to the broad rule AND inserts a carve restating the excepted
+path's owners — two lines of diff, in every repository in the fleet, for a
+grant that changes nobody's access.
+
+### `TestR38c_RemoveEmptiesALineNamingBothSpellings`
+
+SPEC R-38c: the spec's own example, where removal empties the line. Under
+--on-empty=inherit the rule is deleted and the in-scope paths fall through
+to the catch-all; a surviving spelling would instead keep the whole line
+alive, which is the difference this asserts.
+
+### `TestR38c_RemoveTakesEverySpelling`
+
+SPEC R-38c: a removal names an OWNER, not a spelling. `remove_owner(/x/,
+@ORG/TEAM)` against a file that wrote `@org/team` must leave that owner
+owning no in-scope path; today it reports "unchanged" at exit 0 and the
+team keeps the directory, so a fleet run of "revoke the departed team"
+reports converged on every repository that capitalised the handle. The
+oracle is the resolved ownership, not the bytes: "unchanged" and a correct
+no-op are indistinguishable by exit code, and only resolution says whether
+the owner is gone.
+
+### `TestR38d_RenameMatchesTheOldNameUnderTheIdentity`
+
+SPEC R-38d: rename matches the old name under the same identity as every
+other verb, and writes the new name EXACTLY as the op spells it — a rename
+is the one verb whose purpose is to change the text, so it is the one place
+a spelling change is intended. Today the match is byte equality, so a
+differently cased old name renames nothing and reports "unchanged".
+
+### `TestR38e_IdempotenceHoldsAcrossSpellings`
+
+SPEC R-38e: idempotence holds ACROSS spellings. Each row runs the verb once
+with one casing and again with another; the second run must be `unchanged`
+at exit 0 with a byte-identical file. This is the property that makes a
+fleet re-run safe, and the one the old behaviour broke most quietly — today
+the add row appends a second spelling on every re-run, so a weekly job
+grows the line without bound.
+
+### `TestR38f_SyncDoesNotCollapsePreExistingDuplicates`
+
+SPEC R-38f (pin): a hand-written line naming one owner twice is that owner
+for every comparison, but `sync` does not rewrite the line to collapse it.
+Repair is `lint`'s verb; a sync that quietly edits what the policy did not
+name is the surprise this tool exists to avoid. Both subtests pass today
+and are here so a fix that folds owners on the way OUT — deduplicating the
+line while it is open — turns them red.
 
 ### `TestRecord_OpRunOmitsThePolicyKey`
 
@@ -5658,4 +5805,4 @@ DIFFERENT states; transitioning between them is a real ownership change.
 
 ---
 
-542 documented test cases across 13 packages.
+553 documented test cases across 13 packages.

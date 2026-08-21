@@ -202,8 +202,15 @@ func TestR38c_RemoveTakesEverySpelling(t *testing.T) {
 			op:   "remove_owner(/x/, @org/team)",
 			want: "* @org/original\n/x/ @org/keep\n",
 		},
+		// The narrower line names @org/keep as well as the departing owner, so
+		// removing the owner leaves it with one. An earlier version of this
+		// fixture had the narrower line naming the departing owner ALONE and
+		// still expected "/x/a.go @org/keep": unreachable under every legal
+		// on-empty policy, because writing an INHERITED owner onto a narrower
+		// rule is not something any verb does. The bug under test is the
+		// cross-line match, not R-6's empty-set handling.
 		"the two spellings sit on different lines": {
-			seed: "* @org/original\n/x/ @Org/Team @org/keep\n/x/a.go @org/team\n",
+			seed: "* @org/original\n/x/ @Org/Team @org/keep\n/x/a.go @org/team @org/keep\n",
 			op:   "remove_owner(/x/, @ORG/TEAM)",
 			want: "* @org/original\n/x/ @org/keep\n/x/a.go @org/keep\n",
 		},
