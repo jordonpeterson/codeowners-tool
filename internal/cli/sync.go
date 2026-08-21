@@ -1177,5 +1177,76 @@ func cmdCheck(args []string, stdout, stderr io.Writer) int {
 		what = policyPaths[0]
 	}
 	fmt.Fprintf(stdout, "ok: %s — %d op(s), no policy errors\n", what, len(opList))
+	renderCheckOps(stdout, pol, opList)
 	return ExitOK
+}
+
+// renderCheckOps echoes each op's RESOLVED zero-match settings under the
+// summary line (R-35b). With a `defaults` block the value in force at an op is
+// stated nowhere near it, so the reviewer of the committed policy would have to
+// fold the block in their head for all 40 ops — the arithmetic the block exists
+// to remove — and a misplaced default stays invisible until some repo writes a
+// declared rule nobody expected.
+//
+// One line per op, labelled exactly as sync's per-op lines are, so the two
+// verbs name the same op the same way.
+func renderCheckOps(w io.Writer, pol *policy.Policy, list []ops.Op) {
+	if pol == nil {
+		return // --op carries no per-op settings, so there is nothing resolved to echo
+	}
+	echo := pol.Defaults.OnZeroMatch != "" || pol.Defaults.OnExceptZeroMatch != ""
+	for _, o := range list {
+		echo = echo || o.OnZeroMatch != "" || o.OnExceptZeroMatch != ""
+	}
+	if !echo {
+		// No knob is set anywhere: every op runs under R-5's require, which the
+		// one-line verdict already says. Listing 40 identical lines to say it
+		// again would bury the case where a value really does differ.
+		return
+	}
+	width := 0
+	for i, o := range list {
+		if n := len(policy.OpLabel(o.ID, i)); n > width {
+			width = n
+		}
+	}
+	for i, o := range list {
+		fmt.Fprintf(w, "  %-*s  on_zero_match: %s", width, policy.OpLabel(o.ID, i), resolvedZeroMatch(pol, o))
+		// Only for an op that carries an except clause: R-27.6 makes the field
+		// illegal anywhere else, so "require" there would name a setting the op
+		// cannot have.
+		if len(o.Except) > 0 {
+			fmt.Fprintf(w, "; on_except_zero_match: %s", resolvedExceptZeroMatch(o))
+		}
+		fmt.Fprintln(w)
+	}
+}
+
+// resolvedZeroMatch is what this op will actually do at zero match, after the
+// defaults block has been folded in by the loader.
+func resolvedZeroMatch(pol *policy.Policy, o ops.Op) string {
+	if o.OnZeroMatch != "" {
+		return o.OnZeroMatch
+	}
+	if o.Kind == ops.RenameOwner {
+		// R-35e: a rename's scope comes from current ownership, so zero match
+		// can never fire and no value is legal on it in the first place.
+		return "n/a (a rename has no scope to match)"
+	}
+	if pol.Defaults.OnZeroMatch != "" {
+		// R-35e, value level: the block states a value this op cannot carry
+		// (`declare` on remove_owner, or on an except-carrying op), so the op
+		// keeps the built-in. Naming the block's value on this line would read
+		// as if it had reached the op, which is the misreading that ends in a
+		// repo refused for a reason the reviewer thought was configured away.
+		return ops.ZeroMatchRequire + " (built-in; the default does not reach this op)"
+	}
+	return ops.ZeroMatchRequire + " (built-in)"
+}
+
+func resolvedExceptZeroMatch(o ops.Op) string {
+	if o.OnExceptZeroMatch != "" {
+		return o.OnExceptZeroMatch
+	}
+	return ops.ExceptZeroMatchRequire + " (built-in)"
 }
