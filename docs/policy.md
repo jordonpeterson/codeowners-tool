@@ -76,7 +76,13 @@ meant the co-owning one.
   unknown top-level fields.
 - **R-35e** A default is applied only to ops that can carry it. `on_zero_match` is
   rejected on `rename_owner` today; a policy with a default and a rename op must not
-  fail for that reason — the default simply does not reach it.
+  fail for that reason — the default simply does not reach it. **This is value-level,
+  not only field-level**: `declare` is refused on `remove_owner` (R-21) and on any
+  except-carrying op (R-30), so a default of `declare` does not reach those either.
+  The governing promise is that a default never causes an exit 3 that the same policy
+  written out per-op would not have. The alternative — the default reaches them and
+  the policy refuses — makes `defaults` unusable for exactly the mixed 40-op baseline
+  it exists to serve.
 
 ## R-36 — a `lint` block
 
@@ -108,8 +114,13 @@ meant the co-owning one.
   every respect to the `<scope> except <pat> …` string spelling (R-26a).
 - **R-37b** Both spellings on one op is exit 3. One intent, one place.
 - **R-37c** The array needs no delimiter, so a pattern is a plain JSON string and the
-  escaping rules the string grammar imposes do not apply to it. A pattern containing
-  a space is written `"my dir/"`, and reaches the matcher as one pattern.
+  *delimiter's* escaping rule does not apply to it. A pattern containing a space is
+  written `"my dir/"` and reaches the matcher as one pattern. Only whitespace is
+  affected: `*`, `?` and `[` stay live pattern syntax, and a backslash stays the
+  pattern language's own escape — an array of literal paths rather than patterns
+  would be a different feature. It follows that a pre-escaped element, `"my\\ dir/"`,
+  is **not** the same string and is refused; the refusal must say so in those terms,
+  because a generator that escapes defensively is the likely author of it.
 - **R-37d** An empty array is exit 3: state no `except`, not an empty one.
 - **R-37e** Both spellings produce identical plans, identical bytes, and identical
   R-29/R-32 reporting.

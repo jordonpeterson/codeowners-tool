@@ -13,8 +13,28 @@ func TestParse_AddOwner(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if op.Kind != ops.AddOwner || op.Scope != "/services/api" || op.Owner != "@org/team-1" {
+	if op.Kind != ops.AddOwner || op.Scope != "/services/api" || len(op.Owners) != 1 || op.Owners[0] != "@org/team-1" {
 		t.Errorf("got %+v", op)
+	}
+	// R-33: Owner is rename_owner's old name only. A bare owner must land in
+	// Owners like any list, so no downstream site can read a single value off
+	// an op that might name several.
+	if op.Owner != "" {
+		t.Errorf("add_owner must not set Owner, got %q", op.Owner)
+	}
+}
+
+// SPEC R-33: add_owner and remove_owner accept a bracketed owner list, folding
+// to the same targets as the single-owner ops it replaces.
+func TestParse_OwnerList(t *testing.T) {
+	for _, spec := range []string{"add_owner(/x/, [@a, @b])", "remove_owner(/x/, [@a, @b])"} {
+		op, err := ops.Parse(spec)
+		if err != nil {
+			t.Fatalf("Parse(%q): %v", spec, err)
+		}
+		if len(op.Owners) != 2 || op.Owners[0] != "@a" || op.Owners[1] != "@b" {
+			t.Errorf("Parse(%q): got Owners %v, want [@a @b]", spec, op.Owners)
+		}
 	}
 }
 
@@ -45,7 +65,7 @@ func TestParse_RemoveOwner(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if op.Kind != ops.RemoveOwner || op.Scope != "/x/" || op.Owner != "@a" {
+	if op.Kind != ops.RemoveOwner || op.Scope != "/x/" || len(op.Owners) != 1 || op.Owners[0] != "@a" {
 		t.Errorf("got %+v", op)
 	}
 }
@@ -72,7 +92,10 @@ func TestParse_Malformed(t *testing.T) {
 		"add_owner(/x/, not-an-owner)", // invalid owner token
 		"add_owner(, @a)",              // empty scope
 		"set_owners(/x/, @a)",          // owners must be a [list]
-		"remove_owner(/x/, [@a, @b])",  // remove takes one owner
+		"remove_owner(/x/, [@a, @a])",  // R-33c: duplicate inside one list
+		"add_owner(/x/, [])",           // R-33d: empty list states no intent
+		"add_owner(/x/, [@a, [@b]])",   // R-33: brackets do not nest
+		"rename_owner([@a], @b)",       // R-33f: rename takes no list
 		"rename_owner(@a)",             // missing new name
 		"rename_owner(@a, @a)",         // self-rename is meaningless
 		"add_owner(!/x/, @a)",          // negation scope

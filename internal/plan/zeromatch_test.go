@@ -430,7 +430,7 @@ func TestINV6_ProvenIsStructuralOnlyForZeroMatchDeclares(t *testing.T) {
 // with a space in it. Must refuse (exit 2).
 func TestINV6_RefusesADeclareWhoseEmittedLineDoesNotRoundTrip(t *testing.T) {
 	tree := []string{"README", "docs/guide.md"}
-	op := ops.Op{Kind: ops.AddOwner, Scope: "docs x@y.zz", Owner: "@a",
+	op := ops.Op{Kind: ops.AddOwner, Scope: "docs x@y.zz", Owners: []string{"@a"},
 		Raw: "add_owner(docs x@y.zz, @a)", OnZeroMatch: ops.ZeroMatchDeclare, ID: "bad"}
 
 	_, err := plan.Build([]byte("README @keep\n"), tree, []ops.Op{op}, plan.Options{})

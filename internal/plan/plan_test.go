@@ -421,7 +421,7 @@ func TestR16_PlanIsMachineReadable(t *testing.T) {
 // rejected; a hand-constructed Op must be caught by the gate itself.
 func TestGate_ProvesSerializedBytesNotModel(t *testing.T) {
 	tree := []string{"docs x@y.zz/f.go", "docs/free.txt", "README"}
-	op := ops.Op{Kind: ops.AddOwner, Scope: "docs\\ x@y.zz", Owner: "@a",
+	op := ops.Op{Kind: ops.AddOwner, Scope: "docs\\ x@y.zz", Owners: []string{"@a"},
 		Raw: `add_owner(docs\ x@y.zz, @a)`}
 	// Escaped form: works end-to-end and survives re-parse.
 	p, err := plan.Build([]byte("README @keep\n"), tree, []ops.Op{op}, plan.Options{})
@@ -437,7 +437,7 @@ func TestGate_ProvesSerializedBytesNotModel(t *testing.T) {
 	}
 	// Raw unescaped form (bypassing ops.Parse): the serialization-aware gate
 	// must refuse — never emit a plan whose bytes mean something else.
-	bad := ops.Op{Kind: ops.AddOwner, Scope: "docs x@y.zz", Owner: "@a",
+	bad := ops.Op{Kind: ops.AddOwner, Scope: "docs x@y.zz", Owners: []string{"@a"},
 		Raw: "add_owner(docs x@y.zz, @a)"}
 	_, err = plan.Build([]byte("README @keep\n"), tree, []ops.Op{bad}, plan.Options{})
 	var ref *plan.RefusalError

@@ -173,7 +173,9 @@ func parseOwnerList(listStr string, kind Kind) ([]string, error) {
 	}
 	inner := listStr[1 : len(listStr)-1]
 	if strings.ContainsAny(inner, "[]") {
-		return nil, fmt.Errorf("%s owner list must not nest brackets: want [@owner, @owner]", kind)
+		// Inherit set_owners' diagnosis: a stray bracket is a bad token, and
+		// the operator should read one sentence for that defect, not two.
+		return nil, fmt.Errorf("invalid owner token in %s owner list: brackets do not nest, want [@owner, @owner]", kind)
 	}
 	var owners []string
 	seen := make(map[string]bool)
@@ -523,8 +525,14 @@ func exceptsContain(excepts []string, scope string) bool {
 //	add(x)    ∘ remove(y)  iff x ≠ y; otherwise one order keeps x and the other drops it
 //	remove(x) ∘ remove(y)  always
 //	set(L)    ∘ set(M)     iff L and M are the same set; otherwise the last one wins
-//	set(L)    ∘ add(x)     iff x ∈ L — set-then-add yields L ∪ {x}, add-then-set yields L
-//	set(L)    ∘ remove(x)  iff x ∉ L — set-then-remove yields L \ {x}, remove-then-set yields L
+//	set(L)    ∘ add(A)     iff A ⊆ L — set-then-add yields L ∪ A, add-then-set yields L
+//	set(L)    ∘ remove(A)  iff A ∩ L = ∅ — set-then-remove yields L \ A, remove-then-set yields L
+//	add(A)    ∘ remove(B)  iff A ∩ B = ∅
+//
+// Every case is set-valued because one op may name several owners (R-33).
+// Reading a single owner field here silently degraded to comparing "" with "",
+// which made every provably-overlapping pair look order-dependent and refused
+// correct batches at exit 3.
 func commutes(a, b Op) bool {
 	// Order the pair so each case is written once.
 	if b.Kind == SetOwners && a.Kind != SetOwners {
@@ -536,18 +544,18 @@ func commutes(a, b Op) bool {
 		case SetOwners:
 			return sameOwnerSet(a.Owners, b.Owners)
 		case AddOwner:
-			return containsOwner(a.Owners, b.Owner)
+			return ownersSubset(b.Owners, a.Owners)
 		case RemoveOwner:
-			return !containsOwner(a.Owners, b.Owner)
+			return ownersDisjoint(a.Owners, b.Owners)
 		}
 	case AddOwner:
 		if b.Kind == RemoveOwner {
-			return a.Owner != b.Owner
+			return ownersDisjoint(a.Owners, b.Owners)
 		}
 		return true // add ∘ add
 	case RemoveOwner:
 		if b.Kind == AddOwner {
-			return a.Owner != b.Owner
+			return ownersDisjoint(a.Owners, b.Owners)
 		}
 		return true // remove ∘ remove
 	}
@@ -555,6 +563,26 @@ func commutes(a, b Op) bool {
 	// commuting: the tree-based R-8 is the backstop, and reporting "these
 	// commute" here would skip it.
 	return false
+}
+
+// ownersSubset reports whether every owner in sub appears in super.
+func ownersSubset(sub, super []string) bool {
+	for _, o := range sub {
+		if !containsOwner(super, o) {
+			return false
+		}
+	}
+	return true
+}
+
+// ownersDisjoint reports whether two owner lists share no member.
+func ownersDisjoint(x, y []string) bool {
+	for _, o := range x {
+		if containsOwner(y, o) {
+			return false
+		}
+	}
+	return true
 }
 
 // sameOwnerSet compares two owner lists as SETS: order carries no meaning to
