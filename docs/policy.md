@@ -66,7 +66,9 @@ meant the co-owning one.
 ```
 
 - **R-35a** A default applies to every op that does not state its own value, so a
-  40-op baseline is 40 strings rather than 40 objects.
+  40-op baseline is 40 strings rather than 40 objects. One caveat on that saving:
+  `declare` never reaches `remove_owner` (R-35e), so a mixed baseline still spells
+  its removals out as objects. `skip` does reach them.
 - **R-35b** A per-op value wins over the default, and `check` echoes the resolved
   value so review sees what will run.
 - **R-35c** `defaults` carries `on_zero_match` and `on_except_zero_match` only.
@@ -133,7 +135,22 @@ meant the co-owning one.
 
 The proof, the invariants, and the exit-code contract. Every requirement here is
 about where a setting is written, or how many owners one line may name — none of them
-reaches resolution, R-8 commutativity, or the S-invariants. Exit 3 stays reachable
+reaches resolution or the S-invariants. Exit 3 stays reachable
 only from facts independent of which repository you are in, which is why R-33c,
 R-33d, R-34b, R-35d, R-36d, R-37b and R-37d are all exit 3 while nothing here adds a
 new exit 2.
+
+**One exception, found in review and stated rather than hidden.** `defaults` does
+reach R-8's *statically provable* half. `ops.StaticConflict` skips any pair whose
+scope is conditional — `on_zero_match` of `skip` or `declare` — because a scope that
+may match nothing cannot be proven to overlap. So `defaults: {"on_zero_match":
+"skip"}` suppresses that check for every op at once: a batch that `check` refuses at
+exit 3 without the block is accepted with it, and the same batch is then refused per
+repository at exit 2 by the tree-based check instead. No wrong bytes are written —
+`plan.Build` still catches it — and a per-op `skip` has always done the same, so this
+is the block inheriting an existing rule rather than a new hole. But it converts a
+repo-0 defect into an N-repository one, which is the failure mode R-36e argues
+against, and `check`'s echo reports only `skip` per op. **A reviewer reading a policy
+with a `skip` or `declare` default should know the static R-8 verdict is weaker than
+it looks.** Disclosing that in `check` is the natural follow-up; this document does
+not yet require it.
