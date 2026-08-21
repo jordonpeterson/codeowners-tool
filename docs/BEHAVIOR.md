@@ -216,6 +216,27 @@ a bare line deletion.
 > Package cli_test exercises the end-to-end contract: real git repo, real
 > files, real exit codes (R-17).
 
+**`commentcase_test.go`**
+
+> Stale-comment reporting under R-38's owner identity.
+>
+> R-38a says one identity governs every comparison of two owners.
+> commentLinesNaming was missed: it finds the old handle in a comment with a
+> byte-exact substring search. Before R-38 that was harmless, because a rename
+> of @org/team never touched a rule spelling @Org/Team — so a comment in the
+> other case named an owner the run had not renamed. R-38 makes the rename land
+> on both spellings, which turns that comment into the stale one this warning
+> exists to find, and it goes unreported.
+>
+> Two pins here freeze behaviour the fix must NOT change: the token boundary
+> that keeps a rename of @org/acq quiet about @org/acq-infra, and e-mail owners
+> staying case-sensitive. A fix that folds too eagerly breaks both, so they are
+> asserted in the same file as the widening.
+>
+> Every negative case asserts the run APPLIED as well as the absence of a
+> warning: "no warning" is also what a crashed run produces, and this whole
+> feature is stderr-only.
+
 **`containment_test.go`**
 
 > BLOCKER 1 — the write must not leave the repository.
@@ -2634,6 +2655,13 @@ otherwise produce two different diagnoses for one condition. The stderrs are
 compared with the op string redacted, since that is the one difference R-37
 licenses.
 
+### `TestR38a_CommentOnlySurvivorIsFoundAcrossCase`
+
+SPEC R-38a: the repo where the old handle survives ONLY in a comment is
+exactly the repo this warning exists for — the rename correctly changes
+nothing and the record reads unchanged. Case must not decide whether that
+last trace is found.
+
 ### `TestR38a_CommutationSeesOneOwner`
 
 SPEC R-38a: commutation is a comparison of two owners, so it answers to the
@@ -2663,6 +2691,30 @@ fix could most easily overrun — strings.ToLower on every token — in the
 direction where the damage is silent: an over-folding remove would revoke
 an address the policy never named.
 
+### `TestR38a_MultiByteCommentTextDoesNotDisturbTheReport`
+
+SPEC R-38a: case-insensitive matching must not be done by folding the whole
+line and indexing into the result — Unicode lowering can change a string's
+byte length, which would misplace the token-boundary check and the reported
+line. The comment here carries multi-byte text on both sides of the handle.
+
+### `TestR38a_PinEmailCommentsStayCaseSensitive`
+
+SPEC R-38a: e-mail owners compare exactly, so a comment naming a differently
+cased address names a DIFFERENT owner and is not stale. This is the pin that
+fails if a fix folds everything rather than @handles.
+
+### `TestR38a_PinFoldingDoesNotWidenTheTokenBoundary`
+
+SPEC R-38a: folding must not widen the token boundary. A rename of @org/acq
+says nothing about a comment that only ever named @org/acq-infra — that is a
+different owner, and it stays a different owner in every case.
+
+### `TestR38a_PinStaleCommentInTheSameCaseStillWarns`
+
+SPEC R-38a: the same-case comment is the premise the widening rests on. If
+this ever stops warning, the tests above would pass by reporting nothing.
+
 ### `TestR38a_SetOwnersIsSatisfiedUnderTheIdentity`
 
 SPEC R-38a: `set_owners` states an EXACT set, and R-38a makes ops.FoldOwner
@@ -2684,6 +2736,13 @@ exactly the requested set, on the stated ground that an intent-level tool
 must not edit just because no byte-identical rule exists; R-38a only makes
 that comparison ask the right question. A restyling set_owners would also
 make `unchanged` a lie: nothing about ownership changed.
+
+### `TestR38a_StaleCommentIsFoundWhateverTheCase`
+
+SPEC R-38a: a comment naming the renamed owner is reported however either
+side spells the handle. The rename lands on the rule in any case, so the
+comment is stale in any case, and the warning is the only thing that will
+ever find it — comments are never rewritten.
 
 ### `TestR38b_AddIsANoOpWhenTheOwnerAlreadyOwns`
 
@@ -5805,4 +5864,4 @@ DIFFERENT states; transitioning between them is a real ownership change.
 
 ---
 
-553 documented test cases across 13 packages.
+559 documented test cases across 13 packages.

@@ -921,7 +921,7 @@ func staleCommentWarnings(after string, opList []ops.Op, results []plan.OpResult
 		// because claiming "this run renamed X" where nothing was renamed is the
 		// overclaim the gate was added to prevent.
 		renamed := i < len(results) && results[i].Status == "applied"
-		for _, line := range commentLinesNaming(after, op.Owner) {
+		for _, m := range commentLinesNaming(after, op.Owner) {
 			// The line number is the one in the file as this run leaves it, not
 			// where the comment sits today: a rule inserted above shifts it
 			// down, and the message says so rather than misdirecting whoever
@@ -929,12 +929,12 @@ func staleCommentWarnings(after string, opList []ops.Op, results []plan.OpResult
 			if renamed {
 				out = append(out, fmt.Sprintf(
 					"%s line %d as this run leaves it: a comment still names %q, which this run renamed to %q; comments are never rewritten (the substitution is proven only over owner tokens), so this one now points at an identifier that no longer exists",
-					rel, line, op.Owner, op.NewOwner))
+					rel, m.line, m.spelling, op.NewOwner))
 				continue
 			}
 			out = append(out, fmt.Sprintf(
-				"%s line %d: no rule in this file names %q, so there was nothing for this run to rename here — but a comment still names it, and the rename to %q makes that comment point at an identifier that no longer exists",
-				rel, line, op.Owner, op.NewOwner))
+				"%s line %d: no rule in this file names %q, so there was nothing for this run to rename here — but a comment still names %q, and the rename to %q makes that comment point at an identifier that no longer exists",
+				rel, m.line, op.Owner, m.spelling, op.NewOwner))
 		}
 	}
 	return out
@@ -943,28 +943,48 @@ func staleCommentWarnings(after string, opList []ops.Op, results []plan.OpResult
 // commentLinesNaming returns the 1-based line numbers whose comment text names
 // owner as a whole identifier. The boundary check is what keeps a rename of
 // `@org/acq` from reporting a comment that only ever said `@org/acq-infra`.
-func commentLinesNaming(content, owner string) []int {
-	var lines []int
+// commentMatch is one stale comment: the line as this run leaves the file, and
+// the spelling the COMMENT uses. The two can differ now that the identity folds
+// (R-38a), and the warning must quote the comment's spelling — naming the op's
+// instead sends the reader hunting for text the file does not contain.
+type commentMatch struct {
+	line     int
+	spelling string
+}
+
+func commentLinesNaming(content, owner string) []commentMatch {
+	want := ops.FoldOwner(owner)
+	var out []commentMatch
 	for i, line := range strings.Split(content, "\n") {
 		hash := commentStart(line)
 		if hash < 0 {
 			continue
 		}
 		text := line[hash:]
-		for at := 0; ; {
-			idx := strings.Index(text[at:], owner)
-			if idx < 0 {
-				break
+		// Walk candidate starts and fold each equal-length slice, rather than
+		// folding the line once and indexing into the result: Unicode lowering
+		// can change a string's byte length, which would misplace both the
+		// boundary check and any offset taken from it. Folding a slice of the
+		// ORIGINAL keeps every index an index into the text as written.
+		for at := 0; at+len(owner) <= len(text); at++ {
+			cand := text[at : at+len(owner)]
+			if ops.FoldOwner(cand) != want {
+				continue
 			}
-			end := at + idx + len(owner)
-			if end == len(text) || !ownerTokenByte(text[end]) {
-				lines = append(lines, i+1)
-				break
+			// Same boundary rule as before folding: a rename of @org/acq must
+			// stay quiet about a comment that only ever named @org/acq-infra,
+			// in any case. Advancing by one byte rather than past the match is
+			// what lets a longer handle be rejected and a real one later on the
+			// same line still be found.
+			end := at + len(owner)
+			if end != len(text) && ownerTokenByte(text[end]) {
+				continue
 			}
-			at = end
+			out = append(out, commentMatch{line: i + 1, spelling: cand})
+			break
 		}
 	}
-	return lines
+	return out
 }
 
 // commentStart returns the index where a line's comment begins, or -1.
