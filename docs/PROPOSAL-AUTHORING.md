@@ -138,6 +138,11 @@ bash. Mutually exclusive with `ops` at the top level.
 Larger than P1–P3 (`sync` becomes a loop over batches, and the JSON record grows a phase
 dimension). Defer to a second wave.
 
+**Superseded — do not build.** `except` fixes F5 on main, and F5 was P4's whole motivation.
+The one intent `except` cannot make disjoint is a rename chain (`@a→@b` then `@b→@c`), which
+is inherently ordered; [PROPOSAL-POLICY-V2.md](PROPOSAL-POLICY-V2.md) proposes rejecting those
+at load instead of sequencing them. Build `phases` only if that rejection proves too strict.
+
 ### P5 — `plan --create`
 
 Fixes F6, so a new file gets the same reviewable artifact an update does. Small and
@@ -156,7 +161,7 @@ bootstrap from six ops to four, take a 40-op baseline from 40 objects to 40 stri
 the two-team update from two `--op` flags to one, and make the plan diff match the intent.
 Nothing about the proof, the invariants, or the exit codes moves.
 
-**P4** and **P5** follow, in that order.
+**P5** follows. **P4 is superseded by `except`** — see its section.
 
 Each lands test-first, with the e2e case naming the requirement it enforces so
 `docs/BEHAVIOR.md` picks it up: owner lists fold to the same file as the ops they replace
