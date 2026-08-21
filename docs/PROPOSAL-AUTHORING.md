@@ -60,6 +60,11 @@ narrower is refused at exit 3 (correctly — it does not commute). The remedy is
 which means the fleet script carries two policy files for one reviewed intent. The README
 flags this as the thing that "will bite you on the first try."
 
+**F5 is now solved on main.** `except` (R-26…R-32) gives the batch a one-run spelling by
+making the two ops disjoint rather than ordered — `set_owners(* except /docs/, [@org/everyone])`
+alongside `add_owner(/docs/, @org/docs-team)` applies at exit 0, and re-runs clean. What
+remains of F5 is only that you have to know to reach for it.
+
 **F6 — a new file cannot be reviewed through `plan`/`apply`.** `plan` has no `--create` and
 resolves the CODEOWNERS path from the ref's tree, so on a repo with none it exits 3. The
 documented review path — plan, read the JSON, apply — is unavailable for exactly the flow

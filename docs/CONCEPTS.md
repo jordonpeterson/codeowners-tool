@@ -14,7 +14,9 @@ What the tool does, in the words you need to follow everything else.
 * **`on_empty`** : what to do when a removal takes a rule's last owner.
 * **Dry run** : produce the plan without writing anything.
 * **Snapshot** : the resolved owner list for every tracked path — ground truth for what changed.
-* **No exclusions** : CODEOWNERS has no `!` negation, so there is no "except this subdirectory". Carve one out with a later, narrower rule — the last match wins.
+* **`except`** : a carve-out inside one op — `add_owner(/.github/ except /.github/CODEOWNERS, @org/team)`. Excepted paths are simply out of scope: the op neither grants nor revokes there, and the file reports what it left alone.
+* **`on_except_zero_match`** : what to do when an excepted pattern matches nothing; `require` (default) refuses, `allow` opts out.
+* **Disjointness beats ordering** : `except` is how two overlapping ops become two non-overlapping ones, which is why it turns batches R-8 would refuse into a single run.
 
 ## Commands
 

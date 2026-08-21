@@ -39,6 +39,7 @@ layout stays as reproducible as it is today.
     "/services/api/":      { "add": ["@org/api-team", "@org/platform"] },
     "/docs/":              { "add": ["@org/docs-team"], "if_no_files_match": "skip" },
     "/.github/workflows/": { "add": ["@org/ci", "@org/security"], "note": "release keys" },
+    "/.github/":           { "add": ["@org/team-a"], "except": ["/.github/CODEOWNERS"] },
     "/legacy/":            { "replace_all": [] },
     "**/*.tf":             { "remove": ["@org/infra-legacy"] }
   },
@@ -87,6 +88,13 @@ copied onto every entry:
 Forty declared scopes: forty one-line entries, versus forty JSON objects today.
 
 ## What this deletes
+
+**The `except` delimiter problem.** Main's `except` grammar (R-26a) delimits patterns with
+*unescaped whitespace*, which works only because whitespace is otherwise illegal inside a
+scope — a constraint the op string imposes on itself. As a field it is just a list:
+`{ "add": ["@org/team-a"], "except": ["/.github/CODEOWNERS"] }`, with no delimiter to reserve
+and no interaction with the escaping rules. This is the newest feature and already the
+strongest argument for fields over a string grammar.
 
 **The embedded op language.** `ops.Parse`, `splitArgs`, `trimArg` and `checkScope`'s escaping
 rules exist to parse a mini-DSL inside a format that already has a parser. Scope keys and owner
