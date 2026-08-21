@@ -394,6 +394,82 @@ func splitArgs(s string) []string {
 	return args
 }
 
+// WithExcept returns the op string s re-spelled with an except clause carrying
+// pats, and reports whether that clause survives the grammar's own splitting.
+//
+// R-37's `except` array is validated, applied and REPORTED as the `<scope>
+// except <pat> …` string it is equivalent to (R-37a), so this is the one place
+// that writes that string. A caller that spelled it one way to validate and
+// another to report is how an array-spelled op came to echo itself WITHOUT its
+// carve in the R-8 remedy: advice to run an op that displaces the owners the
+// carve existed to protect (adversarial-review finding).
+//
+// ok is false when the patterns cannot be carried by an op string at all, which
+// the caller must report in the operator's terms rather than by parsing the
+// mangled result: a pattern holding a comma re-splits as another ARGUMENT, and
+// the arity error that follows names an owner list nobody wrote. The check is
+// the round trip itself rather than a list of forbidden characters, because a
+// balanced character class is live pattern syntax (R-37c) and survives.
+//
+// s must be an op string Parse accepted, and must not already carry an except
+// clause; both spellings on one op are refused before this is reached (R-37b).
+func WithExcept(s string, pats []string) (string, bool) {
+	arg, start, end, ok := scopeArgSpan(s)
+	if !ok || len(pats) == 0 {
+		return "", false
+	}
+	out := s[:start] + arg + " except " + strings.Join(pats, " ") + s[end:]
+	gotArg, _, _, ok := scopeArgSpan(out)
+	if !ok {
+		return "", false
+	}
+	gotScope, gotPats, isExcept := splitExceptClause(gotArg)
+	if !isExcept || gotScope != arg || len(gotPats) != len(pats) {
+		return "", false
+	}
+	for i := range pats {
+		if gotPats[i] != pats[i] {
+			return "", false
+		}
+	}
+	return out, true
+}
+
+// scopeArgSpan returns an op string's first argument — the scope, or
+// rename_owner's old owner — and the byte range it occupies, split exactly as
+// Parse splits it. Offsets are into s as given: Parse trims before recording
+// Op.Raw, so a caller passing Raw gets offsets it can splice.
+func scopeArgSpan(s string) (arg string, start, end int, ok bool) {
+	open := strings.IndexByte(s, '(')
+	if open < 0 || !strings.HasSuffix(s, ")") {
+		return "", 0, 0, false
+	}
+	body := s[open+1 : len(s)-1]
+	depth, cut := 0, -1
+	for i, r := range body {
+		switch r {
+		case '[':
+			depth++
+		case ']':
+			depth--
+		case ',':
+			if depth == 0 && cut < 0 {
+				cut = i
+			}
+		}
+	}
+	if cut < 0 {
+		// Every verb takes at least two arguments, so an op string with no
+		// top-level comma has already lost one of them to a bracket.
+		return "", 0, 0, false
+	}
+	raw := body[:cut]
+	trimmed := trimArg(raw)
+	lead := len(raw) - len(strings.TrimLeft(raw, " \t"))
+	start = open + 1 + lead
+	return trimmed, start, start + len(trimmed), true
+}
+
 // StaticConflict reports a pair of ops whose order changes the outcome, decided
 // from the op strings alone with no tree.
 //

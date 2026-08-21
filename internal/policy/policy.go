@@ -635,14 +635,15 @@ func (v *validator) op(p *Policy, i int, e *jsonValue) opInfo {
 	// Before every legality check below: the array spelling is the same fact
 	// as the string one (R-37a), so R-30 and R-27.6 must see the excepts it
 	// carries.
+	exceptArrOK := true
 	if exceptArrM != nil {
-		v.exceptArray(&parsed, exceptArrM, i, info.id)
+		exceptArrOK = v.exceptArray(&parsed, exceptArrM, i, info.id)
 	}
 
 	if zeroM != nil {
 		v.checkZeroMatchLegality(zeroM, parsed.Kind, zero, i, info.id)
 	}
-	v.checkExceptLegality(zeroM, exceptM, parsed, zero, i, info.id)
+	v.checkExceptLegality(zeroM, exceptM, parsed, zero, exceptArrOK, i, info.id)
 
 	// R-35a/R-35e: the block fills in only what this op did not state, and only
 	// where this op can carry it.
@@ -675,59 +676,167 @@ func (v *validator) op(p *Policy, i int, e *jsonValue) opInfo {
 
 // exceptArray decodes R-37's `except` array onto an op that has already
 // parsed, and then routes it through the STRING spelling's own validation by
-// rebuilding the clause and re-parsing it.
+// re-spelling the op with the clause attached and re-parsing it.
 //
 // Re-parsing rather than re-checking is the point: R-37a promises the two
 // spellings are equivalent in every respect, and a second copy of the R-27
 // checks here is exactly how the two would drift — the array would keep
-// accepting a duplicate pattern a year after the string form stopped. The
-// probe carries a stand-in owner because only the SCOPE ARGUMENT is under
-// test; ops.Parse reaches parseScopeArg the same way for every scoped verb.
-func (v *validator) exceptArray(parsed *ops.Op, m *member, i int, id string) {
+// accepting a duplicate pattern a year after the string form stopped. The op
+// re-spelled is the REAL one, not a stand-in: it is what the op then reports
+// itself as (R-37e), and rename_owner still comes back with "rename_owner
+// takes no scope" because the clause lands on the argument it does have
+// (R-27.4).
+//
+// The three refusals before that are the ones the round trip cannot state for
+// itself, each an adversarial-review finding: an element escaped for a
+// delimiter the array does not have, an element the op string cannot carry at
+// all, and an element whose trailing backslash would swallow the next one.
+// Each is refused in the operator's terms, because parsing the mangled string
+// instead produces a message about a construct nobody wrote.
+func (v *validator) exceptArray(parsed *ops.Op, m *member, i int, id string) (ok bool) {
 	val := m.val
 	if len(parsed.Except) > 0 {
 		v.at(val.off, i, id, `this op carries an except clause in its op string AND an "except" array; one intent, one place (R-37b) — keep either the `+"`<scope> except <pat> …`"+` spelling or the array, not both`)
-		return
+		return false
 	}
 	if val.kind != kArray {
 		v.at(val.off, i, id, `field "except" must be an array of patterns like ["/x/gen/"], got %s (R-37a)`, val.describe())
-		return
+		return false
 	}
 	if len(val.elems) == 0 {
 		v.at(val.off, i, id, `field "except" is an empty array; state no "except" at all rather than an empty one (R-37d) — a generator emitting [] when it has nothing to carve is asking for the broad grant with no carve-out`)
-		return
+		return false
 	}
 	pats := make([]string, 0, len(val.elems))
 	for n, el := range val.elems {
 		if el.kind != kString {
 			v.at(el.off, i, id, `field "except" element %d must be a string, got %s`, n, el.describe())
-			return
+			return false
 		}
-		if strings.TrimSpace(el.str) == "" {
+		// "" and not TrimSpace: an element holding a space is not empty, and
+		// the string spelling accepts `except \ ` — one input landing in two
+		// exit classes depending on spelling is the asymmetry R-37a forbids.
+		if el.str == "" {
 			v.at(el.off, i, id, `field "except" element %d is empty; every except pattern names paths, and "" names none (R-37)`, n)
-			return
+			return false
 		}
-		pats = append(pats, escapeExceptPattern(el.str))
+		if preEscaped(el.str) {
+			v.at(el.off, i, id, `field "except" element %d is already escaped for a delimiter this array does not have: %q (R-37c). The array is not delimited, so an element IS the path — write it literally, as %q. Escaped again it names a different path: a backslash is the pattern language's own escape, so this text carries a literal backslash followed by a bare space, and the bare space then splits one pattern into two`,
+				n, el.str, literalExceptPattern(el.str))
+			return false
+		}
+		pat := escapeExceptPattern(el.str)
+		if _, ok := ops.WithExcept(parsed.Raw, []string{pat}); !ok {
+			v.at(el.off, i, id, `field "except" element %d cannot be carried by an op string: %q contains %s, and an op is one string — a comma separates its arguments and brackets bound its owner list — so this pattern would be read as part of another argument rather than as a path. The `+"`<scope> except <pat> …`"+` spelling cannot express this path either (R-37c); carve a directory that contains it instead`,
+				n, el.str, uncarryableChars(el.str))
+			return false
+		}
+		pats = append(pats, pat)
 	}
-	probe, err := ops.Parse(exceptProbe(*parsed, pats))
+	spelled, ok := ops.WithExcept(parsed.Raw, pats)
+	if !ok {
+		// Every element carries on its own, so what broke is the JOIN: a
+		// trailing backslash escapes the space in front of the next pattern
+		// and the two are read as one — a pattern for a path that exists
+		// nowhere, carving neither of the two the operator named.
+		n, el := danglingElement(val.elems)
+		if el == "" {
+			v.at(val.off, i, id, `the "except" array cannot be written as one clause; the patterns do not survive being spelled as `+"`<scope> except <pat> …`"+` (R-37c)`)
+			return false
+		}
+		v.at(val.elems[n].off, i, id, `field "except" element %d ends with a backslash: %q. The clause is one string, so that backslash escapes the space separating this pattern from the next and the two would be read as a single pattern (R-37c: a backslash is the pattern language's own escape) — drop it, or escape the backslash itself`,
+			n, el)
+		return false
+	}
+	re, err := ops.Parse(spelled)
 	if err != nil {
 		v.at(val.off, i, id, `the "except" array is not valid: %v (R-37a: the array is validated exactly as the `+"`<scope> except <pat> …`"+` spelling it is equivalent to)`, err)
-		return
+		return false
 	}
-	parsed.Except = probe.Except
+	parsed.Except = re.Except
+	// R-37e: the op reports itself as the intent that was REVIEWED. Every
+	// report echoes Raw — the R-8 remedy, the sync record's ops[].op, the
+	// --summary-out table, plan.Plan.Ops — and an echo without the carve told
+	// one operator to run a set_owners that displaces the very subtree the
+	// carve protected.
+	parsed.Raw = re.Raw
+	return true
 }
 
-// exceptProbe spells one op's scope argument with the except clause attached,
-// as the string grammar would have written it. rename_owner has no scope, so
-// its probe hands the clause to the argument that DOES exist — which is what
-// makes it come back with "rename_owner takes no scope" rather than a message
-// about a pattern (R-27.4).
-func exceptProbe(op ops.Op, pats []string) string {
-	clause := " except " + strings.Join(pats, " ")
-	if op.Kind == ops.RenameOwner {
-		return string(ops.RenameOwner) + "(" + op.Owner + clause + ", " + op.NewOwner + ")"
+// preEscaped reports whether s escapes whitespace for a delimiter the array
+// does not have: a space or tab preceded by an ODD number of backslashes.
+//
+// Parity, not "contains a backslash". `my\ dir/` is an escape of the space and
+// so is pre-escaped, while `my\\ dir/` is an escaped backslash followed by a
+// REAL space — a path whose name contains a backslash, legitimately spelled,
+// and a different path.
+func preEscaped(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] != ' ' && s[i] != '\t' {
+			continue
+		}
+		bs := 0
+		for j := i - 1; j >= 0 && s[j] == '\\'; j-- {
+			bs++
+		}
+		if bs%2 == 1 {
+			return true
+		}
 	}
-	return string(ops.AddOwner) + "(" + op.Scope + clause + ", @probe/owner)"
+	return false
+}
+
+// literalExceptPattern removes the delimiter escaping from a pre-escaped
+// element, so the refusal can show the spelling its author meant. Exactly one
+// backslash comes off each odd run, which is what makes `my\\\ dir/` suggest
+// `my\\ dir/` — the path with a backslash in its name — rather than dropping
+// the name's own character.
+func literalExceptPattern(s string) string {
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		if s[i] == '\\' && i+1 < len(s) && (s[i+1] == ' ' || s[i+1] == '\t') {
+			continue
+		}
+		b.WriteByte(s[i])
+	}
+	return b.String()
+}
+
+// uncarryableChars names the characters that cost a pattern its round trip, so
+// the refusal can say which one the operator has to deal with. It is asked
+// only after the round trip has already failed: a comma inside a balanced
+// character class survives, and R-37c keeps `[` live pattern syntax.
+func uncarryableChars(pat string) string {
+	var names []string
+	if strings.Contains(pat, ",") {
+		names = append(names, "a comma")
+	}
+	if strings.ContainsAny(pat, "[]") {
+		names = append(names, "a bracket")
+	}
+	switch len(names) {
+	case 0:
+		return "a character an op string cannot carry"
+	case 1:
+		return names[0]
+	default:
+		return strings.Join(names[:len(names)-1], ", ") + " and " + names[len(names)-1]
+	}
+}
+
+// danglingElement finds the first element whose trailing backslash run is odd,
+// which is the one that swallows the pattern after it.
+func danglingElement(elems []*jsonValue) (int, string) {
+	for n, el := range elems {
+		bs := 0
+		for j := len(el.str) - 1; j >= 0 && el.str[j] == '\\'; j-- {
+			bs++
+		}
+		if bs%2 == 1 {
+			return n, el.str
+		}
+	}
+	return 0, ""
 }
 
 // escapeExceptPattern converts one array element into the pattern text the
@@ -737,6 +846,11 @@ func exceptProbe(op ops.Op, pats []string) string {
 // forced: `"my dir/"` is one pattern (R-37c). Everything else is still pattern
 // syntax — `*`, `?` and `[` keep their meaning, or the array would be a list of
 // literal paths rather than the same patterns spelled without a separator.
+//
+// Escaping every space is correct only because preEscaped has already refused
+// an element that escaped one itself: adding a backslash to an odd run turns
+// an escaped space into a literal backslash and a BARE space, which the string
+// grammar splits into two patterns.
 func escapeExceptPattern(s string) string {
 	var b strings.Builder
 	for i := 0; i < len(s); i++ {
@@ -850,12 +964,15 @@ func (v *validator) exceptZeroMatch(m *member, i int, id string) (string, bool) 
 //     governs an except pattern that matched nothing; on an op without one it
 //     can never apply, and accepting-and-ignoring it is the same class of
 //     failure as a typo'd field name.
-func (v *validator) checkExceptLegality(zeroM, exceptM *member, parsed ops.Op, zero string, i int, id string) {
+func (v *validator) checkExceptLegality(zeroM, exceptM *member, parsed ops.Op, zero string, exceptArrOK bool, i int, id string) {
 	if zeroM != nil && zero == ops.ZeroMatchDeclare && len(parsed.Except) > 0 {
 		v.at(zeroM.val.off, i, id, `on_zero_match %q cannot be combined with an except clause: a declared rule is one literal CODEOWNERS line, and CODEOWNERS has no negation (S-2), so the line cannot encode subtraction (R-30) — split the carve into its own op or drop the declare`,
 			ops.ZeroMatchDeclare)
 	}
-	if exceptM != nil && len(parsed.Except) == 0 {
+	// exceptArrOK: an op whose `except` array was refused has no parsed carve,
+	// and reporting on_except_zero_match as inapplicable there tells the
+	// operator to remove the one field that is not the defect.
+	if exceptM != nil && exceptArrOK && len(parsed.Except) == 0 {
 		v.at(exceptM.val.off, i, id, `field "on_except_zero_match" is set, but this op has no except clause, so the field can never apply — remove it, or add `+"`except <pat>`"+` to the scope (R-27)`)
 	}
 }

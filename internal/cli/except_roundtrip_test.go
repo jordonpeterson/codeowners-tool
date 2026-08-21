@@ -35,12 +35,13 @@ import (
 func xrRepo(t *testing.T) string {
 	t.Helper()
 	return initRepo(t, map[string]string{
-		"CODEOWNERS":    "* @org/original_team\n",
-		"my dir/x.txt":  "x\n",
-		"dir/y.txt":     "y\n",
-		"docs/keep.md":  "keep\n",
-		"docs/a.md":     "a\n",
-		"docs/gen/g.go": "package gen\n",
+		"CODEOWNERS":       "* @org/original_team\n",
+		"my dir/x.txt":     "x\n",
+		"dir/y.txt":        "y\n",
+		"docs/keep.md":     "keep\n",
+		"docs/my dir/f.md": "f\n",
+		"docs/a.md":        "a\n",
+		"docs/gen/g.go":    "package gen\n",
 	})
 }
 
@@ -182,6 +183,31 @@ func xrRun(t *testing.T, src string) xrArtifacts {
 	}
 }
 
+// xrJSON escapes a pattern text for a JSON string literal. The two spellings
+// differ in the pattern text they carry, not in how JSON quotes it, so the
+// cases below hold the text a run actually sees and this puts it in the file.
+func xrJSON(s string) string { return strings.ReplaceAll(s, `\`, `\\`) }
+
+// xrDiagnosis returns the part of a policy error after "is not valid: ", which
+// is the sentence that tells the operator what is wrong. The two spellings
+// legitimately differ around it — the array's error points at the "except"
+// field and says so — but R-37a promises the DIAGNOSIS itself is the string
+// spelling's own (the rule TestR37_ArrayDefectsRefuseLikeTheStringSpelling
+// states one case at a time).
+func xrDiagnosis(t *testing.T, stderr string) string {
+	t.Helper()
+	const marker = "is not valid: "
+	i := strings.Index(stderr, marker)
+	if i < 0 {
+		t.Fatalf("policy error has no diagnosis:\n%s", stderr)
+	}
+	line := stderr[i+len(marker):]
+	if nl := strings.IndexByte(line, '\n'); nl >= 0 {
+		line = line[:nl]
+	}
+	return line
+}
+
 // SPEC R-37a/R-37e: equivalent in every respect, checked by running both
 // spellings and diffing everything visible — exit code, stdout, stderr, the
 // written CODEOWNERS bytes, the --out record and the --summary-out body.
@@ -189,35 +215,61 @@ func xrRun(t *testing.T, src string) xrArtifacts {
 // This is the harness the adversarial review used, kept as a test because
 // three of the four defects it found were differences no single-spelling
 // assertion could see. The op string is NOT redacted here, unlike the
-// per-requirement tests: R-37e's promise is that the array spelling's op
-// renders the same intent, so a difference there is the finding, not noise.
+// per-requirement tests: R-37e's promise is that an array-spelled op renders
+// the intent that was reviewed, so a difference there is the finding, not
+// noise.
+//
+// Exit 3 is the one comparison that has to be narrower. A policy error names
+// the FIELD it came from — file:line:col, and the array's own wrapper — so the
+// two cannot be byte-equal without lying about where the defect is. What must
+// match there is the diagnosis.
 func TestR37e_BothSpellingsAreIndistinguishable(t *testing.T) {
 	cases := []struct {
-		name  string
-		array string // the `except` array, JSON
-		strin string // the same carve inside the op string
+		name      string
+		pats      []string // as the array carries them: literal paths
+		clause    string   // as the op string carries them: the delimiter escaped
+		policyErr bool
 	}{
-		{"plain directory", `["/docs/gen/"]`, "/docs/gen/"},
-		{"a space in the path", `["/my dir/"]`, `/my\ dir/`},
-		{"a literal backslash in the path", `["/my\\\\ dir/"]`, `/my\\\ dir/`},
-		{"a character class", `["/docs/[ab].md"]`, "/docs/[ab].md"},
-		{"a glob", `["/docs/*.md"]`, "/docs/*.md"},
-		{"two patterns", `["/docs/gen/","/docs/keep.md"]`, "/docs/gen/ /docs/keep.md"},
-		// Refusals are part of "every respect": each of these dies, and the
-		// operator must read the same diagnosis either way.
-		{"a pattern outside the scope", `["/dir/y.txt"]`, "/dir/y.txt"},
-		{"a pattern covering the scope", `["/docs/"]`, "/docs/"},
-		{"a duplicate pattern", `["/docs/gen/","/docs/gen/**"]`, "/docs/gen/ /docs/gen/**"},
-		{"a pattern matching no tracked file", `["/docs/absent.md"]`, "/docs/absent.md"},
-		{"a dangling backslash", `["/docs/gen\\"]`, `/docs/gen\`},
+		{name: "plain directory", pats: []string{"/docs/gen/"}, clause: "/docs/gen/"},
+		{name: "a space in the path", pats: []string{"/docs/my dir/"}, clause: `/docs/my\ dir/`},
+		// A path whose name really does contain a backslash: even parity, so
+		// the element is NOT pre-escaped, and the space it carries is escaped
+		// for the file's grammar like any other. Neither spelling matches a
+		// tracked file here, so both refuse this repo at exit 2 — identically.
+		{name: "a literal backslash in the path", pats: []string{`/docs/my\\ dir/`}, clause: `/docs/my\\\ dir/`},
+		{name: "a character class", pats: []string{"/docs/[ab].md"}, clause: "/docs/[ab].md"},
+		{name: "a glob", pats: []string{"/docs/*.md"}, clause: "/docs/*.md"},
+		{name: "two patterns", pats: []string{"/docs/gen/", "/docs/keep.md"}, clause: "/docs/gen/ /docs/keep.md"},
+		{name: "a pattern matching no tracked file", pats: []string{"/docs/absent.md"}, clause: "/docs/absent.md"},
+		// Refusals are part of "every respect" too.
+		{name: "a pattern outside the scope", pats: []string{"/dir/y.txt"}, clause: "/dir/y.txt", policyErr: true},
+		{name: "a pattern covering the scope", pats: []string{"/docs/"}, clause: "/docs/", policyErr: true},
+		{name: "a duplicate pattern", pats: []string{"/docs/gen/", "/docs/gen/**"}, clause: "/docs/gen/ /docs/gen/**", policyErr: true},
+		{name: "a dangling backslash", pats: []string{`/docs/gen\`}, clause: `/docs/gen\`, policyErr: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			array := xrRun(t, `{"version":1,"ops":[{"id":"g","op":"add_owner(/docs/, @org/team_a)","except":`+tc.array+`}]}`)
-			str := xrRun(t, `{"version":1,"ops":[{"id":"g","op":"add_owner(/docs/ except `+tc.strin+`, @org/team_a)"}]}`)
+			quoted := make([]string, len(tc.pats))
+			for i, p := range tc.pats {
+				quoted[i] = `"` + xrJSON(p) + `"`
+			}
+			array := xrRun(t, `{"version":1,"ops":[{"id":"g","op":"add_owner(/docs/, @org/team_a)","except":[`+
+				strings.Join(quoted, ",")+`]}]}`)
+			str := xrRun(t, `{"version":1,"ops":[{"id":"g","op":"add_owner(/docs/ except `+
+				xrJSON(tc.clause)+`, @org/team_a)"}]}`)
+
 			if array.code != str.code {
-				t.Errorf("exit code differs: array %d, string %d\n array stderr:\n%s\n string stderr:\n%s",
+				t.Fatalf("exit code differs: array %d, string %d\n array stderr:\n%s\n string stderr:\n%s",
 					array.code, str.code, array.stderr, str.stderr)
+			}
+			if want := cli.ExitInvalid; tc.policyErr != (array.code == want) {
+				t.Fatalf("want policy error %v, got exit %d\nstderr:\n%s", tc.policyErr, array.code, array.stderr)
+			}
+			if tc.policyErr {
+				if got, want := xrDiagnosis(t, array.stderr), xrDiagnosis(t, str.stderr); !strings.HasPrefix(got, want) {
+					t.Errorf("the two spellings diagnose the same defect differently\n array form:  %s\n string form: %s", got, want)
+				}
+				return
 			}
 			for _, part := range []struct {
 				what             string
