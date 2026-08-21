@@ -171,7 +171,10 @@ func TestR20_MinimalPolicyParses(t *testing.T) {
 	if len(p.Ops) != 2 {
 		t.Fatalf("Ops = %+v, want 2 ops", p.Ops)
 	}
-	if p.Ops[0].Kind != ops.AddOwner || p.Ops[0].Scope != "/services/api/" || p.Ops[0].Owner != "@org/api-team" {
+	// add_owner names its targets in Owners, never in Owner (R-33): Owner is
+	// rename_owner's old name and nothing else, so no site can read a stale
+	// single value off an op that names several owners.
+	if p.Ops[0].Kind != ops.AddOwner || p.Ops[0].Scope != "/services/api/" || !reflect.DeepEqual(p.Ops[0].Owners, []string{"@org/api-team"}) {
 		t.Errorf("Ops[0] = %+v, want the parsed add_owner", p.Ops[0])
 	}
 	if p.OnEmpty != "" || p.Name != "" || p.Description != "" {
@@ -1074,5 +1077,66 @@ func TestR20_MalformedPolicyIsCaughtWithoutARepo(t *testing.T) {
 	}
 	if _, err := policy.Load(good); err != nil {
 		t.Errorf("a scope no repo contains is a per-repo fact (exit 2), not a policy error: %v", err)
+	}
+}
+
+// SPEC R-35e: a default reaches only the ops that can carry the VALUE, not
+// merely the ops that can carry the field. `declare` is refused per-op on a
+// remove_owner (there is no rule that declares the absence of an owner) and on
+// an op with an except clause (R-30), so a baseline that states it once and
+// happens to contain either kind must not be rejected on every repository —
+// the operator's only route back would be to expand the block into one value
+// per op, which is the arithmetic the block exists to remove.
+//
+// Each op below is asserted to keep the built-in `require`, not merely to
+// parse: a default that reached the op and was silently downgraded to `skip`
+// would also make the file load, and would then pass over a repo the policy
+// meant to refuse.
+func TestR35e_DefaultDeclareSkipsTheOpsThatRefuseIt(t *testing.T) {
+	p := mustParse(t, `{"version":1,"on_empty":"error",
+		"defaults":{"on_zero_match":"declare"},
+		"ops":["remove_owner(/docs/, @a)",
+		       {"op":"add_owner(/x/, @c)","except":["/x/gen/"]},
+		       "add_owner(/y/, @d)"]}`)
+	for i, want := range []string{"", "", ops.ZeroMatchDeclare} {
+		if got := p.Ops[i].OnZeroMatch; got != want {
+			t.Errorf("Ops[%d].OnZeroMatch = %q, want %q", i, got, want)
+		}
+	}
+	if p.Defaults.OnZeroMatch != ops.ZeroMatchDeclare {
+		t.Errorf("Defaults.OnZeroMatch = %q, want the block read back verbatim", p.Defaults.OnZeroMatch)
+	}
+}
+
+// SPEC R-37c: the array drops the DELIMITER, so a pattern containing a space is
+// one pattern — and it reaches the op as the pattern text CODEOWNERS itself
+// uses, with the space escaped. The file has its own grammar; the JSON does
+// not. An unescaped space stored here would re-parse as a pattern plus an owner
+// token the moment the carve line was written (the refusal checkScope exists
+// for), so the conversion is the whole point of the field.
+func TestR37c_ArrayPatternWithASpaceBecomesEscapedPatternText(t *testing.T) {
+	p := mustParse(t, `{"version":1,"ops":[{"op":"add_owner(/docs/, @x)","except":["/docs/my dir/"]}]}`)
+	if want := []string{`/docs/my\ dir/`}; !reflect.DeepEqual(p.Ops[0].Except, want) {
+		t.Errorf("Except = %q, want %q", p.Ops[0].Except, want)
+	}
+}
+
+// SPEC R-36: the lint block is read back as stated, so one committed artifact
+// carries both halves of the policy. Nothing here acts on it — `sync` never
+// will (R-36c) — but the loader is the only place that can prove the block a
+// reviewer approved is the block `lint` will run.
+func TestR36_LintBlockIsReadBackAsStated(t *testing.T) {
+	p := mustParse(t, `{"version":1,"lint":{"remove_stale_paths":true,"on_empty":"inherit"},
+		"ops":["add_owner(/x/, @a)"]}`)
+	if !p.Lint.RemoveStalePaths || p.Lint.OnEmpty != "inherit" {
+		t.Errorf("Lint = %+v, want {true inherit}", p.Lint)
+	}
+	// `false` is a decision, not an absent field: a policy that turns the
+	// repair off explicitly must be indistinguishable from one that never
+	// mentioned it, or "we decided against it" and "we forgot" are different
+	// rollouts.
+	off := mustParse(t, `{"version":1,"lint":{"remove_stale_paths":false},"ops":["add_owner(/x/, @a)"]}`)
+	if off.Lint.RemoveStalePaths {
+		t.Errorf("Lint.RemoveStalePaths = true from an explicit false")
 	}
 }

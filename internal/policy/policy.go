@@ -37,8 +37,13 @@ const MaxPolicyBytes = 1 << 20
 // the top and meaningless on an op; accepting it in both places would let a
 // generator put the policy's description on op 17 and nothing would notice.
 var (
-	topFields = []string{"version", "name", "description", "on_empty", "max_paths_changed", "ops"}
-	opFields  = []string{"op", "id", "on_zero_match", "on_except_zero_match", "note"}
+	topFields = []string{"version", "name", "description", "create", "on_empty", "max_paths_changed", "defaults", "lint", "ops"}
+	opFields  = []string{"op", "id", "on_zero_match", "on_except_zero_match", "except", "note"}
+	// `defaults` carries the two genuinely PER-OP settings and nothing else
+	// (R-35c). on_empty is one policy for the run and stays top-level: two
+	// spellings of one setting is a precedence rule nobody wrote down.
+	defaultsFields = []string{"on_zero_match", "on_except_zero_match"}
+	lintFields     = []string{"remove_stale_paths", "on_empty"}
 )
 
 // The two enums, in the order the docs present them. Alphabetizing a legal set
@@ -272,8 +277,17 @@ func (v *validator) policy(root *jsonValue) *Policy {
 	v.version(p, fields["version"], root.off)
 	p.Name = v.optString(fields["name"], "name", -1, "")
 	p.Description = v.optString(fields["description"], "description", -1, "")
+	v.create(p, fields["create"])
 	v.onEmpty(p, fields["on_empty"])
 	v.maxPathsChanged(p, fields["max_paths_changed"])
+	// Before the ops: the block supplies what an op does not state, so it has
+	// to be resolved by the time each op is built (R-35a).
+	v.defaults(p, fields["defaults"])
+	// R-36e: validated on every command, including the ones that never act on
+	// it. "Ignores" means does not act on, never does not validate — a defect
+	// that surfaces only when somebody happens to run the other command is the
+	// fleet-scale failure exit 3 exists to prevent.
+	v.lint(p, fields["lint"])
 	infos := v.opsArray(p, fields["ops"], root.off)
 	v.checkDuplicateIDs(infos)
 	v.checkOnEmptyRequired(fields["on_empty"] != nil, infos)
@@ -378,6 +392,138 @@ func (v *validator) maxPathsChanged(p *Policy, m *member) {
 	}
 }
 
+// create validates R-34's boolean. A wrong type is a policy error like any
+// other: a baseline whose `create` is the STRING "false" would otherwise turn a
+// fleet-wide "off" into whatever a non-empty string coerces to, and the message
+// has to name the TYPE — "unknown field" and "wrong type" send the operator to
+// different edits.
+func (v *validator) create(p *Policy, m *member) {
+	if m == nil {
+		return
+	}
+	val := m.val
+	if val.kind != kBool {
+		v.at(val.off, -1, "", `field "create" must be a boolean, got %s; write true or false — whether a repository without a CODEOWNERS gets one is a decision the reviewed artifact makes (R-34)`, val.describe())
+		return
+	}
+	p.Create = val.b
+}
+
+// defaults validates R-35's block: the per-op settings a policy states once so
+// a 40-op baseline is 40 strings rather than 40 objects.
+//
+// An empty block is LEGAL and states nothing — deliberately not the treatment
+// `"on_zero_match": ""` gets. The strict-parse rule bites where a spelling
+// states a decision that was never made; `{}` states no default for anything,
+// and rejecting it would fail every repo for a generator that emits the key
+// unconditionally and fills it only sometimes.
+func (v *validator) defaults(p *Policy, m *member) {
+	if m == nil {
+		return
+	}
+	val := m.val
+	if val.kind != kObject {
+		v.at(val.off, -1, "", `field "defaults" must be an object holding the per-op settings this policy states once, like {"on_zero_match": "skip"}, got %s`, val.describe())
+		return
+	}
+	for _, f := range val.members {
+		if ignoredKey(f.key) {
+			continue
+		}
+		switch f.key {
+		case "on_zero_match":
+			if s, ok := v.zeroMatch(f, -1, ""); ok {
+				p.Defaults.OnZeroMatch = s
+			}
+		case "on_except_zero_match":
+			if s, ok := v.exceptZeroMatch(f, -1, ""); ok {
+				p.Defaults.OnExceptZeroMatch = s
+			}
+		default:
+			v.unknownDefaultsField(f)
+		}
+	}
+}
+
+// unknownDefaultsField names the offending key AND the set the block accepts.
+// A typo'd default is not "no default", it is the WRONG default applied to
+// every op in the policy at once, so this is the higher-stakes place to get an
+// enum or a field name wrong — it cannot be the place with the weaker message.
+func (v *validator) unknownDefaultsField(m *member) {
+	if m.key == "on_empty" {
+		// R-35c. "on_empty" is a real top-level field, so the message must say
+		// where it belongs rather than merely that it is unknown here.
+		v.at(m.keyOff, -1, "", `field "on_empty" is not a per-op default: it is one policy for the whole run and stays at the TOP level of the file, and two spellings of one setting is the ambiguity this format exists to remove (R-35c) — "defaults" accepts %s`,
+			list(defaultsFields))
+		return
+	}
+	if contains(opFields, m.key) {
+		v.at(m.keyOff, -1, "", `unknown field %q in "defaults": %q is an op field, and only settings that are genuinely per-op can be defaulted; "defaults" accepts %s`,
+			m.key, m.key, list(defaultsFields))
+		return
+	}
+	v.at(m.keyOff, -1, "", `unknown field %q in "defaults"%s; "defaults" accepts %s`, m.key, hint(m.key, defaultsFields), list(defaultsFields))
+}
+
+// lint validates R-36's block, which lets the repair policy be reviewed in the
+// same committed artifact as the ownership policy. `sync` does not act on it
+// and validates it anyway (R-36e).
+func (v *validator) lint(p *Policy, m *member) {
+	if m == nil {
+		return
+	}
+	val := m.val
+	if val.kind != kObject {
+		v.at(val.off, -1, "", `field "lint" must be an object holding lint's preferences, like {"remove_stale_paths": true}, got %s`, val.describe())
+		return
+	}
+	for _, f := range val.members {
+		if ignoredKey(f.key) {
+			continue
+		}
+		switch f.key {
+		case "remove_stale_paths":
+			if f.val.kind != kBool {
+				v.at(f.val.off, -1, "", `field "remove_stale_paths" in the "lint" block must be a boolean, got %s; write true or false — deleting rules whose pattern matches nothing is opt-in (R-11)`, f.val.describe())
+				continue
+			}
+			p.Lint.RemoveStalePaths = f.val.b
+		case "on_empty":
+			p.Lint.OnEmpty = v.lintOnEmpty(f)
+		default:
+			v.unknownLintField(f)
+		}
+	}
+}
+
+// lintOnEmpty is R-6's question asked of the lint block. Same enum and same
+// present-but-empty refusal as the top-level field: an ABSENT value leaves
+// lint with no policy (and it refuses to guess), while "" states no decision
+// at all while reading to a reviewer as though one was made.
+func (v *validator) lintOnEmpty(m *member) string {
+	val := m.val
+	switch {
+	case val.kind != kString:
+		v.at(val.off, -1, "", `field "on_empty" in the "lint" block must be a string, got %s; legal values are %s`, val.describe(), list(onEmptyValues))
+	case val.str == "":
+		v.at(val.off, -1, "", `field "on_empty" in the "lint" block is present but empty; omitting it leaves lint with no R-6 policy, while "" states no decision at all — legal values are %s`, list(onEmptyValues))
+	case !contains(onEmptyValues, val.str):
+		v.at(val.off, -1, "", `field "on_empty" in the "lint" block has unknown value %q%s; legal values are %s`, val.str, hint(val.str, onEmptyValues), list(onEmptyValues))
+	default:
+		return val.str
+	}
+	return ""
+}
+
+func (v *validator) unknownLintField(m *member) {
+	if contains(topFields, m.key) || contains(opFields, m.key) {
+		v.at(m.keyOff, -1, "", `unknown field %q in "lint": %q belongs to the ownership half of the policy, and the field sets are per level rather than one merged bag; "lint" accepts %s`,
+			m.key, m.key, list(lintFields))
+		return
+	}
+	v.at(m.keyOff, -1, "", `unknown field %q in "lint"%s; "lint" accepts %s`, m.key, hint(m.key, lintFields), list(lintFields))
+}
+
 func (v *validator) opsArray(p *Policy, m *member, rootOff int) []opInfo {
 	if m == nil {
 		v.at(rootOff, -1, "", `missing required field "ops"; a policy with no ops does nothing on every repo and exits 0 on all of them, which is the silent success this format exists to make impossible`)
@@ -412,7 +558,7 @@ func (v *validator) op(p *Policy, i int, e *jsonValue) opInfo {
 	info := opInfo{index: i, off: e.off, idOff: e.off}
 
 	spec, specOff := "", e.off
-	var zeroM, exceptM *member
+	var zeroM, exceptM, exceptArrM *member
 	note := ""
 
 	switch e.kind {
@@ -443,6 +589,8 @@ func (v *validator) op(p *Policy, i int, e *jsonValue) opInfo {
 				zeroM = m
 			case "on_except_zero_match":
 				exceptM = m
+			case "except":
+				exceptArrM = m
 			case "note":
 				note = v.optString(m, "note", i, info.id)
 			default:
@@ -484,10 +632,26 @@ func (v *validator) op(p *Policy, i int, e *jsonValue) opInfo {
 	}
 	info.kind, info.parsed = parsed.Kind, true
 
+	// Before every legality check below: the array spelling is the same fact
+	// as the string one (R-37a), so R-30 and R-27.6 must see the excepts it
+	// carries.
+	if exceptArrM != nil {
+		v.exceptArray(&parsed, exceptArrM, i, info.id)
+	}
+
 	if zeroM != nil {
 		v.checkZeroMatchLegality(zeroM, parsed.Kind, zero, i, info.id)
 	}
 	v.checkExceptLegality(zeroM, exceptM, parsed, zero, i, info.id)
+
+	// R-35a/R-35e: the block fills in only what this op did not state, and only
+	// where this op can carry it.
+	if zeroM == nil && p.Defaults.OnZeroMatch != "" && zeroMatchReaches(parsed, p.Defaults.OnZeroMatch) {
+		zero = p.Defaults.OnZeroMatch
+	}
+	if exceptM == nil && p.Defaults.OnExceptZeroMatch != "" && len(parsed.Except) > 0 {
+		exceptZero = p.Defaults.OnExceptZeroMatch
+	}
 
 	parsed.ID = info.id
 	if zeroOK {
@@ -507,6 +671,99 @@ func (v *validator) op(p *Policy, i int, e *jsonValue) opInfo {
 		p.Notes[OpLabel(info.id, i)] = note
 	}
 	return info
+}
+
+// exceptArray decodes R-37's `except` array onto an op that has already
+// parsed, and then routes it through the STRING spelling's own validation by
+// rebuilding the clause and re-parsing it.
+//
+// Re-parsing rather than re-checking is the point: R-37a promises the two
+// spellings are equivalent in every respect, and a second copy of the R-27
+// checks here is exactly how the two would drift — the array would keep
+// accepting a duplicate pattern a year after the string form stopped. The
+// probe carries a stand-in owner because only the SCOPE ARGUMENT is under
+// test; ops.Parse reaches parseScopeArg the same way for every scoped verb.
+func (v *validator) exceptArray(parsed *ops.Op, m *member, i int, id string) {
+	val := m.val
+	if len(parsed.Except) > 0 {
+		v.at(val.off, i, id, `this op carries an except clause in its op string AND an "except" array; one intent, one place (R-37b) — keep either the `+"`<scope> except <pat> …`"+` spelling or the array, not both`)
+		return
+	}
+	if val.kind != kArray {
+		v.at(val.off, i, id, `field "except" must be an array of patterns like ["/x/gen/"], got %s (R-37a)`, val.describe())
+		return
+	}
+	if len(val.elems) == 0 {
+		v.at(val.off, i, id, `field "except" is an empty array; state no "except" at all rather than an empty one (R-37d) — a generator emitting [] when it has nothing to carve is asking for the broad grant with no carve-out`)
+		return
+	}
+	pats := make([]string, 0, len(val.elems))
+	for n, el := range val.elems {
+		if el.kind != kString {
+			v.at(el.off, i, id, `field "except" element %d must be a string, got %s`, n, el.describe())
+			return
+		}
+		if strings.TrimSpace(el.str) == "" {
+			v.at(el.off, i, id, `field "except" element %d is empty; every except pattern names paths, and "" names none (R-37)`, n)
+			return
+		}
+		pats = append(pats, escapeExceptPattern(el.str))
+	}
+	probe, err := ops.Parse(exceptProbe(*parsed, pats))
+	if err != nil {
+		v.at(val.off, i, id, `the "except" array is not valid: %v (R-37a: the array is validated exactly as the `+"`<scope> except <pat> …`"+` spelling it is equivalent to)`, err)
+		return
+	}
+	parsed.Except = probe.Except
+}
+
+// exceptProbe spells one op's scope argument with the except clause attached,
+// as the string grammar would have written it. rename_owner has no scope, so
+// its probe hands the clause to the argument that DOES exist — which is what
+// makes it come back with "rename_owner takes no scope" rather than a message
+// about a pattern (R-27.4).
+func exceptProbe(op ops.Op, pats []string) string {
+	clause := " except " + strings.Join(pats, " ")
+	if op.Kind == ops.RenameOwner {
+		return string(ops.RenameOwner) + "(" + op.Owner + clause + ", " + op.NewOwner + ")"
+	}
+	return string(ops.AddOwner) + "(" + op.Scope + clause + ", @probe/owner)"
+}
+
+// escapeExceptPattern converts one array element into the pattern text the
+// string grammar would carry.
+//
+// The array drops the DELIMITER, and with it only the escaping the delimiter
+// forced: `"my dir/"` is one pattern (R-37c). Everything else is still pattern
+// syntax — `*`, `?` and `[` keep their meaning, or the array would be a list of
+// literal paths rather than the same patterns spelled without a separator.
+func escapeExceptPattern(s string) string {
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		if s[i] == ' ' || s[i] == '\t' {
+			b.WriteByte('\\')
+		}
+		b.WriteByte(s[i])
+	}
+	return b.String()
+}
+
+// zeroMatchReaches is R-35e for on_zero_match: a default is applied only to ops
+// that CAN carry it, so a baseline stating one value and happening to contain
+// one rename is not rejected on every repo — with the operator's only route
+// back being to expand the block into 40 per-op values. The conditions are the
+// legality table itself (checkZeroMatchLegality and R-30), read as a question
+// rather than as a refusal.
+func zeroMatchReaches(op ops.Op, val string) bool {
+	switch {
+	case op.Kind == ops.RenameOwner:
+		return false
+	case val == ops.ZeroMatchDeclare && op.Kind == ops.RemoveOwner:
+		return false
+	case val == ops.ZeroMatchDeclare && len(op.Except) > 0:
+		return false
+	}
+	return true
 }
 
 // zeroMatch validates the R-21 enum. It reports whether the value is usable, so
