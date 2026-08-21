@@ -73,7 +73,8 @@ const fleetBrokenPolicySrc = `{
 type fleetShape struct {
 	name  string
 	files map[string]string
-	// wantStatus is the record's status under fleetPolicySrc with --create.
+	// wantStatus is the record's status under fleetPolicySrc carrying
+	// `"create": true` (R-34a).
 	wantStatus string
 	// wantExit is sync's exit code for this repo under the same run.
 	wantExit int
@@ -123,8 +124,9 @@ func fleetShapes() []fleetShape {
 			wantExit:   cli.ExitOK,
 		},
 		{
-			// No CODEOWNERS at all. Exit 2 without --create; the fleet run
-			// passes --create, so here it converges and the file is created.
+			// No CODEOWNERS at all. Exit 2 unless the policy says `create`;
+			// the fleet run's policy does, so here it converges and the file
+			// is created.
 			name: "no-file",
 			files: map[string]string{
 				"services/api/main.go":     "package api\n",
@@ -374,10 +376,10 @@ func fleetRuleLines(content string) []string {
 func TestFleet_OnePolicyAcrossHeterogeneousRepos(t *testing.T) {
 	t.Parallel()
 	dirs, order := fleetBuild(t)
-	policy := fleetPolicyFile(t, fleetPolicySrc)
+	policy := fleetPolicyFile(t, policyWithCreate(t, fleetPolicySrc))
 	before := fleetSnapshot(t, dirs)
 
-	out := fleetRunPolicy(t, dirs, order, policy, "--create")
+	out := fleetRunPolicy(t, dirs, order, policy)
 
 	// The run COMPLETES. A refusal at repo 6 must not cost you repo 7.
 	t.Run("run completes", func(t *testing.T) {
@@ -569,22 +571,30 @@ func TestFleet_DeclareLandsAtEOFUnderCatchAll(t *testing.T) {
 	}
 }
 
-// SPEC R-23: a repo with no CODEOWNERS is exit 2 without --create — a per-repo
-// fact, recorded and skipped past, never a halt. With --create the file is
-// written at .github/CODEOWNERS, which is the path the README promises.
+// SPEC R-23/R-34a: a repo with no CODEOWNERS is exit 2 when the policy does not
+// say `create` — a per-repo fact, recorded and skipped past, never a halt. The
+// same policy carrying `"create": true` writes the file at .github/CODEOWNERS,
+// which is the path the README promises.
+//
+// Two policies, differing in exactly the field R-34b moved out of the command
+// line, are the whole test: one must refuse and one must create. Running one
+// policy twice would stop distinguishing them and leave the requirement
+// untested, so the fixtures are derived from a single source and the refusing
+// leg asserts the absence of the file the creating leg asserts the presence of.
 func TestFleet_MissingCodeownersNeedsCreate(t *testing.T) {
 	t.Parallel()
 	dirs, order := fleetBuild(t, "no-file")
 	policy := fleetPolicyFile(t, fleetPolicySrc)
+	creating := fleetPolicyFile(t, policyWithCreate(t, fleetPolicySrc))
 	dir := dirs["no-file"]
 
 	out := fleetRunPolicy(t, dirs, order, policy)
 	if got := out.codes["no-file"]; got != cli.ExitRefused {
-		t.Fatalf("no CODEOWNERS and no --create: exit %d, want 2 — exit 3 would halt a fleet on roughly repo 3\nstderr: %s",
+		t.Fatalf("no CODEOWNERS and no `create` in the policy: exit %d, want 2 — exit 3 would halt a fleet on roughly repo 3\nstderr: %s",
 			got, out.stderr["no-file"])
 	}
 	if _, ok := fleetCodeowners(t, dir); ok {
-		t.Error("exit 2 must write nothing at all — a file appeared without --create")
+		t.Error("exit 2 must write nothing at all — a file appeared for a policy that never asked for one")
 	}
 	// An exit-2 run DOES emit its record: `needs-human` is a list of repos
 	// someone has to triage, and it is built from results.jsonl. Tolerating a
@@ -599,14 +609,14 @@ func TestFleet_MissingCodeownersNeedsCreate(t *testing.T) {
 		t.Error("created must be false when nothing was created")
 	}
 
-	out = fleetRunPolicy(t, dirs, order, policy, "--create")
+	out = fleetRunPolicy(t, dirs, order, creating)
 	if got := out.codes["no-file"]; got != cli.ExitOK {
-		t.Fatalf("--create: exit %d, want 0\nstderr: %s", got, out.stderr["no-file"])
+		t.Fatalf("policy `\"create\": true`: exit %d, want 0\nstderr: %s", got, out.stderr["no-file"])
 	}
 	created := filepath.Join(dir, ".github", "CODEOWNERS")
 	b, err := os.ReadFile(created)
 	if err != nil {
-		t.Fatalf("--create must write .github/CODEOWNERS: %v", err)
+		t.Fatalf("policy `\"create\": true` must write .github/CODEOWNERS: %v", err)
 	}
 	if len(b) == 0 {
 		t.Error("created CODEOWNERS is empty")
@@ -627,10 +637,10 @@ func TestFleet_MissingCodeownersNeedsCreate(t *testing.T) {
 func TestFleet_ZeroMatchUnderRequireIsTwoNotThree(t *testing.T) {
 	t.Parallel()
 	dirs, order := fleetBuild(t, "zero-require")
-	policy := fleetPolicyFile(t, fleetPolicySrc)
+	policy := fleetPolicyFile(t, policyWithCreate(t, fleetPolicySrc))
 	before := fleetSnapshot(t, dirs)
 
-	out := fleetRunPolicy(t, dirs, order, policy, "--create")
+	out := fleetRunPolicy(t, dirs, order, policy)
 	got := out.codes["zero-require"]
 	if got == cli.ExitInvalid {
 		t.Fatalf("zero-match under require exited 3 — that halts the whole fleet for a fact about one repo\nstderr: %s", out.stderr["zero-require"])
@@ -656,10 +666,10 @@ func TestFleet_ZeroMatchUnderRequireIsTwoNotThree(t *testing.T) {
 func TestFleet_RefusalIsRecoverableAndIsolated(t *testing.T) {
 	t.Parallel()
 	dirs, order := fleetBuild(t, "refuse", "plain")
-	policy := fleetPolicyFile(t, fleetPolicySrc)
+	policy := fleetPolicyFile(t, policyWithCreate(t, fleetPolicySrc))
 	before := fleetSnapshot(t, dirs)
 
-	out := fleetRunPolicy(t, dirs, order, policy, "--create")
+	out := fleetRunPolicy(t, dirs, order, policy)
 	if out.halted != "" {
 		t.Fatalf("the loop stopped at %q; a refusal must be recorded and stepped over", out.halted)
 	}
@@ -707,9 +717,9 @@ func TestFleet_RecordRepoIsTheArgumentVerbatim(t *testing.T) {
 	// One repo that converges and one that refuses: the refused row is the one
 	// an operator has to find again by path, so exit 2 must carry it too.
 	dirs, order := fleetBuild(t, "plain", "refuse")
-	policy := fleetPolicyFile(t, fleetPolicySrc)
+	policy := fleetPolicyFile(t, policyWithCreate(t, fleetPolicySrc))
 
-	out := fleetRunPolicy(t, dirs, order, policy, "--create")
+	out := fleetRunPolicy(t, dirs, order, policy)
 	recs := fleetRecords(t, out.jsonl)
 	if len(recs) != len(order) {
 		t.Fatalf("%d records for %d repos", len(recs), len(order))
@@ -794,7 +804,10 @@ func TestFleet_NothingMatchesAnywhereIsSkippedNotUnchanged(t *testing.T) {
 func TestFleet_BrokenPolicyHaltsOnTheFirstRepo(t *testing.T) {
 	t.Parallel()
 	dirs, order := fleetBuild(t)
-	policy := fleetPolicyFile(t, fleetBrokenPolicySrc)
+	// The create-bearing spelling, because that is the artifact a real fleet
+	// run carries — and the defect must be what stops it, not the shape of the
+	// rest of the file.
+	policy := fleetPolicyFile(t, policyWithCreate(t, fleetBrokenPolicySrc))
 	before := fleetSnapshot(t, dirs)
 
 	// The first line of the fleet script: this is where it should die.
@@ -804,7 +817,7 @@ func TestFleet_BrokenPolicyHaltsOnTheFirstRepo(t *testing.T) {
 		t.Errorf("the error must quote the offending key, or nobody can find it in a 40-op policy:\n%s", errOut)
 	}
 
-	out := fleetRunPolicy(t, dirs, order, policy, "--create")
+	out := fleetRunPolicy(t, dirs, order, policy)
 	if out.halted != order[0] {
 		t.Fatalf("halted at %q, want the FIRST repo %q (codes %v)", out.halted, order[0], out.codes)
 	}
@@ -817,8 +830,20 @@ func TestFleet_BrokenPolicyHaltsOnTheFirstRepo(t *testing.T) {
 	if out.jsonl != "" {
 		t.Errorf("a policy error must emit NO record: a {\"status\":...} line in results.jsonl reports a phantom repo to the aggregation\ngot: %q", out.jsonl)
 	}
-	if out.stderr[order[0]] == "" {
-		t.Error("exit 3 must explain itself on stderr")
+	// The offending key, not merely "some exit 3": this test's whole claim is
+	// that the POLICY halted the run, so any other exit-3 reason satisfying it
+	// — a banned flag, a future argument rule — would be a vacuous pass.
+	if !strings.Contains(out.stderr[order[0]], "on_zero_mtach") {
+		t.Errorf("exit 3 must explain itself on stderr, naming the key that broke:\n%s", out.stderr[order[0]])
+	}
+	// Precedence, pinned: even on a command line that ALSO carries the flag
+	// R-34b bans, the policy defect is what is reported. The flag ban sits
+	// after the policy is loaded for exactly this reason — reporting it first
+	// would let "the broken policy halted the fleet" be proven by the flag,
+	// with the policy never read at all.
+	if _, _, errOut := runCLI(t, "sync", "--repo", dirs[order[0]], "--policy", policy,
+		"--create", "--format", "json"); !strings.Contains(errOut, "on_zero_mtach") {
+		t.Errorf("--create alongside a BROKEN policy reported the flag instead of the defect:\n%s", errOut)
 	}
 	if after := fleetSnapshot(t, dirs); !reflect.DeepEqual(after, before) {
 		t.Error("a broken policy must touch no file in any repo")
@@ -832,7 +857,7 @@ func TestFleet_BrokenPolicyHaltsOnTheFirstRepo(t *testing.T) {
 func TestFleet_DryRunChangesNothingButStillEmits(t *testing.T) {
 	t.Parallel()
 	dirs, order := fleetBuild(t)
-	policy := fleetPolicyFile(t, fleetPolicySrc)
+	policy := fleetPolicyFile(t, policyWithCreate(t, fleetPolicySrc))
 	before := fleetSnapshot(t, dirs)
 	bodies := t.TempDir() // outside every clone, per the README
 
@@ -841,7 +866,7 @@ func TestFleet_DryRunChangesNothingButStillEmits(t *testing.T) {
 	for _, name := range order {
 		summaries[name] = filepath.Join(bodies, name+".md")
 		code, stdout, errOut := runCLI(t, "sync",
-			"--repo", dirs[name], "--policy", policy, "--create", "--dry-run",
+			"--repo", dirs[name], "--policy", policy, "--dry-run",
 			"--format", "json", "--summary-out", summaries[name])
 		out.jsonl += stdout
 		out.codes[name] = code
@@ -895,7 +920,7 @@ func TestFleet_DryRunChangesNothingButStillEmits(t *testing.T) {
 func TestFleet_DocumentedScriptContract(t *testing.T) {
 	t.Parallel()
 	dirs, order := fleetBuild(t, "plain", "correct", "no-file", "refuse")
-	policy := fleetPolicyFile(t, fleetPolicySrc)
+	policy := fleetPolicyFile(t, policyWithCreate(t, fleetPolicySrc))
 
 	// Line 1: `codeowners-tool check --policy policy.json` under `set -euo
 	// pipefail`. A valid policy MUST exit 0 — a "nothing to do" 1 would abort
@@ -920,7 +945,7 @@ func TestFleet_DocumentedScriptContract(t *testing.T) {
 	// `case $code in 0) ;; 2) ... ;; *) exit "$code" ;; esac` — the catch-all
 	// arm halts the rollout, so anything sync can return that is not 0 or 2
 	// must genuinely be a reason to stop.
-	out := fleetRunPolicy(t, dirs, order, policy, "--create")
+	out := fleetRunPolicy(t, dirs, order, policy)
 	t.Run("sync returns only 0, 2 or 3", func(t *testing.T) {
 		for _, name := range order {
 			switch out.codes[name] {
@@ -978,7 +1003,7 @@ func TestFleet_DocumentedScriptContract(t *testing.T) {
 		bodies := t.TempDir()
 		path := filepath.Join(bodies, "org__plain.md")
 		code, _, errOut := runCLI(t, "sync", "--repo", dirs["plain"], "--policy", policy,
-			"--create", "--dry-run", "--format", "json", "--summary-out", path)
+			"--dry-run", "--format", "json", "--summary-out", path)
 		if code != cli.ExitOK {
 			t.Fatalf("dry-run sync: exit %d\nstderr: %s", code, errOut)
 		}

@@ -122,11 +122,12 @@ func declaredOwners(op ops.Op, base []string) []string {
 		// NOT governed by whatever broader rule sits above it.
 		return append([]string{}, op.Owners...)
 	}
+	// The whole list joins the declared rule in ONE line, in the list's order
+	// (R-33e): a declare that appended one owner per pass would either stack
+	// duplicate patterns or churn the same line N times, and R-33b makes the
+	// second visible in the artifact.
 	out := append([]string{}, base...)
-	if !contains(out, op.Owner) {
-		out = append(out, op.Owner)
-	}
-	return out
+	return append(out, ownersMissing(out, op.Owners)...)
 }
 
 // lastRuleForScope finds the rule a declaration lands on: the last rule whose
@@ -502,10 +503,26 @@ func patternsProvablyDisjoint(a, b string) bool {
 // entirely), so probing every subset of those identifiers, plus one identifier
 // neither op names, decides commutation exactly.
 func commuteOnEveryOwnerSet(a, b ops.Op) bool {
+	// Probe every identifier whose MEMBERSHIP in the input state either
+	// transform tests: a rename's two names, and every owner an add or remove
+	// lists (R-33 — reading the single Owner field here left an add_owner list
+	// probing nothing at all, so two contradictory declares over the same
+	// names came back "commuting"). set_owners ignores its input entirely, so
+	// its list is deliberately not probed: adding it would only multiply the
+	// 2^n state space that the closed-form check in ops exists to avoid.
 	var probe []string
-	for _, o := range []string{a.Owner, a.NewOwner, b.Owner, b.NewOwner} {
+	add := func(o string) {
 		if o != "" && !contains(probe, o) {
 			probe = append(probe, o)
+		}
+	}
+	for _, op := range []ops.Op{a, b} {
+		add(op.Owner)
+		add(op.NewOwner)
+		if op.Kind == ops.AddOwner || op.Kind == ops.RemoveOwner {
+			for _, o := range op.Owners {
+				add(o)
+			}
 		}
 	}
 	// Stands in for whatever an existing broader rule already granted the

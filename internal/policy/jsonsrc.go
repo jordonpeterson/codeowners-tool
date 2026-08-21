@@ -63,6 +63,7 @@ type jsonValue struct {
 	end  int    // one past the value's last byte
 	src  []byte // the whole document; raw() slices it, sharing these bytes
 	str  string // kString
+	b    bool   // kBool
 	num  json.Number
 	// members is in source order. Duplicates are rejected before anything reads
 	// this, so first-wins here is never observable.
@@ -231,10 +232,10 @@ func (s *scanner) value(depth int) (*jsonValue, error) {
 	case json.Number:
 		v.kind, v.num = kNumber, t
 	case bool:
-		// The value itself is never read: describe echoes booleans from raw,
-		// and no policy field is a boolean, so the kind alone carries the
-		// rejection.
-		v.kind = kBool
+		// The value is kept, not just the kind: `create` (R-34) and
+		// `lint.remove_stale_paths` (R-36) are booleans, and reading them back
+		// out of raw() would make "false" and a truncated span the same answer.
+		v.kind, v.b = kBool, t
 	case nil:
 		v.kind = kNull
 	}

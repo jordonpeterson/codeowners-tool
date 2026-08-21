@@ -95,6 +95,15 @@ func isFlagSet(fs *flag.FlagSet, name string) bool {
 // per repo is what lets `jq -s` aggregate a fleet without parsing stderr.
 type SyncRecord struct {
 	Repo string `json:"repo"`
+	// Policy is the --policy path as the operator spelled it, absent on an --op
+	// run — the same key, and the same omitempty meaning, as `check --format
+	// json`. R-20 rests on the policy file being the complete statement of what
+	// ran; a directory of `--out records/$repo.json` that cannot say which
+	// artifact produced it cannot check that claim, and two waves in one week
+	// leave an aggregation nobody can attribute. Absent means "no policy file
+	// was involved", which an empty string would not: `group_by(.policy)` would
+	// bucket every ad-hoc --op run together with a policy that has no name.
+	Policy string `json:"policy,omitempty"`
 	// CodeownersPath is the repo-relative file this run CHANGED, or under
 	// --dry-run would have. A rollout has to stage and commit that file, and
 	// which of the three legal locations it is differs per repo (S-8), so a
@@ -198,7 +207,7 @@ func usage(w io.Writer) {
            [--cache-dir D] [--cache-ttl DUR] [--repo DIR] [--branch REF] [--file PATH]
   lint     --github-repo owner/name [--token T | $GITHUB_TOKEN] [--api-url URL]
            [--remove-stale-paths] [--on-empty error|inherit|unowned] [--dry-run]
-           [--repo DIR] [--branch REF] [--file PATH] [--format text|json]
+           [--policy FILE] [--repo DIR] [--branch REF] [--file PATH] [--format text|json]
   snapshot [--repo DIR] [--branch REF] [--out snap.json]
   verify   --before before.json --after after.json [--scope PATTERN ...]
   version  print the build this binary was stamped with

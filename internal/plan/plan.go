@@ -617,12 +617,14 @@ func scopeContainedInRule(scope, rulePat string) bool {
 // i.e. whether a rename of `owner` batched alongside it could be widened by it.
 func assignsOwner(op ops.Op, owner string) bool {
 	switch op.Kind {
-	case ops.AddOwner:
-		return op.Owner == owner
-	case ops.SetOwners:
+	case ops.AddOwner, ops.SetOwners:
+		// Every owner the op names, not just the first: a rename batched with
+		// `add_owner(/x/, [@a, @b])` must be widened by it for either name, or
+		// the rename's scope goes stale and R-8 waves an order-dependent batch
+		// through (R-33).
 		return contains(op.Owners, owner)
 	case ops.RenameOwner:
-		return op.NewOwner == owner
+		return sameOwner(op.NewOwner, owner)
 	}
 	return false
 }
@@ -632,14 +634,15 @@ func assignsOwner(op ops.Op, owner string) bool {
 func simulate(op ops.Op, owners []string) []string {
 	switch op.Kind {
 	case ops.AddOwner:
-		if contains(owners, op.Owner) {
+		missing := ownersMissing(owners, op.Owners)
+		if len(missing) == 0 {
 			return owners
 		}
-		return append(append([]string{}, owners...), op.Owner)
+		return append(append([]string{}, owners...), missing...)
 	case ops.SetOwners:
 		return append([]string{}, op.Owners...)
 	case ops.RemoveOwner:
-		return minus(owners, op.Owner)
+		return minusAll(owners, op.Owners)
 	case ops.RenameOwner:
 		if !contains(owners, op.Owner) {
 			return owners
@@ -676,7 +679,13 @@ func synthAdd(f *file.File, tree []string, op ops.Op, scope map[string]bool, des
 
 	for _, l := range lines {
 		r := f.Lines[l].Rule
-		if contains(r.Owners, op.Owner) {
+		// The WHOLE list is folded into this line's owner set before any edit
+		// is recorded, so N owners are one hunk (R-33b) and the appended order
+		// is the list's own (R-33e). Owners already on the line are dropped
+		// here rather than re-appended, which is what keeps a re-run of the
+		// same policy byte-identical (R-19).
+		missing := ownersMissing(r.Owners, op.Owners)
+		if len(missing) == 0 {
 			continue
 		}
 		if pattern.Contains(op.Scope, r.PatternText) {
@@ -685,7 +694,7 @@ func synthAdd(f *file.File, tree []string, op ops.Op, scope map[string]bool, des
 			// rule, so a post-mutation OwnersCopy reports the new set as the
 			// old one (E2E-testing finding).
 			oldOwners := r.OwnersCopy()
-			newOwners := append(append([]string{}, r.Owners...), op.Owner)
+			newOwners := append(append([]string{}, r.Owners...), missing...)
 			f.SetOwners(l, newOwners)
 			pl.Changes = append(pl.Changes, Change{
 				Action: "amend", Line: l + 1, Pattern: r.PatternText,
@@ -703,7 +712,7 @@ func synthAdd(f *file.File, tree []string, op ops.Op, scope map[string]bool, des
 			if !exact {
 				pl.addWarning(inexactNarrowingWarning(inter, op.Scope, r.PatternText))
 			}
-			newOwners := append(append([]string{}, r.Owners...), op.Owner)
+			newOwners := append(append([]string{}, r.Owners...), missing...)
 			f.InsertRule(l+1, inter, newOwners)
 			pl.Changes = append(pl.Changes, Change{
 				Action: "insert", Line: l + 2, Pattern: inter,
@@ -716,21 +725,26 @@ func synthAdd(f *file.File, tree []string, op ops.Op, scope map[string]bool, des
 
 	if len(unowned) > 0 {
 		at := firstRuleIndex(f)
-		f.InsertRule(at, op.Scope, []string{op.Owner})
+		// One InsertRule carrying the whole list, not one per owner: a second
+		// insert for the same scope would append a duplicate pattern whose
+		// predecessor is dead on arrival under last-match-wins (R-7/S-1), and
+		// the plan would show a line the file never holds (R-33b).
+		newOwners := append([]string{}, op.Owners...)
+		f.InsertRule(at, op.Scope, newOwners)
 		pl.Changes = append(pl.Changes, Change{
 			Action: "insert", Line: at + 1, Pattern: op.Scope,
-			NewOwners: []string{op.Owner}, NewLine: f.LineText(at),
+			NewOwners: newOwners, NewLine: f.LineText(at),
 			Reason: fmt.Sprintf("%d in-scope path(s) matched no rule; inserted before all existing rules so every existing rule keeps precedence (last-match-wins, S-1)", len(unowned)),
 		})
 	}
 
 	for p := range scope {
-		if !contains(desired[p], op.Owner) {
+		for _, o := range ownersMissing(desired[p], op.Owners) {
 			if desired[p] == nil {
-				desired[p] = []string{op.Owner}
-			} else {
-				desired[p] = append(append([]string{}, desired[p]...), op.Owner)
+				desired[p] = []string{o}
+				continue
 			}
+			desired[p] = append(append([]string{}, desired[p]...), o)
 		}
 	}
 	return nil
@@ -786,10 +800,16 @@ func synthSet(f *file.File, tree []string, op ops.Op, scope map[string]bool, des
 		} else {
 			old := f.LineText(lastIntersecting)
 			oldOwners := lastRule.OwnersCopy()
-			f.SetOwners(lastIntersecting, op.Owners)
+			// The owners this set KEEPS keep the spelling the file gave them
+			// (R-38b's reason, applied to the half of set_owners that is not
+			// changing anything: restyling a handle nobody asked to change
+			// churns a diff on every repository in a fleet). Only owners the
+			// line does not already have arrive in the op's spelling.
+			newOwners := keepFileSpelling(lastRule.Owners, op.Owners)
+			f.SetOwners(lastIntersecting, newOwners)
 			pl.Changes = append(pl.Changes, Change{
 				Action: "amend", Line: lastIntersecting + 1, Pattern: lastRule.PatternText,
-				OldOwners: oldOwners, NewOwners: op.Owners,
+				OldOwners: oldOwners, NewOwners: newOwners,
 				OldLine: old, NewLine: f.LineText(lastIntersecting),
 				Reason: fmt.Sprintf("existing rule %q matches exactly the scope and is the last intersecting rule — amended in place (R-4); no later rule can recapture (R-3)", lastRule.PatternText),
 			})
@@ -824,7 +844,7 @@ func synthRemove(f *file.File, tree []string, op ops.Op, scope map[string]bool, 
 	for pass := 0; ; pass++ {
 		if pass > maxPasses {
 			return &RefusalError{Msg: fmt.Sprintf(
-				"refusing: remove_owner(%s, %s) did not converge — file structure defeats the writer", op.Scope, op.Owner)}
+				"refusing: remove_owner(%s, %s) did not converge — file structure defeats the writer", op.Scope, ownerArg(op.Owners))}
 		}
 		changed, err := removePass(f, tree, op, scope, onEmpty, pl)
 		if err != nil {
@@ -842,20 +862,24 @@ func synthRemove(f *file.File, tree []string, op ops.Op, scope map[string]bool, 
 	// (found in review). Where the outcome is the pure transform
 	// desired∖{owner}, keep it — that preserves the gate's independence.
 	// Where inheritance legitimately resurrected other owners, assert the
-	// removal contract (op.Owner owns nothing in scope — INV-1 for remove)
-	// and accept the fallthrough set. INV-2 is untouched: desired outside
-	// scope never changes here.
+	// removal contract (EVERY owner the op names owns nothing in scope —
+	// INV-1 for remove, which R-33 makes a claim about the whole list rather
+	// than about one name) and accept the fallthrough set. INV-2 is untouched:
+	// desired outside scope never changes here.
 	final := resolve.All(f, tree)
 	for p := range scope {
-		want := minus(desired[p], op.Owner)
+		want := minusAll(desired[p], op.Owners)
 		got := final[p].Owners
 		if resolve.OwnersEqual(got, want) {
 			desired[p] = want
 			continue
 		}
-		if contains(got, op.Owner) {
+		// Name the survivors, not the whole list: an operator told "@a, @b
+		// would still own x" when only @b did would go looking in the wrong
+		// half of their policy.
+		if survivors := ownersPresent(got, op.Owners); len(survivors) > 0 {
 			return &RefusalError{Msg: fmt.Sprintf(
-				"refusing: %s would still own %q after remove_owner(%s, %s)", op.Owner, p, op.Scope, op.Owner)}
+				"refusing: %s would still own %q after remove_owner(%s, %s)", ownerNames(survivors), p, op.Scope, ownerArg(op.Owners))}
 		}
 		// Divergence from the pure transform is legitimate ONLY under
 		// inherit, where deleting a rule resurrects owners from surviving
@@ -866,7 +890,7 @@ func synthRemove(f *file.File, tree []string, op ops.Op, scope map[string]bool, 
 		if onEmpty != "inherit" {
 			return &RefusalError{Msg: fmt.Sprintf(
 				"refusing: remove_owner(%s, %s) produced %s for %q where the operation's semantics require %s",
-				op.Scope, op.Owner, fmtOwners(got), p, fmtOwners(want))}
+				op.Scope, ownerArg(op.Owners), fmtOwners(got), p, fmtOwners(want))}
 		}
 		desired[p] = got // inherit fallthrough: owners come from surviving rules
 	}
@@ -881,7 +905,7 @@ func removePass(f *file.File, tree []string, op ops.Op, scope map[string]bool, o
 
 	groups := map[int][]string{}
 	for p := range scope {
-		if r := cur[p]; r.Matched && contains(f.Lines[r.LineIndex].Rule.Owners, op.Owner) {
+		if r := cur[p]; r.Matched && containsAny(f.Lines[r.LineIndex].Rule.Owners, op.Owners) {
 			groups[r.LineIndex] = append(groups[r.LineIndex], p)
 		}
 	}
@@ -896,7 +920,13 @@ func removePass(f *file.File, tree []string, op ops.Op, scope map[string]bool, o
 
 	for _, l := range lines {
 		r := f.Lines[l].Rule
-		newOwners := minus(r.Owners, op.Owner)
+		// One minusAll, not one minus per owner: a line losing three owners is
+		// one rewritten line, and the intermediate two-owner spellings never
+		// reach the plan (R-33b). `removed` is what this LINE actually gives
+		// up, which is what the messages below may truthfully name — a list
+		// may name owners this particular rule never carried.
+		newOwners := minusAll(r.Owners, op.Owners)
+		removed := ownersPresent(r.Owners, op.Owners)
 		if pattern.Contains(op.Scope, r.PatternText) {
 			if len(newOwners) > 0 {
 				old := f.LineText(l)
@@ -906,7 +936,7 @@ func removePass(f *file.File, tree []string, op ops.Op, scope map[string]bool, o
 					Action: "amend", Line: l + 1, Pattern: r.PatternText,
 					OldOwners: oldOwners, NewOwners: newOwners,
 					OldLine: old, NewLine: f.LineText(l),
-					Reason: fmt.Sprintf("pattern %q can only ever match paths inside scope; removed %s in place", r.PatternText, op.Owner),
+					Reason: fmt.Sprintf("pattern %q can only ever match paths inside scope; removed %s in place", r.PatternText, ownerNames(removed)),
 				})
 				continue
 			}
@@ -915,10 +945,10 @@ func removePass(f *file.File, tree []string, op ops.Op, scope map[string]bool, o
 			case "":
 				return false, &InvalidError{Msg: fmt.Sprintf(
 					"removing %s empties the owner set of %q; an explicit --on-empty policy (error|inherit|unowned) is required — there is deliberately no default (R-6)",
-					op.Owner, r.PatternText)}
+					ownerNames(removed), r.PatternText)}
 			case "error":
 				return false, &RefusalError{Msg: fmt.Sprintf(
-					"refusing: removing %s would leave %q with no owners (--on-empty=error, R-6)", op.Owner, r.PatternText)}
+					"refusing: removing %s would leave %q with no owners (--on-empty=error, R-6)", ownerNames(removed), r.PatternText)}
 			case "unowned":
 				old := f.LineText(l)
 				oldOwners := r.OwnersCopy()
@@ -954,10 +984,10 @@ func removePass(f *file.File, tree []string, op ops.Op, scope map[string]bool, o
 				switch onEmpty {
 				case "":
 					return false, &InvalidError{Msg: fmt.Sprintf(
-						"removing %s empties the owner set for in-scope paths of %q; an explicit --on-empty policy is required (R-6)", op.Owner, r.PatternText)}
+						"removing %s empties the owner set for in-scope paths of %q; an explicit --on-empty policy is required (R-6)", ownerNames(removed), r.PatternText)}
 				case "error":
 					return false, &RefusalError{Msg: fmt.Sprintf(
-						"refusing: removing %s would leave in-scope paths of %q with no owners (--on-empty=error)", op.Owner, r.PatternText)}
+						"refusing: removing %s would leave in-scope paths of %q with no owners (--on-empty=error)", ownerNames(removed), r.PatternText)}
 				case "inherit":
 					return false, &RefusalError{Msg: fmt.Sprintf(
 						"refusing: --on-empty=inherit cannot be expressed for %q, which also governs out-of-scope paths — inheritance would require deleting a rule other paths depend on (R-1)", r.PatternText)}
@@ -1364,9 +1394,15 @@ func firstRuleIndex(f *file.File) int {
 	return len(f.Lines)
 }
 
+// contains asks the one owner identity (R-38a): every list this package tests
+// membership in is a list of owners, and byte equality here is what let
+// `remove_owner(/x/, @ORG/TEAM)` see nothing to do on a file holding
+// @org/team. Folding MATCHING never folds output — the spelling that goes
+// back on the line comes from the file (R-38b) or, for a rename, from the op
+// (R-38d).
 func contains(list []string, s string) bool {
 	for _, x := range list {
-		if x == s {
+		if sameOwner(x, s) {
 			return true
 		}
 	}
@@ -1374,6 +1410,10 @@ func contains(list []string, s string) bool {
 }
 
 func containsStr(list []string, s string) bool { return contains(list, s) }
+
+// sameOwner is the identity applied to a pair (R-38a). One function decides it
+// for the whole repository: ops.FoldOwner.
+func sameOwner(a, b string) bool { return ops.FoldOwner(a) == ops.FoldOwner(b) }
 
 // substituteOwner replaces old with new IN PLACE, keeping every other owner
 // where it was.
@@ -1386,6 +1426,12 @@ func containsStr(list []string, s string) bool { return contains(list, s) }
 //
 // When new is ALREADY on the line the earliest position is kept and the other
 // dropped: `@a @b` under rename(@a → @b) is `@b`, not `@b @b`.
+//
+// Both comparisons are the identity's, not bytes' (R-38a/R-38d): the old name
+// is matched however either side spelled it, and a differently cased copy of
+// the NEW name is the same owner, so it collapses into the one written slot
+// rather than surviving beside it. The text written is `new` exactly as the op
+// spelled it — rename is the one verb whose purpose is to change the text.
 func substituteOwner(list []string, old, new string) []string {
 	if list == nil {
 		return nil
@@ -1397,16 +1443,16 @@ func substituteOwner(list []string, old, new string) []string {
 	done := false
 	for _, x := range list {
 		switch {
-		case x == old:
+		case sameOwner(x, old):
 			if done {
 				continue // old listed twice: the second is a duplicate either way
 			}
 			done = true
 			out = append(out, new)
-		case x == new && done:
+		case sameOwner(x, new) && done:
 			// Already emitted at the renamed owner's position; this later copy
 			// would be a duplicate.
-		case x == new && hasOld:
+		case sameOwner(x, new) && hasOld:
 			// new appears BEFORE old on this line: keep it here, and the old
 			// identifier's slot collapses when we reach it.
 			done = true
@@ -1418,13 +1464,105 @@ func substituteOwner(list []string, old, new string) []string {
 	return out
 }
 
+// The R-33 owner-set helpers. An op names a SET of owners, and every site that
+// used to read one name has to fold the whole set in ONE edit: looping the
+// single-owner path per owner reproduces the very defect the list exists to
+// fix, a second hunk whose old_line is the first hunk's new_line, describing a
+// file state that is on disk at no point in the run (R-33b).
+
+// keepFileSpelling renders `want` in want's order, substituting the spelling
+// `have` already uses for any owner the two share (R-38a/R-38b). It is how a
+// verb that rewrites a whole owner list avoids restyling the owners that were
+// not the point of the change.
+func keepFileSpelling(have, want []string) []string {
+	out := make([]string, 0, len(want))
+	for _, o := range want {
+		spelled := o
+		for _, h := range have {
+			if sameOwner(h, o) {
+				spelled = h
+				break
+			}
+		}
+		out = append(out, spelled)
+	}
+	return out
+}
+
+// ownersMissing returns the members of want, in want's order, that are absent
+// from have. Order is R-33e: the list fixes append order in the written line.
+func ownersMissing(have, want []string) []string {
+	var out []string
+	for _, o := range want {
+		if !contains(have, o) && !contains(out, o) {
+			out = append(out, o)
+		}
+	}
+	return out
+}
+
+// ownersPresent returns the members of want, in want's order, that ARE in have
+// — the owners a removal actually takes off this line, and so the ones its
+// message may truthfully name.
+func ownersPresent(have, want []string) []string {
+	var out []string
+	for _, o := range want {
+		if contains(have, o) && !contains(out, o) {
+			out = append(out, o)
+		}
+	}
+	return out
+}
+
+// minusAll is minus over a set: one pass, so a rule losing three owners is one
+// rewritten line rather than three (R-33b).
+func minusAll(list []string, drop []string) []string {
+	if list == nil {
+		return nil
+	}
+	out := make([]string, 0, len(list))
+	for _, x := range list {
+		if !contains(drop, x) {
+			out = append(out, x)
+		}
+	}
+	return out
+}
+
+// containsAny reports whether list holds any member of want.
+func containsAny(list, want []string) bool {
+	for _, o := range want {
+		if contains(list, o) {
+			return true
+		}
+	}
+	return false
+}
+
+// ownerArg renders an op's owner set the way the op string spells it, so a
+// message quoting the op back — `remove_owner(/docs/, @a)` — stays byte
+// identical for the single-owner form and names every owner for a list,
+// instead of printing the empty string Op.Owner now holds for these kinds.
+func ownerArg(owners []string) string {
+	if len(owners) == 1 {
+		return owners[0]
+	}
+	return "[" + strings.Join(owners, ", ") + "]"
+}
+
+// ownerNames renders owners as prose ("@a, @b"), for messages whose sentence
+// is about the owners themselves rather than about the op's syntax.
+func ownerNames(owners []string) string { return strings.Join(owners, ", ") }
+
+// minus drops every spelling of one owner (R-38c): a surviving spelling would
+// leave the owner a removal named still owning the path.
 func minus(list []string, s string) []string {
 	if list == nil {
 		return nil
 	}
 	out := make([]string, 0, len(list))
 	for _, x := range list {
-		if x != s {
+		if !sameOwner(x, s) {
 			out = append(out, x)
 		}
 	}

@@ -23,12 +23,19 @@ const (
 
 // Op is one parsed operation.
 type Op struct {
-	Kind     Kind     `json:"kind"`
-	Scope    string   `json:"scope,omitempty"`     // pattern text; empty for rename_owner
-	Owner    string   `json:"owner,omitempty"`     // add/remove target; rename old name
-	NewOwner string   `json:"new_owner,omitempty"` // rename new name
-	Owners   []string `json:"owners,omitempty"`    // set_owners exact set (non-nil, may be empty)
-	Raw      string   `json:"raw"`
+	Kind  Kind   `json:"kind"`
+	Scope string `json:"scope,omitempty"` // pattern text; empty for rename_owner
+	// Owner is rename_owner's OLD name and nothing else. add/remove/set all
+	// carry their targets in Owners, so no site can read a stale single value
+	// off an op that names several owners (R-33) — the field is simply not
+	// set for them.
+	Owner    string `json:"owner,omitempty"`
+	NewOwner string `json:"new_owner,omitempty"` // rename new name
+	// Owners is the target set for add_owner, remove_owner and set_owners:
+	// non-nil for all three, length >= 1 for add/remove (R-33d), possibly
+	// empty for set_owners, which is how "nobody owns this" is spelled.
+	Owners []string `json:"owners,omitempty"`
+	Raw    string   `json:"raw"`
 
 	// OnZeroMatch selects behavior when Scope matches zero tracked files:
 	// "" (== "require") | "require" | "skip" | "declare". The zero value
@@ -78,20 +85,31 @@ func Parse(s string) (Op, error) {
 
 	switch kind {
 	case AddOwner, RemoveOwner:
-		if len(args) != 2 {
-			return Op{}, fmt.Errorf("%s takes (scope, owner), got %d args", kind, len(args))
+		// A bare owner is one arg; a bracketed list arrives split on its own
+		// commas, so anything from args[1] on is part of it.
+		if len(args) < 2 {
+			return Op{}, fmt.Errorf("%s takes (scope, owner) or (scope, [owners]), got %d args", kind, len(args))
 		}
 		scope, excepts, err := parseScopeArg(args[0])
 		if err != nil {
 			return Op{}, err
 		}
+		op.Scope, op.Except = scope, excepts
 		if strings.HasPrefix(args[1], "[") {
-			return Op{}, fmt.Errorf("%s takes a single owner, not a list", kind)
+			owners, err := parseOwnerList(strings.Join(args[1:], ","), kind)
+			if err != nil {
+				return Op{}, err
+			}
+			op.Owners = owners
+			break
+		}
+		if len(args) != 2 {
+			return Op{}, fmt.Errorf("%s takes (scope, owner) or (scope, [owners]), got %d args", kind, len(args))
 		}
 		if !file.ValidOwnerToken(args[1]) {
 			return Op{}, fmt.Errorf("invalid owner token %q", args[1])
 		}
-		op.Scope, op.Except, op.Owner = scope, excepts, args[1]
+		op.Owners = []string{args[1]}
 	case SetOwners:
 		if len(args) < 2 || !strings.HasPrefix(args[1], "[") || !strings.HasSuffix(args[len(args)-1], "]") {
 			return Op{}, fmt.Errorf("set_owners takes (scope, [owners]) — the list brackets are required")
@@ -101,20 +119,26 @@ func Parse(s string) (Op, error) {
 			return Op{}, err
 		}
 		op.Scope, op.Except = scope, excepts
-		listStr := strings.TrimSpace(strings.Join(args[1:], ","))
-		listStr = strings.TrimSuffix(strings.TrimPrefix(listStr, "["), "]")
-		op.Owners = []string{}
-		for _, tok := range strings.FieldsFunc(listStr, func(r rune) bool { return r == ',' || r == ' ' || r == '\t' }) {
-			if !file.ValidOwnerToken(tok) {
-				return Op{}, fmt.Errorf("invalid owner token %q", tok)
-			}
-			op.Owners = append(op.Owners, tok)
+		// One grammar, every verb that names owners (R-33): a second copy
+		// here is how set_owners came to accept `[@org/a, @org/a]` a year
+		// after add_owner stopped, write it, and leave `verify` reporting a
+		// rollback-worthy invariant violation over a semantic no-op.
+		owners, err := parseOwnerList(strings.Join(args[1:], ","), kind)
+		if err != nil {
+			return Op{}, err
 		}
+		op.Owners = owners
 	case RenameOwner:
 		if len(args) != 2 {
 			return Op{}, fmt.Errorf("rename_owner takes (old, new), got %d args", len(args))
 		}
 		for _, a := range args {
+			// R-33f: a list on a rename has to be named as such. Falling
+			// through to `invalid owner token "[@b]"` sends the operator
+			// hunting a typo instead of learning the verb takes no list.
+			if strings.HasPrefix(a, "[") || strings.HasSuffix(a, "]") {
+				return Op{}, fmt.Errorf("rename_owner takes no list: it renames one owner to one owner (R-33f)")
+			}
 			// R-27.4: an except clause on a rename has to be named as such.
 			// Falling through to "invalid owner token \"@a except @b\"" would
 			// leave the operator hunting a typo in an owner name instead of
@@ -134,6 +158,84 @@ func Parse(s string) (Op, error) {
 		return Op{}, fmt.Errorf("unknown op %q (want add_owner, set_owners, remove_owner, rename_owner)", kind)
 	}
 	return op, nil
+}
+
+// parseOwnerList parses a bracketed owner list for every verb that names
+// owners (R-33): add_owner, remove_owner and set_owners all reach it, so one
+// grammar covers them and the claim is checked by the compiler rather than by
+// memory. It tolerates whitespace and a trailing comma, and adds the two
+// refusals a list makes possible and a single owner cannot: an empty list and
+// a repeated owner. Both are facts about the text alone, so both are exit 3 on
+// every repository rather than a per-repo refusal.
+//
+// The empty list is the one thing the verbs disagree about: set_owners(scope,
+// []) is how "nobody owns this" is spelled, while an empty add or remove
+// states no intent at all (R-33d).
+func parseOwnerList(listStr string, kind Kind) ([]string, error) {
+	listStr = strings.TrimSpace(listStr)
+	if !strings.HasPrefix(listStr, "[") || !strings.HasSuffix(listStr, "]") {
+		return nil, fmt.Errorf("%s owner list is not closed: want [@owner, @owner]", kind)
+	}
+	inner := listStr[1 : len(listStr)-1]
+	if strings.ContainsAny(inner, "[]") {
+		// Inherit set_owners' diagnosis: a stray bracket is a bad token, and
+		// the operator should read one sentence for that defect, not two.
+		return nil, fmt.Errorf("invalid owner token in %s owner list: brackets do not nest, want [@owner, @owner]", kind)
+	}
+	// Non-nil even when empty: set_owners(scope, []) means "nobody owns this",
+	// which is a stated intent, and a nil slice is how an op that names no
+	// owners at all would look.
+	owners := []string{}
+	seen := make(map[string]string)
+	for _, tok := range strings.FieldsFunc(inner, func(r rune) bool {
+		return r == ',' || r == ' ' || r == '\t'
+	}) {
+		if !file.ValidOwnerToken(tok) {
+			return nil, fmt.Errorf("invalid owner token %q", tok)
+		}
+		if prev, dup := seen[FoldOwner(tok)]; dup {
+			if prev == tok {
+				return nil, fmt.Errorf("duplicate owner %q in one %s list", tok, kind)
+			}
+			// Spelled differently, so both spellings are shown: an operator
+			// told only "duplicate owner @org/team" cannot see which of the
+			// two entries they wrote is the other one.
+			return nil, fmt.Errorf("duplicate owner: %q and %q are one owner in the same %s list — @handles are case-insensitive on GitHub", prev, tok, kind)
+		}
+		seen[FoldOwner(tok)] = tok
+		owners = append(owners, tok)
+	}
+	if len(owners) == 0 && kind != SetOwners {
+		// set_owners(scope, []) is legal and means "nobody owns this"; an
+		// empty add or remove states no intent at all, so it is a defect
+		// rather than a no-op that silently ships to a hundred repositories.
+		return nil, fmt.Errorf("%s has an empty owner list: name at least one owner, or delete the op", kind)
+	}
+	return owners, nil
+}
+
+// FoldOwner is THE identity under which two owner tokens are the same owner
+// (R-38a). @handles fold to lowercase (GitHub does); an email is left alone,
+// because the local part of an address is not ours to case-fold.
+//
+// Every comparison of two owners in this repository asks this function — add,
+// remove, rename's old name, set_owners, commutation and resolution — with no
+// site free to use its own. Byte equality is what let
+// `remove_owner(/x/, @ORG/TEAM)` report "unchanged" against a file holding
+// @org/team: a fleet run of "revoke the departed team" reported converged on
+// every repository that capitalised the handle.
+//
+// Folding governs MATCHING only, never output: the spelling on the line is
+// preserved (R-38b) and only `rename_owner` writes a new one (R-38d).
+//
+// internal/lint had a byte-identical unexported copy, which is where this
+// identity was first written down; it now calls this one. Two copies of an
+// identity is how they drift.
+func FoldOwner(o string) string {
+	if strings.HasPrefix(o, "@") {
+		return strings.ToLower(o)
+	}
+	return o
 }
 
 // ParseAll parses a batch, preserving order (R-8 conflict detection is the
@@ -330,6 +432,82 @@ func splitArgs(s string) []string {
 	return args
 }
 
+// WithExcept returns the op string s re-spelled with an except clause carrying
+// pats, and reports whether that clause survives the grammar's own splitting.
+//
+// R-37's `except` array is validated, applied and REPORTED as the `<scope>
+// except <pat> …` string it is equivalent to (R-37a), so this is the one place
+// that writes that string. A caller that spelled it one way to validate and
+// another to report is how an array-spelled op came to echo itself WITHOUT its
+// carve in the R-8 remedy: advice to run an op that displaces the owners the
+// carve existed to protect (adversarial-review finding).
+//
+// ok is false when the patterns cannot be carried by an op string at all, which
+// the caller must report in the operator's terms rather than by parsing the
+// mangled result: a pattern holding a comma re-splits as another ARGUMENT, and
+// the arity error that follows names an owner list nobody wrote. The check is
+// the round trip itself rather than a list of forbidden characters, because a
+// balanced character class is live pattern syntax (R-37c) and survives.
+//
+// s must be an op string Parse accepted, and must not already carry an except
+// clause; both spellings on one op are refused before this is reached (R-37b).
+func WithExcept(s string, pats []string) (string, bool) {
+	arg, start, end, ok := scopeArgSpan(s)
+	if !ok || len(pats) == 0 {
+		return "", false
+	}
+	out := s[:start] + arg + " except " + strings.Join(pats, " ") + s[end:]
+	gotArg, _, _, ok := scopeArgSpan(out)
+	if !ok {
+		return "", false
+	}
+	gotScope, gotPats, isExcept := splitExceptClause(gotArg)
+	if !isExcept || gotScope != arg || len(gotPats) != len(pats) {
+		return "", false
+	}
+	for i := range pats {
+		if gotPats[i] != pats[i] {
+			return "", false
+		}
+	}
+	return out, true
+}
+
+// scopeArgSpan returns an op string's first argument — the scope, or
+// rename_owner's old owner — and the byte range it occupies, split exactly as
+// Parse splits it. Offsets are into s as given: Parse trims before recording
+// Op.Raw, so a caller passing Raw gets offsets it can splice.
+func scopeArgSpan(s string) (arg string, start, end int, ok bool) {
+	open := strings.IndexByte(s, '(')
+	if open < 0 || !strings.HasSuffix(s, ")") {
+		return "", 0, 0, false
+	}
+	body := s[open+1 : len(s)-1]
+	depth, cut := 0, -1
+	for i, r := range body {
+		switch r {
+		case '[':
+			depth++
+		case ']':
+			depth--
+		case ',':
+			if depth == 0 && cut < 0 {
+				cut = i
+			}
+		}
+	}
+	if cut < 0 {
+		// Every verb takes at least two arguments, so an op string with no
+		// top-level comma has already lost one of them to a bracket.
+		return "", 0, 0, false
+	}
+	raw := body[:cut]
+	trimmed := trimArg(raw)
+	lead := len(raw) - len(strings.TrimLeft(raw, " \t"))
+	start = open + 1 + lead
+	return trimmed, start, start + len(trimmed), true
+}
+
 // StaticConflict reports a pair of ops whose order changes the outcome, decided
 // from the op strings alone with no tree.
 //
@@ -461,8 +639,14 @@ func exceptsContain(excepts []string, scope string) bool {
 //	add(x)    ∘ remove(y)  iff x ≠ y; otherwise one order keeps x and the other drops it
 //	remove(x) ∘ remove(y)  always
 //	set(L)    ∘ set(M)     iff L and M are the same set; otherwise the last one wins
-//	set(L)    ∘ add(x)     iff x ∈ L — set-then-add yields L ∪ {x}, add-then-set yields L
-//	set(L)    ∘ remove(x)  iff x ∉ L — set-then-remove yields L \ {x}, remove-then-set yields L
+//	set(L)    ∘ add(A)     iff A ⊆ L — set-then-add yields L ∪ A, add-then-set yields L
+//	set(L)    ∘ remove(A)  iff A ∩ L = ∅ — set-then-remove yields L \ A, remove-then-set yields L
+//	add(A)    ∘ remove(B)  iff A ∩ B = ∅
+//
+// Every case is set-valued because one op may name several owners (R-33).
+// Reading a single owner field here silently degraded to comparing "" with "",
+// which made every provably-overlapping pair look order-dependent and refused
+// correct batches at exit 3.
 func commutes(a, b Op) bool {
 	// Order the pair so each case is written once.
 	if b.Kind == SetOwners && a.Kind != SetOwners {
@@ -474,18 +658,18 @@ func commutes(a, b Op) bool {
 		case SetOwners:
 			return sameOwnerSet(a.Owners, b.Owners)
 		case AddOwner:
-			return containsOwner(a.Owners, b.Owner)
+			return ownersSubset(b.Owners, a.Owners)
 		case RemoveOwner:
-			return !containsOwner(a.Owners, b.Owner)
+			return ownersDisjoint(a.Owners, b.Owners)
 		}
 	case AddOwner:
 		if b.Kind == RemoveOwner {
-			return a.Owner != b.Owner
+			return ownersDisjoint(a.Owners, b.Owners)
 		}
 		return true // add ∘ add
 	case RemoveOwner:
 		if b.Kind == AddOwner {
-			return a.Owner != b.Owner
+			return ownersDisjoint(a.Owners, b.Owners)
 		}
 		return true // remove ∘ remove
 	}
@@ -495,17 +679,39 @@ func commutes(a, b Op) bool {
 	return false
 }
 
+// ownersSubset reports whether every owner in sub appears in super.
+func ownersSubset(sub, super []string) bool {
+	for _, o := range sub {
+		if !containsOwner(super, o) {
+			return false
+		}
+	}
+	return true
+}
+
+// ownersDisjoint reports whether two owner lists share no member.
+func ownersDisjoint(x, y []string) bool {
+	for _, o := range x {
+		if containsOwner(y, o) {
+			return false
+		}
+	}
+	return true
+}
+
 // sameOwnerSet compares two owner lists as SETS: order carries no meaning to
 // GitHub, and two set_owners naming the same teams in different orders are the
-// same intent.
+// same intent. Membership is FoldOwner's (R-38a), so `[@Org/Team]` and
+// `[@org/team]` are the same set — otherwise set ∘ set would be called
+// order-dependent over one owner spelled two ways.
 func sameOwnerSet(x, y []string) bool {
 	seen := map[string]bool{}
 	for _, o := range x {
-		seen[o] = true
+		seen[FoldOwner(o)] = true
 	}
 	other := map[string]bool{}
 	for _, o := range y {
-		other[o] = true
+		other[FoldOwner(o)] = true
 	}
 	if len(seen) != len(other) {
 		return false
@@ -518,9 +724,13 @@ func sameOwnerSet(x, y []string) bool {
 	return true
 }
 
+// containsOwner asks FoldOwner, not byte equality: commutation is a comparison
+// of two owners, so an add and a remove of one owner spelled two ways must not
+// look disjoint — one order leaves the owner on the line and the other does
+// not, which is exactly the batch R-8 exists to refuse (R-38a).
 func containsOwner(list []string, s string) bool {
 	for _, x := range list {
-		if x == s {
+		if FoldOwner(x) == FoldOwner(s) {
 			return true
 		}
 	}

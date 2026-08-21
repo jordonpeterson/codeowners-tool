@@ -63,6 +63,13 @@ func Load(path string) (*Snapshot, error) {
 // violation (INV-2 from raw data). With no scopes, ANY change is a violation.
 // A scope that fails to compile is a hard error — silently dropping it would
 // misreport which changes are in scope (found in review).
+//
+// "Same owners" is R-38a's identity throughout: resolve.OwnersEqual compares
+// members under ops.FoldOwner, and each side is canonicalised first because a
+// snapshot is a FILE, written by any version of this tool or by hand — one
+// that lists `@org/team` beside `@Org/Team` names one owner, and reporting the
+// path as changed against a snapshot that lists it once would fail a rollout
+// over a difference nobody's access reflects.
 func Compare(before, after *Snapshot, scopes []string) (*Result, error) {
 	var pats []*pattern.Pattern
 	for _, s := range scopes {
@@ -98,6 +105,7 @@ func Compare(before, after *Snapshot, scopes []string) (*Result, error) {
 	for _, p := range sorted {
 		b, bok := before.Ownership[p]
 		a, aok := after.Ownership[p]
+		b, a = resolve.CanonicalOwners(b), resolve.CanonicalOwners(a)
 		if bok && aok && resolve.OwnersEqual(b, a) {
 			continue
 		}

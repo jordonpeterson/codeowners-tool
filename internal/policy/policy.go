@@ -37,8 +37,13 @@ const MaxPolicyBytes = 1 << 20
 // the top and meaningless on an op; accepting it in both places would let a
 // generator put the policy's description on op 17 and nothing would notice.
 var (
-	topFields = []string{"version", "name", "description", "on_empty", "max_paths_changed", "ops"}
-	opFields  = []string{"op", "id", "on_zero_match", "on_except_zero_match", "note"}
+	topFields = []string{"version", "name", "description", "create", "on_empty", "max_paths_changed", "defaults", "lint", "ops"}
+	opFields  = []string{"op", "id", "on_zero_match", "on_except_zero_match", "except", "note"}
+	// `defaults` carries the two genuinely PER-OP settings and nothing else
+	// (R-35c). on_empty is one policy for the run and stays top-level: two
+	// spellings of one setting is a precedence rule nobody wrote down.
+	defaultsFields = []string{"on_zero_match", "on_except_zero_match"}
+	lintFields     = []string{"remove_stale_paths", "on_empty"}
 )
 
 // The two enums, in the order the docs present them. Alphabetizing a legal set
@@ -74,8 +79,36 @@ type Policy struct {
 	// thousands" is a claim about the intent, and a ceiling that lives in a
 	// shell line survives exactly as long as that shell line.
 	MaxPathsChanged int
-	Ops             []ops.Op
-	Notes           map[string]string // op ID -> note
+	// Create is R-34: the reviewed artifact, not a flag, decides whether a
+	// repository without a CODEOWNERS file gets one. R-23 still holds, so an
+	// existing file is never overwritten and this is safe to leave true for a
+	// fleet where only some repositories have a file.
+	Create bool
+	// Defaults is R-35, supplying the per-op settings an op does not state.
+	// It reaches only ops that can carry the setting (R-35e).
+	Defaults Defaults
+	// Lint is R-36. sync does not act on it, but every command validates it
+	// (R-36e): a malformed block that only surfaced when someone ran lint
+	// would be a defect riding through the whole fleet unseen.
+	Lint  LintPrefs
+	Ops   []ops.Op
+	Notes map[string]string // op ID -> note
+}
+
+// Defaults carries the per-op settings a policy states once (R-35). Only
+// settings that are genuinely per-op belong here: on_empty stays top-level
+// because it is one policy for the run, and two spellings for one setting is
+// the ambiguity R-35c exists to remove.
+type Defaults struct {
+	OnZeroMatch       string
+	OnExceptZeroMatch string
+}
+
+// LintPrefs mirrors lint's flags so the repair policy is reviewed in the same
+// artifact as the ownership policy (R-36).
+type LintPrefs struct {
+	RemoveStalePaths bool
+	OnEmpty          string
 }
 
 // Error is one located problem in a policy file.
@@ -244,8 +277,17 @@ func (v *validator) policy(root *jsonValue) *Policy {
 	v.version(p, fields["version"], root.off)
 	p.Name = v.optString(fields["name"], "name", -1, "")
 	p.Description = v.optString(fields["description"], "description", -1, "")
+	v.create(p, fields["create"])
 	v.onEmpty(p, fields["on_empty"])
 	v.maxPathsChanged(p, fields["max_paths_changed"])
+	// Before the ops: the block supplies what an op does not state, so it has
+	// to be resolved by the time each op is built (R-35a).
+	v.defaults(p, fields["defaults"])
+	// R-36e: validated on every command, including the ones that never act on
+	// it. "Ignores" means does not act on, never does not validate — a defect
+	// that surfaces only when somebody happens to run the other command is the
+	// fleet-scale failure exit 3 exists to prevent.
+	v.lint(p, fields["lint"])
 	infos := v.opsArray(p, fields["ops"], root.off)
 	v.checkDuplicateIDs(infos)
 	v.checkOnEmptyRequired(fields["on_empty"] != nil, infos)
@@ -350,9 +392,147 @@ func (v *validator) maxPathsChanged(p *Policy, m *member) {
 	}
 }
 
+// create validates R-34's boolean. A wrong type is a policy error like any
+// other: a baseline whose `create` is the STRING "false" would otherwise turn a
+// fleet-wide "off" into whatever a non-empty string coerces to, and the message
+// has to name the TYPE — "unknown field" and "wrong type" send the operator to
+// different edits.
+func (v *validator) create(p *Policy, m *member) {
+	if m == nil {
+		return
+	}
+	val := m.val
+	if val.kind != kBool {
+		v.at(val.off, -1, "", `field "create" must be a boolean, got %s; write true or false — whether a repository without a CODEOWNERS gets one is a decision the reviewed artifact makes (R-34)`, val.describe())
+		return
+	}
+	p.Create = val.b
+}
+
+// defaults validates R-35's block: the per-op settings a policy states once so
+// a 40-op baseline is 40 strings rather than 40 objects.
+//
+// An empty block is LEGAL and states nothing — deliberately not the treatment
+// `"on_zero_match": ""` gets. The strict-parse rule bites where a spelling
+// states a decision that was never made; `{}` states no default for anything,
+// and rejecting it would fail every repo for a generator that emits the key
+// unconditionally and fills it only sometimes.
+func (v *validator) defaults(p *Policy, m *member) {
+	if m == nil {
+		return
+	}
+	val := m.val
+	if val.kind != kObject {
+		v.at(val.off, -1, "", `field "defaults" must be an object holding the per-op settings this policy states once, like {"on_zero_match": "skip"}, got %s`, val.describe())
+		return
+	}
+	for _, f := range val.members {
+		if ignoredKey(f.key) {
+			continue
+		}
+		switch f.key {
+		case "on_zero_match":
+			if s, ok := v.zeroMatch(f, -1, ""); ok {
+				p.Defaults.OnZeroMatch = s
+			}
+		case "on_except_zero_match":
+			if s, ok := v.exceptZeroMatch(f, -1, ""); ok {
+				p.Defaults.OnExceptZeroMatch = s
+			}
+		default:
+			v.unknownDefaultsField(f)
+		}
+	}
+}
+
+// unknownDefaultsField names the offending key AND the set the block accepts.
+// A typo'd default is not "no default", it is the WRONG default applied to
+// every op in the policy at once, so this is the higher-stakes place to get an
+// enum or a field name wrong — it cannot be the place with the weaker message.
+func (v *validator) unknownDefaultsField(m *member) {
+	if m.key == "on_empty" {
+		// R-35c. "on_empty" is a real top-level field, so the message must say
+		// where it belongs rather than merely that it is unknown here.
+		v.at(m.keyOff, -1, "", `field "on_empty" is not a per-op default: it is one policy for the whole run and stays at the TOP level of the file, and two spellings of one setting is the ambiguity this format exists to remove (R-35c) — "defaults" accepts %s`,
+			list(defaultsFields))
+		return
+	}
+	if contains(opFields, m.key) {
+		v.at(m.keyOff, -1, "", `unknown field %q in "defaults": %q is an op field, and only settings that are genuinely per-op can be defaulted; "defaults" accepts %s`,
+			m.key, m.key, list(defaultsFields))
+		return
+	}
+	v.at(m.keyOff, -1, "", `unknown field %q in "defaults"%s; "defaults" accepts %s`, m.key, hint(m.key, defaultsFields), list(defaultsFields))
+}
+
+// lint validates R-36's block, which lets the repair policy be reviewed in the
+// same committed artifact as the ownership policy. `sync` does not act on it
+// and validates it anyway (R-36e).
+func (v *validator) lint(p *Policy, m *member) {
+	if m == nil {
+		return
+	}
+	val := m.val
+	if val.kind != kObject {
+		v.at(val.off, -1, "", `field "lint" must be an object holding lint's preferences, like {"remove_stale_paths": true}, got %s`, val.describe())
+		return
+	}
+	for _, f := range val.members {
+		if ignoredKey(f.key) {
+			continue
+		}
+		switch f.key {
+		case "remove_stale_paths":
+			if f.val.kind != kBool {
+				v.at(f.val.off, -1, "", `field "remove_stale_paths" in the "lint" block must be a boolean, got %s; write true or false — deleting rules whose pattern matches nothing is opt-in (R-11)`, f.val.describe())
+				continue
+			}
+			p.Lint.RemoveStalePaths = f.val.b
+		case "on_empty":
+			p.Lint.OnEmpty = v.lintOnEmpty(f)
+		default:
+			v.unknownLintField(f)
+		}
+	}
+}
+
+// lintOnEmpty is R-6's question asked of the lint block. Same enum and same
+// present-but-empty refusal as the top-level field: an ABSENT value leaves
+// lint with no policy (and it refuses to guess), while "" states no decision
+// at all while reading to a reviewer as though one was made.
+func (v *validator) lintOnEmpty(m *member) string {
+	val := m.val
+	switch {
+	case val.kind != kString:
+		v.at(val.off, -1, "", `field "on_empty" in the "lint" block must be a string, got %s; legal values are %s`, val.describe(), list(onEmptyValues))
+	case val.str == "":
+		v.at(val.off, -1, "", `field "on_empty" in the "lint" block is present but empty; omitting it leaves lint with no R-6 policy, while "" states no decision at all — legal values are %s`, list(onEmptyValues))
+	case !contains(onEmptyValues, val.str):
+		v.at(val.off, -1, "", `field "on_empty" in the "lint" block has unknown value %q%s; legal values are %s`, val.str, hint(val.str, onEmptyValues), list(onEmptyValues))
+	default:
+		return val.str
+	}
+	return ""
+}
+
+func (v *validator) unknownLintField(m *member) {
+	if contains(topFields, m.key) || contains(opFields, m.key) {
+		v.at(m.keyOff, -1, "", `unknown field %q in "lint": %q belongs to the ownership half of the policy, and the field sets are per level rather than one merged bag; "lint" accepts %s`,
+			m.key, m.key, list(lintFields))
+		return
+	}
+	v.at(m.keyOff, -1, "", `unknown field %q in "lint"%s; "lint" accepts %s`, m.key, hint(m.key, lintFields), list(lintFields))
+}
+
 func (v *validator) opsArray(p *Policy, m *member, rootOff int) []opInfo {
 	if m == nil {
-		v.at(rootOff, -1, "", `missing required field "ops"; a policy with no ops does nothing on every repo and exits 0 on all of them, which is the silent success this format exists to make impossible`)
+		// True of whichever command is running. `lint --policy` reads the same
+		// artifact, and a file carrying only a `lint` block fully specifies a
+		// lint run — so a refusal claiming the file "does nothing" was simply
+		// false there, and sent its author to add a dummy op that `sync` then
+		// applies (adversarial-review finding). What is true for every caller
+		// is the pairing: one file, one verdict (R-36c/R-36e).
+		v.at(rootOff, -1, "", `missing required field "ops"; one policy file is read by every command, so it has to state the ownership policy the rest of it is paired with (R-36c) — without "ops", `+"`sync --policy`"+` would apply nothing to every repository and exit 0 on all of them, the silent success this format exists to make impossible. A file whose only intent is a `+"`lint`"+` block has no separate spelling: state the ops the repair rides with`)
 		return nil
 	}
 	val := m.val
@@ -384,7 +564,7 @@ func (v *validator) op(p *Policy, i int, e *jsonValue) opInfo {
 	info := opInfo{index: i, off: e.off, idOff: e.off}
 
 	spec, specOff := "", e.off
-	var zeroM, exceptM *member
+	var zeroM, exceptM, exceptArrM *member
 	note := ""
 
 	switch e.kind {
@@ -415,6 +595,8 @@ func (v *validator) op(p *Policy, i int, e *jsonValue) opInfo {
 				zeroM = m
 			case "on_except_zero_match":
 				exceptM = m
+			case "except":
+				exceptArrM = m
 			case "note":
 				note = v.optString(m, "note", i, info.id)
 			default:
@@ -456,10 +638,27 @@ func (v *validator) op(p *Policy, i int, e *jsonValue) opInfo {
 	}
 	info.kind, info.parsed = parsed.Kind, true
 
+	// Before every legality check below: the array spelling is the same fact
+	// as the string one (R-37a), so R-30 and R-27.6 must see the excepts it
+	// carries.
+	exceptArrOK := true
+	if exceptArrM != nil {
+		exceptArrOK = v.exceptArray(&parsed, exceptArrM, i, info.id)
+	}
+
 	if zeroM != nil {
 		v.checkZeroMatchLegality(zeroM, parsed.Kind, zero, i, info.id)
 	}
-	v.checkExceptLegality(zeroM, exceptM, parsed, zero, i, info.id)
+	v.checkExceptLegality(zeroM, exceptM, parsed, zero, exceptArrOK, i, info.id)
+
+	// R-35a/R-35e: the block fills in only what this op did not state, and only
+	// where this op can carry it.
+	if zeroM == nil && p.Defaults.OnZeroMatch != "" && zeroMatchReaches(parsed, p.Defaults.OnZeroMatch) {
+		zero = p.Defaults.OnZeroMatch
+	}
+	if exceptM == nil && p.Defaults.OnExceptZeroMatch != "" && len(parsed.Except) > 0 {
+		exceptZero = p.Defaults.OnExceptZeroMatch
+	}
 
 	parsed.ID = info.id
 	if zeroOK {
@@ -479,6 +678,212 @@ func (v *validator) op(p *Policy, i int, e *jsonValue) opInfo {
 		p.Notes[OpLabel(info.id, i)] = note
 	}
 	return info
+}
+
+// exceptArray decodes R-37's `except` array onto an op that has already
+// parsed, and then routes it through the STRING spelling's own validation by
+// re-spelling the op with the clause attached and re-parsing it.
+//
+// Re-parsing rather than re-checking is the point: R-37a promises the two
+// spellings are equivalent in every respect, and a second copy of the R-27
+// checks here is exactly how the two would drift — the array would keep
+// accepting a duplicate pattern a year after the string form stopped. The op
+// re-spelled is the REAL one, not a stand-in: it is what the op then reports
+// itself as (R-37e), and rename_owner still comes back with "rename_owner
+// takes no scope" because the clause lands on the argument it does have
+// (R-27.4).
+//
+// The three refusals before that are the ones the round trip cannot state for
+// itself, each an adversarial-review finding: an element escaped for a
+// delimiter the array does not have, an element the op string cannot carry at
+// all, and an element whose trailing backslash would swallow the next one.
+// Each is refused in the operator's terms, because parsing the mangled string
+// instead produces a message about a construct nobody wrote.
+func (v *validator) exceptArray(parsed *ops.Op, m *member, i int, id string) (ok bool) {
+	val := m.val
+	if len(parsed.Except) > 0 {
+		v.at(val.off, i, id, `this op carries an except clause in its op string AND an "except" array; one intent, one place (R-37b) — keep either the `+"`<scope> except <pat> …`"+` spelling or the array, not both`)
+		return false
+	}
+	if val.kind != kArray {
+		v.at(val.off, i, id, `field "except" must be an array of patterns like ["/x/gen/"], got %s (R-37a)`, val.describe())
+		return false
+	}
+	if len(val.elems) == 0 {
+		v.at(val.off, i, id, `field "except" is an empty array; state no "except" at all rather than an empty one (R-37d) — a generator emitting [] when it has nothing to carve is asking for the broad grant with no carve-out`)
+		return false
+	}
+	pats := make([]string, 0, len(val.elems))
+	for n, el := range val.elems {
+		if el.kind != kString {
+			v.at(el.off, i, id, `field "except" element %d must be a string, got %s`, n, el.describe())
+			return false
+		}
+		// "" and not TrimSpace: an element holding a space is not empty, and
+		// the string spelling accepts `except \ ` — one input landing in two
+		// exit classes depending on spelling is the asymmetry R-37a forbids.
+		if el.str == "" {
+			v.at(el.off, i, id, `field "except" element %d is empty; every except pattern names paths, and "" names none (R-37)`, n)
+			return false
+		}
+		if preEscaped(el.str) {
+			v.at(el.off, i, id, `field "except" element %d is already escaped for a delimiter this array does not have: %q (R-37c). The array is not delimited, so an element IS the path — write it literally, as %q. Escaped again it names a different path: a backslash is the pattern language's own escape, so this text carries a literal backslash followed by a bare space, and the bare space then splits one pattern into two`,
+				n, el.str, literalExceptPattern(el.str))
+			return false
+		}
+		pat := escapeExceptPattern(el.str)
+		if _, ok := ops.WithExcept(parsed.Raw, []string{pat}); !ok {
+			v.at(el.off, i, id, `field "except" element %d cannot be carried by an op string: %q contains %s, and an op is one string — a comma separates its arguments and brackets bound its owner list — so this pattern would be read as part of another argument rather than as a path. The `+"`<scope> except <pat> …`"+` spelling cannot express this path either (R-37c); carve a directory that contains it instead`,
+				n, el.str, uncarryableChars(el.str))
+			return false
+		}
+		pats = append(pats, pat)
+	}
+	spelled, ok := ops.WithExcept(parsed.Raw, pats)
+	if !ok {
+		// Every element carries on its own, so what broke is the JOIN: a
+		// trailing backslash escapes the space in front of the next pattern
+		// and the two are read as one — a pattern for a path that exists
+		// nowhere, carving neither of the two the operator named.
+		n, el := danglingElement(val.elems)
+		if el == "" {
+			v.at(val.off, i, id, `the "except" array cannot be written as one clause; the patterns do not survive being spelled as `+"`<scope> except <pat> …`"+` (R-37c)`)
+			return false
+		}
+		v.at(val.elems[n].off, i, id, `field "except" element %d ends with a backslash: %q. The clause is one string, so that backslash escapes the space separating this pattern from the next and the two would be read as a single pattern (R-37c: a backslash is the pattern language's own escape) — drop it, or escape the backslash itself`,
+			n, el)
+		return false
+	}
+	re, err := ops.Parse(spelled)
+	if err != nil {
+		v.at(val.off, i, id, `the "except" array is not valid: %v (R-37a: the array is validated exactly as the `+"`<scope> except <pat> …`"+` spelling it is equivalent to)`, err)
+		return false
+	}
+	parsed.Except = re.Except
+	// R-37e: the op reports itself as the intent that was REVIEWED. Every
+	// report echoes Raw — the R-8 remedy, the sync record's ops[].op, the
+	// --summary-out table, plan.Plan.Ops — and an echo without the carve told
+	// one operator to run a set_owners that displaces the very subtree the
+	// carve protected.
+	parsed.Raw = re.Raw
+	return true
+}
+
+// preEscaped reports whether s escapes whitespace for a delimiter the array
+// does not have: a space or tab preceded by an ODD number of backslashes.
+//
+// Parity, not "contains a backslash". `my\ dir/` is an escape of the space and
+// so is pre-escaped, while `my\\ dir/` is an escaped backslash followed by a
+// REAL space — a path whose name contains a backslash, legitimately spelled,
+// and a different path.
+func preEscaped(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] != ' ' && s[i] != '\t' {
+			continue
+		}
+		bs := 0
+		for j := i - 1; j >= 0 && s[j] == '\\'; j-- {
+			bs++
+		}
+		if bs%2 == 1 {
+			return true
+		}
+	}
+	return false
+}
+
+// literalExceptPattern removes the delimiter escaping from a pre-escaped
+// element, so the refusal can show the spelling its author meant. Exactly one
+// backslash comes off each odd run, which is what makes `my\\\ dir/` suggest
+// `my\\ dir/` — the path with a backslash in its name — rather than dropping
+// the name's own character.
+func literalExceptPattern(s string) string {
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		if s[i] == '\\' && i+1 < len(s) && (s[i+1] == ' ' || s[i+1] == '\t') {
+			continue
+		}
+		b.WriteByte(s[i])
+	}
+	return b.String()
+}
+
+// uncarryableChars names the characters that cost a pattern its round trip, so
+// the refusal can say which one the operator has to deal with. It is asked
+// only after the round trip has already failed: a comma inside a balanced
+// character class survives, and R-37c keeps `[` live pattern syntax.
+func uncarryableChars(pat string) string {
+	var names []string
+	if strings.Contains(pat, ",") {
+		names = append(names, "a comma")
+	}
+	if strings.ContainsAny(pat, "[]") {
+		names = append(names, "a bracket")
+	}
+	switch len(names) {
+	case 0:
+		return "a character an op string cannot carry"
+	case 1:
+		return names[0]
+	default:
+		return strings.Join(names[:len(names)-1], ", ") + " and " + names[len(names)-1]
+	}
+}
+
+// danglingElement finds the first element whose trailing backslash run is odd,
+// which is the one that swallows the pattern after it.
+func danglingElement(elems []*jsonValue) (int, string) {
+	for n, el := range elems {
+		bs := 0
+		for j := len(el.str) - 1; j >= 0 && el.str[j] == '\\'; j-- {
+			bs++
+		}
+		if bs%2 == 1 {
+			return n, el.str
+		}
+	}
+	return 0, ""
+}
+
+// escapeExceptPattern converts one array element into the pattern text the
+// string grammar would carry.
+//
+// The array drops the DELIMITER, and with it only the escaping the delimiter
+// forced: `"my dir/"` is one pattern (R-37c). Everything else is still pattern
+// syntax — `*`, `?` and `[` keep their meaning, or the array would be a list of
+// literal paths rather than the same patterns spelled without a separator.
+//
+// Escaping every space is correct only because preEscaped has already refused
+// an element that escaped one itself: adding a backslash to an odd run turns
+// an escaped space into a literal backslash and a BARE space, which the string
+// grammar splits into two patterns.
+func escapeExceptPattern(s string) string {
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		if s[i] == ' ' || s[i] == '\t' {
+			b.WriteByte('\\')
+		}
+		b.WriteByte(s[i])
+	}
+	return b.String()
+}
+
+// zeroMatchReaches is R-35e for on_zero_match: a default is applied only to ops
+// that CAN carry it, so a baseline stating one value and happening to contain
+// one rename is not rejected on every repo — with the operator's only route
+// back being to expand the block into 40 per-op values. The conditions are the
+// legality table itself (checkZeroMatchLegality and R-30), read as a question
+// rather than as a refusal.
+func zeroMatchReaches(op ops.Op, val string) bool {
+	switch {
+	case op.Kind == ops.RenameOwner:
+		return false
+	case val == ops.ZeroMatchDeclare && op.Kind == ops.RemoveOwner:
+		return false
+	case val == ops.ZeroMatchDeclare && len(op.Except) > 0:
+		return false
+	}
+	return true
 }
 
 // zeroMatch validates the R-21 enum. It reports whether the value is usable, so
@@ -565,12 +970,15 @@ func (v *validator) exceptZeroMatch(m *member, i int, id string) (string, bool) 
 //     governs an except pattern that matched nothing; on an op without one it
 //     can never apply, and accepting-and-ignoring it is the same class of
 //     failure as a typo'd field name.
-func (v *validator) checkExceptLegality(zeroM, exceptM *member, parsed ops.Op, zero string, i int, id string) {
+func (v *validator) checkExceptLegality(zeroM, exceptM *member, parsed ops.Op, zero string, exceptArrOK bool, i int, id string) {
 	if zeroM != nil && zero == ops.ZeroMatchDeclare && len(parsed.Except) > 0 {
 		v.at(zeroM.val.off, i, id, `on_zero_match %q cannot be combined with an except clause: a declared rule is one literal CODEOWNERS line, and CODEOWNERS has no negation (S-2), so the line cannot encode subtraction (R-30) — split the carve into its own op or drop the declare`,
 			ops.ZeroMatchDeclare)
 	}
-	if exceptM != nil && len(parsed.Except) == 0 {
+	// exceptArrOK: an op whose `except` array was refused has no parsed carve,
+	// and reporting on_except_zero_match as inapplicable there tells the
+	// operator to remove the one field that is not the defect.
+	if exceptM != nil && exceptArrOK && len(parsed.Except) == 0 {
 		v.at(exceptM.val.off, i, id, `field "on_except_zero_match" is set, but this op has no except clause, so the field can never apply — remove it, or add `+"`except <pat>`"+` to the scope (R-27)`)
 	}
 }

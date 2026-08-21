@@ -45,6 +45,7 @@ import (
 
 	"github.com/jordonpeterson/codeowners-tool/internal/file"
 	"github.com/jordonpeterson/codeowners-tool/internal/ghapi"
+	"github.com/jordonpeterson/codeowners-tool/internal/ops"
 	"github.com/jordonpeterson/codeowners-tool/internal/pattern"
 	"github.com/jordonpeterson/codeowners-tool/internal/plan"
 	"github.com/jordonpeterson/codeowners-tool/internal/resolve"
@@ -566,7 +567,7 @@ func Build(content []byte, tree []string, v Verifier, opts Options) (*Result, er
 			// Keyed by the folded spelling for the same reason the lookup is:
 			// two capitalisations of one dead team must both go, and a file
 			// that names it both ways must not keep one of them.
-			dead[foldOwner(o)] = reason
+			dead[ops.FoldOwner(o)] = reason
 		}
 	}
 	// R-12, applied to the whole run rather than to one owner. Partial
@@ -653,11 +654,13 @@ func Build(content []byte, tree []string, v Verifier, opts Options) (*Result, er
 		var removed, keep []string
 		seenRemoved := map[string]bool{}
 		for _, o := range r.Owners {
-			if _, isDead := dead[foldOwner(o)]; isDead {
+			if _, isDead := dead[ops.FoldOwner(o)]; isDead {
 				// One action per owner, not per mention: a line naming the same
-				// dead team twice is still one owner going away.
-				if !seenRemoved[o] {
-					seenRemoved[o] = true
+				// dead team twice is still one owner going away — and two
+				// spellings of it are one owner too (R-38a), so the key is the
+				// folded one.
+				if !seenRemoved[ops.FoldOwner(o)] {
+					seenRemoved[ops.FoldOwner(o)] = true
 					removed = append(removed, o)
 				}
 			} else {
@@ -754,7 +757,7 @@ func Build(content []byte, tree []string, v Verifier, opts Options) (*Result, er
 	// reviewer a name that goes nowhere), and no owner may be invented.
 	for _, r := range afterFile.Rules() {
 		for _, o := range r.Owners {
-			if _, isDead := dead[foldOwner(o)]; isDead {
+			if _, isDead := dead[ops.FoldOwner(o)]; isDead {
 				violations = append(violations, fmt.Sprintf("line %d still lists %s, which does not exist", r.LineIndex+1, o))
 			}
 			if !known[o] && !file.IsEmailOwner(o) {
@@ -976,7 +979,7 @@ func withoutDead(owners []string, dead map[string]string) []string {
 	}
 	out := make([]string, 0, len(owners))
 	for _, o := range owners {
-		if _, isDead := dead[foldOwner(o)]; !isDead {
+		if _, isDead := dead[ops.FoldOwner(o)]; !isDead {
 			out = append(out, o)
 		}
 	}
@@ -985,21 +988,11 @@ func withoutDead(owners []string, dead map[string]string) []string {
 
 func anyDead(owners []string, dead map[string]string) bool {
 	for _, o := range owners {
-		if _, isDead := dead[foldOwner(o)]; isDead {
+		if _, isDead := dead[ops.FoldOwner(o)]; isDead {
 			return true
 		}
 	}
 	return false
-}
-
-// foldOwner is the identity under which two owner tokens are the same owner.
-// @handles fold to lowercase (GitHub does); an email is left alone, because
-// the local part of an address is not ours to case-fold.
-func foldOwner(o string) string {
-	if strings.HasPrefix(o, "@") {
-		return strings.ToLower(o)
-	}
-	return o
 }
 
 func appendUnique(list []string, s string) []string {

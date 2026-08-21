@@ -117,7 +117,10 @@ func TestT4_Property_InvariantsHold(t *testing.T) {
 			}
 			switch op.Kind {
 			case ops.AddOwner:
-				want := union(b, op.Owner)
+				want := b
+				for _, o := range op.Owners {
+					want = union(want, o)
+				}
 				if !ownersEq(a, want) {
 					t.Fatalf("case %d: INV-1 add: path %s: %v -> %v, want %v\nfile:\n%s\nop: %s\nresult:\n%s",
 						i, path, b, a, want, content, opSpec, p.AfterContent)
@@ -128,9 +131,14 @@ func TestT4_Property_InvariantsHold(t *testing.T) {
 						i, path, a, op.Owners, content, opSpec, p.AfterContent)
 				}
 			case ops.RemoveOwner:
-				if has(a, op.Owner) {
-					t.Fatalf("case %d: INV-1 remove: %s still owns %s\nfile:\n%s\nop: %s\nresult:\n%s",
-						i, op.Owner, path, content, opSpec, p.AfterContent)
+				// Every owner the op names, not one: has(a, "") is always
+				// false, so reading the retired single-owner field here would
+				// pass this property vacuously on every generated case.
+				for _, o := range op.Owners {
+					if has(a, o) {
+						t.Fatalf("case %d: INV-1 remove: %s still owns %s\nfile:\n%s\nop: %s\nresult:\n%s",
+							i, o, path, content, opSpec, p.AfterContent)
+					}
 				}
 			case ops.RenameOwner:
 				if has(a, op.Owner) {

@@ -171,7 +171,10 @@ func TestR20_MinimalPolicyParses(t *testing.T) {
 	if len(p.Ops) != 2 {
 		t.Fatalf("Ops = %+v, want 2 ops", p.Ops)
 	}
-	if p.Ops[0].Kind != ops.AddOwner || p.Ops[0].Scope != "/services/api/" || p.Ops[0].Owner != "@org/api-team" {
+	// add_owner names its targets in Owners, never in Owner (R-33): Owner is
+	// rename_owner's old name and nothing else, so no site can read a stale
+	// single value off an op that names several owners.
+	if p.Ops[0].Kind != ops.AddOwner || p.Ops[0].Scope != "/services/api/" || !reflect.DeepEqual(p.Ops[0].Owners, []string{"@org/api-team"}) {
 		t.Errorf("Ops[0] = %+v, want the parsed add_owner", p.Ops[0])
 	}
 	if p.OnEmpty != "" || p.Name != "" || p.Description != "" {
@@ -202,8 +205,14 @@ func TestR20_BareStringIsExactlyObjectShorthand(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := bare.Ops[0]
-	if got.Kind != direct.Kind || got.Scope != direct.Scope || got.Owner != direct.Owner || got.Raw != direct.Raw {
-		t.Errorf("policy op = %+v, want the same parse as --op: %+v", got, direct)
+	// Owners, not Owner: an add_owner carries its targets in Owners and leaves
+	// Owner empty by contract (R-33), so comparing Owner asked whether "" ==
+	// "" — a loader that dropped the owner list entirely passed this clause
+	// (adversarial-review finding).
+	if got.Kind != direct.Kind || got.Scope != direct.Scope || got.Raw != direct.Raw ||
+		!reflect.DeepEqual(got.Owners, direct.Owners) {
+		t.Errorf("policy op = {kind %q scope %q owners %q raw %q}, want the same parse as --op: {kind %q scope %q owners %q raw %q}",
+			got.Kind, got.Scope, got.Owners, got.Raw, direct.Kind, direct.Scope, direct.Owners, direct.Raw)
 	}
 	if got.OnZeroMatch != "" {
 		t.Errorf("OnZeroMatch = %q, want \"\" — the zero value must mean require, so shorthand preserves R-5 exactly", got.OnZeroMatch)
@@ -1074,5 +1083,230 @@ func TestR20_MalformedPolicyIsCaughtWithoutARepo(t *testing.T) {
 	}
 	if _, err := policy.Load(good); err != nil {
 		t.Errorf("a scope no repo contains is a per-repo fact (exit 2), not a policy error: %v", err)
+	}
+}
+
+// SPEC R-35e: a default reaches only the ops that can carry the VALUE, not
+// merely the ops that can carry the field. `declare` is refused per-op on a
+// remove_owner (there is no rule that declares the absence of an owner) and on
+// an op with an except clause (R-30), so a baseline that states it once and
+// happens to contain either kind must not be rejected on every repository —
+// the operator's only route back would be to expand the block into one value
+// per op, which is the arithmetic the block exists to remove.
+//
+// Each op below is asserted to keep the built-in `require`, not merely to
+// parse: a default that reached the op and was silently downgraded to `skip`
+// would also make the file load, and would then pass over a repo the policy
+// meant to refuse.
+func TestR35e_DefaultDeclareSkipsTheOpsThatRefuseIt(t *testing.T) {
+	p := mustParse(t, `{"version":1,"on_empty":"error",
+		"defaults":{"on_zero_match":"declare"},
+		"ops":["remove_owner(/docs/, @a)",
+		       {"op":"add_owner(/x/, @c)","except":["/x/gen/"]},
+		       "add_owner(/y/, @d)"]}`)
+	for i, want := range []string{"", "", ops.ZeroMatchDeclare} {
+		if got := p.Ops[i].OnZeroMatch; got != want {
+			t.Errorf("Ops[%d].OnZeroMatch = %q, want %q", i, got, want)
+		}
+	}
+	if p.Defaults.OnZeroMatch != ops.ZeroMatchDeclare {
+		t.Errorf("Defaults.OnZeroMatch = %q, want the block read back verbatim", p.Defaults.OnZeroMatch)
+	}
+}
+
+// SPEC R-37c: the array drops the DELIMITER, so a pattern containing a space is
+// one pattern — and it reaches the op as the pattern text CODEOWNERS itself
+// uses, with the space escaped. The file has its own grammar; the JSON does
+// not. An unescaped space stored here would re-parse as a pattern plus an owner
+// token the moment the carve line was written (the refusal checkScope exists
+// for), so the conversion is the whole point of the field.
+func TestR37c_ArrayPatternWithASpaceBecomesEscapedPatternText(t *testing.T) {
+	p := mustParse(t, `{"version":1,"ops":[{"op":"add_owner(/docs/, @x)","except":["/docs/my dir/"]}]}`)
+	if want := []string{`/docs/my\ dir/`}; !reflect.DeepEqual(p.Ops[0].Except, want) {
+		t.Errorf("Except = %q, want %q", p.Ops[0].Except, want)
+	}
+}
+
+// SPEC R-36: the lint block is read back as stated, so one committed artifact
+// carries both halves of the policy. Nothing here acts on it — `sync` never
+// will (R-36c) — but the loader is the only place that can prove the block a
+// reviewer approved is the block `lint` will run.
+func TestR36_LintBlockIsReadBackAsStated(t *testing.T) {
+	p := mustParse(t, `{"version":1,"lint":{"remove_stale_paths":true,"on_empty":"inherit"},
+		"ops":["add_owner(/x/, @a)"]}`)
+	if !p.Lint.RemoveStalePaths || p.Lint.OnEmpty != "inherit" {
+		t.Errorf("Lint = %+v, want {true inherit}", p.Lint)
+	}
+	// `false` is a decision, not an absent field: a policy that turns the
+	// repair off explicitly must be indistinguishable from one that never
+	// mentioned it, or "we decided against it" and "we forgot" are different
+	// rollouts.
+	off := mustParse(t, `{"version":1,"lint":{"remove_stale_paths":false},"ops":["add_owner(/x/, @a)"]}`)
+	if off.Lint.RemoveStalePaths {
+		t.Errorf("Lint.RemoveStalePaths = true from an explicit false")
+	}
+}
+
+// SPEC R-37c: a PRE-ESCAPED array element is refused, and the refusal names
+// pre-escaping as the cause.
+//
+// The array has no delimiter, so an element IS the path (R-37c). Escaping it
+// anyway — the JSON `"my\\ dir/"`, whose value is the pattern text `my\ dir/`
+// — is not the same string: a backslash is the pattern language's own escape,
+// so converting it for the file's grammar yields an escaped BACKSLASH followed
+// by a bare space, and the string grammar splits that into two patterns.
+// Observed before the fix, at exit 0 on a repo holding `my dir/x.txt` and
+// `dir/y.txt`: a carve line for `dir/` — a directory nobody named — while
+// `my dir/x.txt`, the path the carve existed for, stayed inside the grant.
+func TestR37c_PreEscapedArrayElementIsRefused(t *testing.T) {
+	// The correct spelling of the same intent, asserted alongside: this pair is
+	// the asymmetry that hid the defect, since only the literal half was ever
+	// tested. A fix that refused both would pass a test for the refusal alone.
+	p := mustParse(t, `{"version":1,"ops":[{"op":"add_owner(*, @org/team_a)","except":["my dir/"]}]}`)
+	if want := []string{`my\ dir/`}; !reflect.DeepEqual(p.Ops[0].Except, want) {
+		t.Fatalf("literal spelling: Except = %q, want %q", p.Ops[0].Except, want)
+	}
+
+	err := mustReject(t, `{"version":1,"ops":[{"op":"add_owner(*, @org/team_a)","except":["my\\ dir/"]}]}`)
+	// The likely author is a generator that escaped defensively, so the message
+	// has to say the escaping is the problem and show the literal spelling.
+	assertMentions(t, err, "already escaped", `"my dir/"`)
+	assertNoGoInternals(t, err)
+
+	// Parity, not "contains a backslash": the JSON `"my\\\\ dir/"` is the
+	// pattern text `my\\ dir/` — an escaped backslash and then a REAL space —
+	// which names a directory whose name contains a backslash. That is a
+	// different path, legitimately spelled, and stays legal.
+	lit := mustParse(t, `{"version":1,"ops":[{"op":"add_owner(*, @org/team_a)","except":["my\\\\ dir/"]}]}`)
+	if want := []string{`my\\\ dir/`}; !reflect.DeepEqual(lit.Ops[0].Except, want) {
+		t.Errorf("literal backslash: Except = %q, want %q", lit.Ops[0].Except, want)
+	}
+}
+
+// SPEC R-37c: an element ending in a backslash cannot swallow the pattern after
+// it.
+//
+// The clause is written as one string, so a trailing backslash escapes the
+// space that separates this pattern from the next. Before the fix, `["/docs/a\
+// ", "/docs/b"]` became the SINGLE pattern `/docs/a\ /docs/b` — a path that
+// exists nowhere, carving nothing, while the two paths the operator named
+// stayed inside the grant. The same element alone is already refused as a
+// dangling backslash; two of them must not be quietly accepted.
+func TestR37c_ArrayElementEndingInABackslashIsRefused(t *testing.T) {
+	err := mustReject(t, `{"version":1,"ops":[{"op":"add_owner(/docs/, @x)","except":["/docs/a\\","/docs/b"]}]}`)
+	assertMentions(t, err, "backslash", `/docs/a`)
+	assertNoGoInternals(t, err)
+}
+
+// SPEC R-37a/R-37e: an array-spelled op's Raw renders the intent that was
+// reviewed, carve included.
+//
+// Raw is what every report echoes: the R-8 static-conflict remedy, the sync
+// record's ops[].op, the --summary-out Ops table and plan.Plan.Ops. Before the
+// fix the array spelling stored the op string WITHOUT its carve, so the R-8
+// remedy read `run "set_owners(*, [@org/every])" on its own first` — an op that
+// drops the carve and displaces the owners of the very subtree the reviewed op
+// protected.
+func TestR37a_ArraySpelledOpRawCarriesTheCarve(t *testing.T) {
+	cases := []struct {
+		src  string
+		want string
+	}{
+		{`{"version":1,"ops":[{"op":"add_owner(/.github/, @org/team_a)","except":["/.github/CODEOWNERS"]}]}`,
+			"add_owner(/.github/ except /.github/CODEOWNERS, @org/team_a)"},
+		// The owner list is echoed as the operator wrote it: Raw is advice to
+		// re-run, so it has to be the text they can paste back.
+		{`{"version":1,"ops":[{"op":"set_owners(/x/, [@a, @b])","except":["/x/gen/","/x/vendor/"]}]}`,
+			"set_owners(/x/ except /x/gen/ /x/vendor/, [@a, @b])"},
+	}
+	for _, tc := range cases {
+		p := mustParse(t, tc.src)
+		if got := p.Ops[0].Raw; got != tc.want {
+			t.Errorf("Raw = %q, want %q", got, tc.want)
+		}
+		// The echoed op must be the one that runs: re-parsing it yields the
+		// same carve, so the remedy cannot be a string that means something
+		// else.
+		back, err := ops.Parse(p.Ops[0].Raw)
+		if err != nil {
+			t.Fatalf("Raw must re-parse, got %v", err)
+		}
+		if !reflect.DeepEqual(back.Except, p.Ops[0].Except) || back.Scope != p.Ops[0].Scope {
+			t.Errorf("Raw re-parses to scope %q except %q, want %q except %q",
+				back.Scope, back.Except, p.Ops[0].Scope, p.Ops[0].Except)
+		}
+	}
+}
+
+// SPEC R-37c: a pattern the op-string spelling cannot carry is refused by
+// NAMING the character, not by leaking how the array is validated.
+//
+// `/docs/a,b.md` is an ordinary filename. The array is validated by re-spelling
+// it as the `<scope> except <pat> …` string it is equivalent to, where a comma
+// separates arguments — so before the fix the operator, who wrote no owner
+// list, was told `add_owner takes (scope, owner) or (scope, [owners]), got 3
+// args`: an arity error about a construct invented inside the validator.
+func TestR37c_ArrayPatternWithACharacterTheOpStringCannotCarry(t *testing.T) {
+	comma := mustReject(t, `{"version":1,"ops":[{"op":"add_owner(/docs/, @x)","except":["/docs/a,b.md"]}]}`)
+	assertMentions(t, comma, "comma", "/docs/a,b.md")
+	assertNoGoInternals(t, comma)
+	for _, leak := range []string{"args", "(scope, owner)", "[owners]"} {
+		if strings.Contains(comma.Error(), leak) {
+			t.Errorf("message leaks the round trip by mentioning %q; the operator wrote no owner list:\n%s", leak, comma)
+		}
+	}
+
+	// An unbalanced bracket breaks the same split, in the same terms.
+	bracket := mustReject(t, `{"version":1,"ops":[{"op":"add_owner(/docs/, @x)","except":["/docs/a[b.md"]}]}`)
+	assertMentions(t, bracket, "/docs/a[b.md")
+	for _, leak := range []string{"args", "(scope, owner)", "[owners]"} {
+		if strings.Contains(bracket.Error(), leak) {
+			t.Errorf("message leaks the round trip by mentioning %q:\n%s", leak, bracket)
+		}
+	}
+
+	// R-37c keeps `[` live pattern syntax, so the refusal is of what cannot
+	// SURVIVE the spelling, not of a character class: a balanced one still
+	// reaches the matcher unchanged.
+	p := mustParse(t, `{"version":1,"ops":[{"op":"add_owner(/docs/, @x)","except":["/docs/[ab].md"]}]}`)
+	if want := []string{"/docs/[ab].md"}; !reflect.DeepEqual(p.Ops[0].Except, want) {
+		t.Errorf("Except = %q, want %q — a balanced character class is pattern syntax, not a defect", p.Ops[0].Except, want)
+	}
+}
+
+// SPEC R-37a: a whitespace-only element is whatever the string spelling makes
+// of it, because the two are equivalent in every respect.
+//
+// `add_owner(* except \ , @org/a)` parses today and writes a carve, so the
+// array's `[" "]` cannot be exit 3 — that puts one input in two different exit
+// classes depending on spelling. The message was wrong as well: an element
+// holding a space is not empty.
+func TestR37a_WhitespaceOnlyArrayElementIsNotEmpty(t *testing.T) {
+	p := mustParse(t, `{"version":1,"ops":[{"op":"add_owner(*, @org/a)","except":[" "]}]}`)
+	if want := []string{`\ `}; !reflect.DeepEqual(p.Ops[0].Except, want) {
+		t.Errorf("Except = %q, want %q — the string spelling accepts this pattern", p.Ops[0].Except, want)
+	}
+	// "" stays refused, and keeps the message that is true of it: it names no
+	// path at all (R-37).
+	err := mustReject(t, `{"version":1,"ops":[{"op":"add_owner(*, @org/a)","except":[""]}]}`)
+	assertMentions(t, err, "empty")
+}
+
+// SPEC R-27.6/R-37: a refused `except` array does not go on to accuse the op of
+// having no except clause.
+//
+// Semantic errors accumulate on purpose, but the second one here is a
+// CONSEQUENCE of the first: the array failed, so the op carries no parsed
+// carve, so the R-27.6 check reports `on_except_zero_match` as inapplicable —
+// telling the operator to remove the one field that is not the problem. The
+// reviewer's own reproduction printed both.
+func TestR37_ARefusedArrayDoesNotAlsoAccuseTheOpOfHavingNoCarve(t *testing.T) {
+	err := mustReject(t, `{"version":1,"ops":[{"op":"add_owner(*, @org/team_a)","except":["my\\ dir/"],"on_except_zero_match":"allow"}]}`)
+	problems := flatten(err)
+	if len(problems) != 1 {
+		t.Errorf("want 1 problem, got %d:\n%v", len(problems), err)
+	}
+	if strings.Contains(err.Error(), "this op has no except clause") {
+		t.Errorf("the refusal blames the field that is not the defect:\n%s", err)
 	}
 }

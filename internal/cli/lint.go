@@ -15,6 +15,7 @@ import (
 	"github.com/jordonpeterson/codeowners-tool/internal/ghapi"
 	"github.com/jordonpeterson/codeowners-tool/internal/gittree"
 	"github.com/jordonpeterson/codeowners-tool/internal/lint"
+	"github.com/jordonpeterson/codeowners-tool/internal/ops"
 	"github.com/jordonpeterson/codeowners-tool/internal/plan"
 )
 
@@ -59,6 +60,11 @@ type lintRun struct {
 	removeStale            bool
 	onEmpty                string
 	dryRun                 bool
+	// policy records that a --policy file configured this run, not flags. It
+	// governs only how a refusal is WORDED: the remedy for an unset R-6 policy
+	// is a field in the file here and a flag under `audit --lint`, and naming
+	// the wrong one sends the operator to a second refusal (R-36b).
+	policy bool
 }
 
 // lintDoc is `--format json`: one object, so a CI step can gate on it without
@@ -97,6 +103,8 @@ type lintDoc struct {
 func cmdLint(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("lint", flag.ContinueOnError)
 	fs.SetOutput(stderr)
+	var policyPaths multiFlag
+	fs.Var(&policyPaths, "policy", "policy file (R-36): the repair preferences come from its \"lint\" block; its ops are validated and never applied")
 	repo := fs.String("repo", ".", "path to local git repository")
 	branch := fs.String("branch", "HEAD", "ref whose tracked tree governs resolution (S-7); must be what the clone has checked out unless --dry-run")
 	filePath := fs.String("file", "", "CODEOWNERS path override (repo-relative); needed for a CODEOWNERS that is not committed yet")
@@ -110,6 +118,13 @@ func cmdLint(args []string, stdout, stderr io.Writer) int {
 	if err := fs.Parse(args); err != nil {
 		return flagParseCode(err)
 	}
+	removeStalePaths, onEmptyPolicy := *removeStale, *onEmpty
+	if len(policyPaths) > 0 {
+		var err error
+		if removeStalePaths, onEmptyPolicy, err = lintPrefs(policyPaths, flagsPassed(fs)); err != nil {
+			return exit3(stderr, err)
+		}
+	}
 	// Same post-Parse read as cmdAudit, and for the same reason: making
 	// os.Getenv the flag's DEFAULT hands the live credential to the flag
 	// package, which prints non-empty string defaults in its usage text (CWE-532).
@@ -120,8 +135,90 @@ func cmdLint(args []string, stdout, stderr io.Writer) int {
 	return runLint(lintRun{
 		repo: *repo, branch: *branch, filePath: *filePath,
 		githubRepo: *githubRepo, token: authToken, apiURL: *apiURL,
-		format: *format, removeStale: *removeStale, onEmpty: *onEmpty, dryRun: *dryRun,
+		format: *format, removeStale: removeStalePaths, onEmpty: onEmptyPolicy, dryRun: *dryRun,
+		policy: len(policyPaths) > 0,
 	}, stdout, stderr)
+}
+
+// flagsPassed reports which flags were actually TYPED. A ban on a flag next to
+// --policy is a ban on its PRESENCE, never on its value: `--remove-stale-paths=false`
+// overrides a reviewed `"remove_stale_paths": true` just as surely as the bare
+// flag overrides a reviewed false, and the zero value of a bool flag cannot
+// tell the two apart.
+func flagsPassed(fs *flag.FlagSet) map[string]bool {
+	passed := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) { passed[f.Name] = true })
+	return passed
+}
+
+// lintPrefs resolves `lint --policy` (R-36a): the repair preferences come from
+// the file's "lint" block, and every verdict it can reach is decidable from the
+// arguments and the file alone — hence exit 3, before any repository is opened.
+//
+// The whole file is loaded and validated, ops included, even though lint never
+// applies one (R-36e). "Ignores" in R-36c means does not ACT on: one artifact
+// is reviewed once and run everywhere, so a malformed op that only `sync`
+// diagnosed would ride through the fleet unseen until someone happened to run
+// the other command.
+func lintPrefs(policyPaths []string, passed map[string]bool) (removeStale bool, onEmpty string, err error) {
+	pol, opList, err := opSource(nil, policyPaths)
+	if err != nil {
+		return false, "", err
+	}
+	// The same two repo-independent op checks `sync` and `check` make, so all
+	// three verbs reach the same verdict on the same bytes (R-36e).
+	if err := validateScopes(opList); err != nil {
+		return false, "", err
+	}
+	if err := ops.StaticConflict(opList); err != nil {
+		return false, "", err
+	}
+	// R-36b, the rule `sync` already applies to --on-empty and
+	// --max-paths-changed. Unconditional, and deliberately not "only when the
+	// block sets the field": "the flag agreed with the file this time" is not
+	// something a reviewer reading the artifact can see.
+	//
+	// AFTER the policy is loaded and validated, which is where `sync` moved
+	// its own bans in db7fc71: a policy that does not load is the more
+	// fundamental problem on the same command line, and reporting the flag
+	// first let "the broken policy halted the run" be proven by the flag with
+	// the policy never read at all. The operator pays for it twice — they drop
+	// the flag, re-run, and meet a completely different failure.
+	for _, dup := range []struct{ flag, field string }{
+		{"remove-stale-paths", "remove_stale_paths"},
+		{"on-empty", "on_empty"},
+	} {
+		if passed[dup.flag] {
+			return false, "", fmt.Errorf("--%s is not allowed with --policy: set %q in the policy file's \"lint\" block instead, or the artifact in git is not the policy that ran (R-20/R-36)", dup.flag, dup.field)
+		}
+	}
+	return pol.Lint.RemoveStalePaths, pol.Lint.OnEmpty, nil
+}
+
+// The two remedies for one refusal: R-6 has no default, and the way to state a
+// policy differs by how this run was configured. `sync`'s noCodeownersError is
+// the same shape for the same reason — under --policy the flag named by the
+// flag-mode sentence is itself exit 3 (R-36b), so an operator who followed the
+// advice met a second and worse refusal at the moment they could least tell a
+// broken policy from an awkward repository.
+const (
+	onEmptyRemedyFlag   = "an explicit --on-empty policy (error|inherit|unowned) is required"
+	onEmptyRemedyPolicy = `an explicit R-6 policy is required: set "on_empty" (error|inherit|unowned) in the policy file's "lint" block`
+)
+
+// policyRemedy re-points that advice at the reviewed artifact. It matches the
+// sentence rather than an error type because the refusal is raised inside
+// lint.Build, which is handed an OnEmpty and knows nothing about where it came
+// from. The cost of that is drift: a reworded refusal upstream would make this
+// a silent no-op and hand the illegal advice back. The flag-mode control in
+// TestR36a_TheR6RemedyNamesTheBlockUnderPolicy pins the sentence for exactly
+// that reason — the drift fails a test instead of reaching an operator.
+func policyRemedy(err error) error {
+	var inv *plan.InvalidError
+	if !errors.As(err, &inv) || !strings.Contains(inv.Msg, onEmptyRemedyFlag) {
+		return err
+	}
+	return &plan.InvalidError{Msg: strings.Replace(inv.Msg, onEmptyRemedyFlag, onEmptyRemedyPolicy, 1)}
 }
 
 func runLint(r lintRun, stdout, stderr io.Writer) int {
@@ -285,6 +382,9 @@ func runLint(r lintRun, stdout, stderr io.Writer) int {
 		emitLint(res, coPath, false, r, stdout)
 		return lintCode(res, false)
 	case buildErr != nil:
+		if r.policy {
+			buildErr = policyRemedy(buildErr)
+		}
 		return errExit(buildErr, stderr)
 	}
 

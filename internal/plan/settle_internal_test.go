@@ -18,7 +18,7 @@ import (
 func TestSettle_RefusesDivergenceUnderNonInherit(t *testing.T) {
 	f := file.Parse([]byte("/a/ @b @y\n"))
 	tree := []string{"a/f.go"}
-	op := ops.Op{Kind: ops.RemoveOwner, Scope: "/a/", Owner: "@y", Raw: "remove_owner(/a/, @y)"}
+	op := ops.Op{Kind: ops.RemoveOwner, Scope: "/a/", Owners: []string{"@y"}, Raw: "remove_owner(/a/, @y)"}
 	scope := map[string]bool{"a/f.go": true}
 
 	// Corrupted desired state simulating an earlier op's bad edit: claims the

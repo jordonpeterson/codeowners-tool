@@ -12,6 +12,23 @@ changes to which class a failure lands in are called out explicitly.
 
 ### Fixed (from five user-test personas driving the shipped binary)
 
+- **One owner identity, everywhere (R-38).** `@handles` are case-insensitive on
+  GitHub, and only `lint` and the R-33c duplicate check knew it — matching
+  compared bytes. So `remove_owner(/x/, @ORG/TEAM)` reported `unchanged` at exit
+  0 against a file holding `@org/team`, and a fleet run of "revoke the departed
+  team" reported **converged** on every repository that capitalised the handle;
+  `add_owner` appended a second spelling of an owner who already owned the path,
+  growing the line on every scheduled run. Every comparison of two owners now
+  asks `ops.FoldOwner` — add, remove, `rename_owner`'s old name, `set_owners`,
+  commutation, resolution and `verify` — so removal takes every spelling with it
+  and re-running any op with a differently cased handle is a byte-identical
+  no-op. Spelling is preserved, never normalised: the file's handle wins and
+  only `rename_owner` writes new text. E-mail owners still compare exactly —
+  the local part of an address is not ours to case-fold. Exit-code change: an
+  add and a remove of one owner spelled two ways is now the exit-3 policy error
+  it always was, not a per-repo exit 2, and `set_owners(L) ∘ add_owner(A)` over
+  one owner in two spellings is no longer refused as order-dependent.
+
 - **A policy error writes no record, and now says so.** The exit-3 verdict is
   reached before the repository is opened, so no `--out` file and no
   `--summary-out` is created — deliberate, since a row there would put a phantom

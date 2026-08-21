@@ -75,7 +75,7 @@ else (bad enum values, ops that can't carry the `on_zero_match` you gave them, a
 | `--branch` | Ref whose tracked tree governs resolution (S-7). Default `HEAD`. |
 | `--file` | CODEOWNERS path override, repo-relative. |
 | `--on-empty` | Policy when `remove_owner` empties an owner set. Allowed only with `--op`; with `--policy`, set `on_empty` in the file instead. An unknown value is exit 3, checked before any repository is opened. |
-| `--create` | Permission to write a CODEOWNERS if the repo has none — not an instruction to. Off by default, never overwrites, and a run with nothing to write creates nothing (no file, no `.github/`). With `--file`, the file is created at that path instead of `.github/CODEOWNERS`. |
+| `--create` | Permission to write a CODEOWNERS if the repo has none — not an instruction to. Off by default, never overwrites, and a run with nothing to write creates nothing (no file, no `.github/`). With `--file`, the file is created at that path instead of `.github/CODEOWNERS`. Allowed only with `--op`; with `--policy`, set `create` in the file instead (R-34b), or the artifact in git is not the policy that ran. |
 | `--max-paths-changed` | R-25 ceiling: refuse (exit 2) if the run would change the owners of more than N paths. Off by default. Allowed only with `--op`; with `--policy`, set `max_paths_changed` in the file. |
 | `--dry-run` | Makes no change to CODEOWNERS. `--out` and `--summary-out` still emit. |
 | `--format` | `text` (default) or `json`. Under `json`, stdout is data and stderr is logs. |
@@ -116,8 +116,7 @@ Ops in one batch must **commute**. Two ops whose scopes overlap on a path and wh
 would change the outcome are refused rather than resolved by position (R-8):
 
 ```
-error: ops "set_owners(*, [@org/everyone])" and "add_owner(/services/api/, @org/api-team)"
-overlap on "services/api/main.go" and do not commute (R-8: refusing order-dependent batch)
+error: ops "set_owners(*, [@org/everyone])" and "add_owner(/services/api/, @org/api-team)" do not commute, and "*" provably governs every path "/services/api/" does — so the batch is order-dependent on every repository that has one (R-8); run "set_owners(*, [@org/everyone])" on its own first and the narrower op(s) in a second run — but preview that first run with --dry-run or `plan --out`: "set_owners(*, [@org/everyone])" REPLACES the owners of every path in scope, so anyone owning those paths today and not listed in it loses them
 ```
 
 `add_owner` ops commute with each other, so any number of them can share a run. A
@@ -307,8 +306,7 @@ When there is no line that satisfies both invariants, the refusal names the rule
 way:
 
 ```
-error: refusing: rule "infra/" also governs paths outside scope "**/*.tf", and no sound
-narrowing pattern is derivable — amending would violate INV-2, appending would violate INV-1
+error: refusing: rule "infra/" also governs paths outside scope "**/*.tf", and no sound narrowing pattern is derivable — amending would violate INV-2, appending would violate INV-1 (governing file: .github/CODEOWNERS)
 ```
 
 ## What `declare` costs
@@ -338,8 +336,9 @@ is emitted. The default (`require`) refuses instead — exit 2, "normalize this 
 
 ## Creating a file (R-23), and not creating one
 
-`--create` is permission, not instruction. A run whose ops all skip, or that has nothing
-to write, creates **no file and no `.github/` directory**, reports `"status": "skipped"`
+`create` is permission, not instruction — `"create": true` in a policy, or `--create` on
+an `--op` run; passing the flag with `--policy` is exit 3 (R-34b). A run whose ops all
+skip, or that has nothing to write, creates **no file and no `.github/` directory**, reports `"status": "skipped"`
 with `"created": false`, emits no `codeowners_path`, and exits 0. An empty CODEOWNERS
 would be worse than none: "which repos still need ownership?" is answered by "which repos
 have no CODEOWNERS", and an empty file answers *done* forever.
@@ -362,9 +361,10 @@ change the owners of more than N paths:
 
 ```console
 $ codeowners-tool sync --op 'add_owner(*, @org/platform)' --max-paths-changed 200
-error: refusing: this run would change the owners of 4127 path(s), over the 200-path
-ceiling set by --max-paths-changed (R-25) — nothing was written; re-run with `plan --out`
-to see which paths, raise the ceiling if the number is right, or narrow the ops if it is not
+error: refusing: this run would change the owners of 251 path(s), over the 200-path ceiling set by --max-paths-changed (R-25) — nothing was written; the op(s) behind the number: ops[0]. Re-run with `--dry-run --out preview.json` to see which paths, raise the ceiling if the number is right, or narrow the ops if it is not (governing file: .github/CODEOWNERS)
+refused: 0 op(s) applied, 0 skipped; 0 line change(s), 251 path(s) change owners
+  ops[0]  unchanged (proven: tree)
+  refusing: this run would change the owners of 251 path(s), over the 200-path ceiling set by --max-paths-changed (R-25) — nothing was written; the op(s) behind the number: ops[0]. Re-run with `--dry-run --out preview.json` to see which paths, raise the ceiling if the number is right, or narrow the ops if it is not (governing file: .github/CODEOWNERS)
 $ echo $?
 2
 ```
