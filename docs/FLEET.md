@@ -64,9 +64,16 @@ each time someone adds a file — at the cost of a weaker guarantee, explained i
 
 Check the policy before it reaches a single repo:
 
-```sh
-codeowners-tool check --policy policy.json
+```console
+$ codeowners-tool check --policy policy.json
+ok: policy.json — 3 op(s), no policy errors
+  ops[0]  on_zero_match: require (built-in)
+  ops[1]  on_zero_match: skip
+  ops[2]  on_zero_match: declare
 ```
+
+The echo is each op's *resolved* `on_zero_match`, so a `defaults` block that misses an op
+is visible before the first clone rather than after the hundredth.
 
 `check` reads no repo and writes nothing. It catches the problems that would fail
 identically on all 100, so you find them once instead of a hundred times.

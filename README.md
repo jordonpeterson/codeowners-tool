@@ -271,15 +271,17 @@ ok: policy.json — 3 op(s), no policy errors
 
 ```console
 $ codeowners-tool check --policy bad.json
-error: bad.json:1:21: ops[0]: op "add_owner(/services/api/)" is not valid: add_owner takes (scope, owner), got 1 args
-error: bad.json:1:78: ops[1]: unknown field "on_zero_mtach" (did you mean "on_zero_match"?); an op accepts "op", "id", "on_zero_match", "note"
+error: bad.json:1:21: ops[0]: op "add_owner(/services/api/)" is not valid: add_owner takes (scope, owner) or (scope, [owners]), got 1 args
+error: bad.json:1:91: ops[1]: unknown field "on_zero_mtach" (did you mean "on_zero_match"?); an op accepts "op", "id", "on_zero_match", "on_except_zero_match", "except", "note"
 this is a policy error — it will fail identically on every repo; fix the policy, do not retry
 $ echo $?
 3
 ```
 
 `check` reads no repository and writes nothing. It exits `0` or `3` and never `1`, so
-under `set -e` a good policy always lets the script continue.
+under `set -e` a good policy always lets the script continue. It also echoes the
+`on_zero_match` each op resolved to, whenever the policy resolves one at all — `policy.json`
+above has no `defaults` block and no per-op value, so there is nothing to echo.
 
 ## How to: write a new CODEOWNERS file
 
@@ -326,6 +328,10 @@ For a real file, put the ops in a policy so the whole shape is reviewable in one
 ```console
 $ codeowners-tool check --policy bootstrap.json
 ok: bootstrap.json — 4 op(s), no policy errors
+  ops[0]  on_zero_match: require (built-in)
+  ops[1]  on_zero_match: require (built-in)
+  ops[2]  on_zero_match: require (built-in)
+  ops[3]  on_zero_match: declare
 $ codeowners-tool sync --policy bootstrap.json
 applied: 4 op(s) applied, 0 skipped; 4 line change(s), 4 path(s) change owners
   ops[0]  applied (proven: tree)
@@ -348,12 +354,14 @@ number of them can share one run. `set_owners(*, …)` overlaps every other scop
 
 ```console
 $ codeowners-tool sync --policy bootstrap.json
-error: ops "set_owners(*, [@org/everyone])" and "add_owner(/services/api/, @org/api-team)"
-overlap on "services/api/main.go" and do not commute (R-8: refusing order-dependent batch)
+error: ops "set_owners(*, [@org/everyone])" and "add_owner(/services/api/, @org/api-team)" do not commute, and "*" provably governs every path "/services/api/" does — so the batch is order-dependent on every repository that has one (R-8); run "set_owners(*, [@org/everyone])" on its own first and the narrower op(s) in a second run — but preview that first run with --dry-run or `plan --out`: "set_owners(*, [@org/everyone])" REPLACES the owners of every path in scope, so anyone owning those paths today and not listed in it loses them
+this is a policy error — it will fail identically on every repo; fix the policy, do not retry
+$ echo $?
+3
 ```
 
-If you genuinely want a displacing baseline, run `set_owners(*, …)` on its own first and
-the narrower ops in a second run.
+Exit 3, not 2: an order-dependent batch is wrong on every repo, so a fleet stops instead
+of recording it a hundred times.
 
 **A rule for files that don't exist yet needs `on_zero_match: "declare"`.** The default is
 `require`: a scope matching nothing is treated as a problem with this repo, because it
@@ -391,9 +399,9 @@ there is deliberately no default:
 
 ```console
 $ codeowners-tool sync --op 'remove_owner(/services/api/, @org/api-team)'
-error: removing @org/api-team empties the owner set of "/services/api/"; an explicit
---on-empty policy (error|inherit|unowned) is required — there is deliberately no default (R-6)
+error: removing @org/api-team empties the owner set of "/services/api/"; an explicit --on-empty policy (error|inherit|unowned) is required — there is deliberately no default (R-6) (governing file: .github/CODEOWNERS)
 refused: 0 op(s) applied, 0 skipped; 0 line change(s), 0 path(s) change owners
+  removing @org/api-team empties the owner set of "/services/api/"; an explicit --on-empty policy (error|inherit|unowned) is required — there is deliberately no default (R-6) (governing file: .github/CODEOWNERS)
 $ echo $?
 2
 ```
@@ -421,7 +429,7 @@ diff:
 ```console
 $ codeowners-tool plan --op 'add_owner(/services/web/, @org/web-team)' --out plan.json
 plan written to plan.json
-1 line change(s), 1 path(s) change owners, 64 → 107 bytes
+1 line change(s), 1 path(s) change owners, 58 → 101 bytes
 $ jq '.ownership_rows, .diff' plan.json
 [
   {
@@ -432,7 +440,7 @@ $ jq '.ownership_rows, .diff' plan.json
 ]
 "@ line 2\n+/services/web/ @org/everyone @org/web-team\n"
 $ codeowners-tool apply --plan plan.json
-applied: .github/CODEOWNERS (64 → 107 bytes)
+applied: .github/CODEOWNERS (58 → 101 bytes)
 ```
 
 Every change also carries the reason it took that shape, which is the part a reviewer
@@ -464,9 +472,9 @@ the tool says so and writes nothing:
 
 ```console
 $ codeowners-tool sync --op 'add_owner(**/*.tf, @org/infra)'
-error: refusing: rule "infra/" also governs paths outside scope "**/*.tf", and no sound
-narrowing pattern is derivable — amending would violate INV-2, appending would violate INV-1
+error: refusing: rule "infra/" also governs paths outside scope "**/*.tf", and no sound narrowing pattern is derivable — amending would violate INV-2, appending would violate INV-1 (governing file: .github/CODEOWNERS)
 refused: 0 op(s) applied, 0 skipped; 0 line change(s), 0 path(s) change owners
+  refusing: rule "infra/" also governs paths outside scope "**/*.tf", and no sound narrowing pattern is derivable — amending would violate INV-2, appending would violate INV-1 (governing file: .github/CODEOWNERS)
 $ echo $?
 2
 ```

@@ -368,6 +368,42 @@ a bare line deletion.
 > a TYPO, not a dead rule. Deleting it would silently un-own the files it was
 > aimed at, which is the opposite of what --remove-stale-paths was asked to do.
 
+**`ownerlist_test.go`**
+
+> Owner-list end-to-end tests (docs/policy.md, R-33). Written ahead of the
+> implementation per CONTRIBUTING.md: today every one of these op strings
+> dies in ops.Parse with "add_owner takes a single owner, not a list" — exit
+> 3, the same code several of these tests expect — so every negative case
+> asserts a MESSAGE FRAGMENT as well as the exit code. An exit-code-only
+> assertion here passes vacuously against a feature that does not exist.
+>
+> The fragments are chosen to be unreachable from today's refusal, and each
+> is normative: the implementation must contain it.
+>
+> 	R-33c  "duplicate owner"     today's message says "not a list"
+> 	R-33d  "empty owner list"    ditto — note the current text contains
+> 	                             "owner, not a list", never "owner list"
+> 	R-33f  "takes no list"       today: `invalid owner token "[@b]"`
+> 	malformed list  "owner list" / "invalid owner token" (set_owners' wording,
+> 	                             which the list grammar inherits)
+>
+> Mutating tests assert EXACT file bytes, a snapshot-level resolution, or the
+> `plan --out` artifact — never strings.Contains on file content: under
+> last-match-wins (S-1) a substring check is satisfied by a file whose line
+> ORDER produces the wrong ownership, which is the bug adversarial review
+> found in the except suite. Where a byte assertion could itself be wrong,
+> the expected bytes are additionally derived from the single-owner op
+> sequence the list replaces (R-33a), so the oracle cannot drift from the
+> behavior it folds.
+>
+> Two subtests pass against today's binary by design, are named "pin:" and
+> are labeled where they stand: the `set_owners(scope, [])` case of
+> TestR33d_EmptyListIsExit3 and the set_owners case of
+> TestR33_TrailingCommaFollowsTheSetOwnersGrammar. They freeze behavior R-33
+> promises to preserve rather than specify new behavior; both are the premise
+> their sibling case relies on, so they run as separate subtests and report
+> even when that sibling fails. Everything else fails until the feature lands.
+
 **`ownership_scenarios_test.go`**
 
 > The three questions a rollout is actually asked.
@@ -385,6 +421,105 @@ a bare line deletion.
 > where it did not have to is not a tidy default, it is an incident with a
 > hundred repos in it. Several tests below assert the ABSENCE of a file, of a
 > rule, of an owner, or of a JSON key.
+
+**`policyfields_test.go`**
+
+> Policy-field end-to-end tests: `create` in the policy (R-34) and the
+> `defaults` block (R-35), from docs/policy.md. Written ahead of the
+> implementation per CONTRIBUTING.md.
+>
+> The vacuity trap in this area is unusually sharp. Today `create` and
+> `defaults` are simply unknown top-level fields, so EVERY policy in this
+> file — the positive ones included — dies at exit 3, the same code most of
+> the negative cases expect. An exit-code-only assertion would therefore be
+> satisfied by a binary that has never heard of either field. So every
+> negative case asserts a message fragment too, and pfWantExit3 refuses to
+> run a fragment that also occurs in the policy PATH: `policy.Error` renders
+> the filename first and `t.TempDir()` embeds the test's own name in it, so
+> `strings.Contains(stderr, "create")` passes on a message that says only
+> "unknown field".
+>
+> The fragments themselves are picked against today's text, not for
+> readability. Today's rejection of `{"defaults": {...}}` reads:
+>
+> 	unknown field "defaults"; the top level of a policy accepts "version",
+> 	"name", "description", "on_empty", "max_paths_changed", "ops"
+>
+> which already contains "defaults" AND "on_empty" — the two obvious
+> fragments for R-35c — for entirely the wrong reason. What it cannot
+> contain is the field set the defaults block accepts, so
+> `"on_except_zero_match"` is the discriminator used throughout.
+>
+> Mutating tests assert EXACT file bytes, never line existence: under
+> last-match-wins (S-1) a substring check is satisfied by a file whose line
+> ORDER resolves the path to the wrong owners, and `create` is precisely the
+> feature that writes a file from nothing where line order is the only thing
+> there is.
+>
+> Three subtests pass against today's binary by design and are labeled as
+> pins: the two subtests of TestR34c_MissingFileRefusesWithoutCreate whose
+> policy does not mention `create`, and "flag alone still writes" in
+> TestR34b_CreateFlagWithPolicyIsExit3. They freeze the behavior R-34c and
+> R-34b promise to preserve — a missing file is exit 2 and `--create` still
+> works on its own. Everything else fails until the feature lands.
+
+**`policylint_test.go`**
+
+> Policy-as-source-of-truth end-to-end tests for the two requirements this
+> file owns: the `lint` block (R-36) and `except` as a JSON array (R-37),
+> specified in docs/policy.md. Written ahead of the implementation per
+> CONTRIBUTING.md.
+>
+> Vacuity is the whole difficulty here, and it has three sources:
+>
+>   - Today `"lint"` at the top level and `"except"` on an op are UNKNOWN
+>     FIELDS, which is exit 3 — the same code most of the negative cases below
+>     expect. An exit-code-only assertion would pass against a binary that has
+>     never heard of either feature, so every negative case also asserts a
+>     message fragment that today's unknown-field error does not contain.
+>   - policy.Error renders the FILE first, so a fixture called lint.json or
+>     except.json makes "the message mentions except" true by accident. Every
+>     policy here is written by plPolicy, which names it p.json.
+>   - t.TempDir() embeds the test's own name in the path, and the path is in
+>     the message. No test or subtest below is named with a fragment any
+>     assertion looks for — in particular the requirement-id fragment is
+>     spelled "R-37" (hyphen) while the test names use "R37".
+>
+> Where the array spelling has a defect the STRING spelling already diagnoses
+> (duplicate patterns, unprovable containment, except on rename_owner), the
+> fragment asserted is the string spelling's own message: R-37a says the two
+> are equivalent in every respect, so an array that fails differently from the
+> string it is equivalent to is a defect, not a wording choice. Where the
+> defect is array-only (both spellings at once, an empty array) the fragment is
+> the requirement id, which every policy-error message in this codebase already
+> carries ("(R-26a)", "(R-27)", "(R-28)", "(R-29)") and today's unknown-field
+> message does not.
+>
+> Mutating tests assert EXACT file bytes. Under last-match-wins (S-1) a
+> strings.Contains check over file content is satisfied by a file whose line
+> ORDER hands the excepted path to the grantee — the adversarial-review finding
+> that shaped except_test.go, and R-37's byte-equality claim is precisely a
+> claim about that order.
+>
+> The R-36e cases each carry a "control" subtest that runs the WELL-FORMED
+> counterpart of the same section through the same command and demands exit 0.
+> Without it, "validates the section it does not act on" is satisfied by
+> refusing every file that contains that section — which is R-36c's failure,
+> one requirement away. The controls restate R-36c inside the R-36e tests so
+> the two cannot be traded against each other.
+>
+> Two subtests are pins that pass today and are labeled as such, both under
+> TestR37c_ArrayPatternMayContainALiteralSpace: the escaped string spelling
+> (which R-37 promises not to change) and the refusal of the unescaped one
+> (which is what makes the array form strictly more expressive). They freeze
+> current behavior rather than specifying new behavior; everything else fails
+> until the feature lands.
+
+> ---------- R-37: except as a JSON array ----------
+
+> ---------- R-36: the lint block ----------
+
+> ---------- R-36e: every command validates the whole file ----------
 
 **`rollout_test.go`**
 
@@ -591,9 +726,16 @@ anywhere while still emitting the complete results.jsonl and every
 
 ### `TestFleet_MissingCodeownersNeedsCreate`
 
-SPEC R-23: a repo with no CODEOWNERS is exit 2 without --create — a per-repo
-fact, recorded and skipped past, never a halt. With --create the file is
-written at .github/CODEOWNERS, which is the path the README promises.
+SPEC R-23/R-34a: a repo with no CODEOWNERS is exit 2 when the policy does not
+say `create` — a per-repo fact, recorded and skipped past, never a halt. The
+same policy carrying `"create": true` writes the file at .github/CODEOWNERS,
+which is the path the README promises.
+
+Two policies, differing in exactly the field R-34b moved out of the command
+line, are the whole test: one must refuse and one must create. Running one
+policy twice would stop distinguishing them and leave the requirement
+untested, so the fixtures are derived from a single source and the refusing
+leg asserts the absence of the file the creating leg asserts the presence of.
 
 ### `TestFleet_NothingMatchesAnywhereIsSkippedNotUnchanged`
 
@@ -1559,6 +1701,589 @@ without an except clause carry no excepted/except_unmatched keys, so
 existing jq pipelines parse byte-identical records. Freezes the field
 names against an implementation that emits them empty on every op.
 
+### `TestR33_BlastRadiusCountsPathsNotOwners`
+
+SPEC R-33/R-25: the blast-radius ceiling counts PATHS whose owners change,
+and a list changes no more paths than the bare form does. Six owners over a
+two-file scope is two paths, not six and not twelve; a ceiling of 2 must
+pass and a ceiling of 1 must refuse with the honest number, or every fleet
+operator who set a ceiling has to raise it whenever a policy names one more
+team.
+
+### `TestR33_CheckAcceptsValidListPolicies`
+
+SPEC R-22/R-33: `check` must ACCEPT the valid list grammar. Every negative
+case in this file exits 3 today for an unrelated reason — the whole
+grammar is refused — so without this test an implementation whose
+validator rejects legal lists halts every fleet script at line one and
+nothing in the suite goes red.
+
+### `TestR33_DryRunPreviewsTheListWithoutWriting`
+
+SPEC R-33: --dry-run previews a list op and writes nothing. The fleet
+preview of "which repos would gain these two teams" must not require
+mutating one repository, and must not be an empty preview either.
+
+### `TestR33_ListHoldsEveryOwnerSpelling`
+
+SPEC R-33: an owner list holds every owner spelling the single-owner form
+holds — an @org/team, a bare @user, and an email owner (R-13) — in one
+list, on one line. A list grammar that only recognized the `@org/team`
+shape would pass every other test in this file.
+
+### `TestR33_ListIsIdempotentAndAddsOnlyWhatIsMissing`
+
+SPEC R-33a/R-19: a list converges. All-present is a byte-identical no-op
+reported as `unchanged`, a partly-present list adds only what is missing
+(and never a second copy of an owner already on the line), and a second
+identical run changes nothing — the property that lets a nightly fleet job
+re-run the same policy forever.
+
+### `TestR33_MalformedListIsExit3`
+
+SPEC R-33/grammar: a malformed list is exit 3 with a message naming the
+defect. An unclosed bracket must not be read as an owner token called
+"[@a, @b" and a nested bracket must not be read as a group: R-33 adds a
+flat list, and the day it grows structure it stops being the spelling of
+one intent. The bad-token case inherits set_owners' existing wording so one
+grammar keeps one diagnosis.
+
+### `TestR33_R8CommutationSeesEveryOwnerInTheList`
+
+SPEC R-33/R-8: commutation is decided over every owner the op names. An
+implementation that stores the list beside the existing single-owner field
+and leaves ops.commutes reading that field admits
+`add_owner(/x/, [@a, @b])` batched with `remove_owner(/x/, @b)` — an
+order-dependent pair on every repository, which is precisely the batch R-8
+exists to refuse. The commuting pair is asserted alongside it: a
+conservative implementation that refuses every list-carrying batch would
+otherwise satisfy the first half and break every real policy.
+
+### `TestR33_TrailingCommaFollowsTheSetOwnersGrammar`
+
+SPEC R-33: a trailing comma is the same list. `set_owners` accepts one
+today (asserted below, so the premise is visible rather than assumed), and
+R-33 exists to remove an asymmetry between the verbs — refusing it on
+add_owner alone would create a second one, where a generator's output is
+legal in one op and a policy error in the other.
+
+### `TestR33_ZeroMatchScopeIsUnaffectedByTheList`
+
+SPEC R-33/R-21: an owner list changes WHO an op names, never WHETHER the op
+runs. A zero-match scope is still disposed of by on_zero_match — require
+refuses this repo at exit 2 naming the scope (not the owners), skip is a
+clean no-op, and declare writes ONE line carrying the whole list, which is
+R-33b on the path where no tracked file exists to fold against.
+
+### `TestR35_EmptyDefaultsBlockIsIndistinguishableFromAbsence`
+
+SPEC R-35: an empty `defaults` block is legal and states nothing, so the
+policy behaves exactly as one with no block at all — every op keeps the
+built-in `require`, and a zero-match scope still refuses this repo at exit
+2.
+
+Deliberately NOT the treatment `"on_zero_match": ""` gets. The strict-parse
+rule bites where a spelling states a decision that was never made; `{}`
+states no default for anything, there is no enum to misread, and rejecting
+it would fail every repo for a generator that emits the key unconditionally
+and fills it only sometimes.
+
+The oracle is the stderr of the block-free policy, compared verbatim: "same
+exit code" alone would be satisfied by a refusal for an entirely different
+reason.
+
+### `TestR36_ExitFourAfterASuccessfulWriteIsUnchanged`
+
+SPEC R-36/R-17: the block changes where lint's preferences are written, and
+nothing else. Exit 4 still means "the file needs a person", and a SUCCESSFUL
+WRITE can still exit 4 — the documented reason `lint && git commit` does not
+do what it looks like (docs/LINTING.md, and the CLI help text says it too).
+A --policy run that started collapsing that to 0 would hand every fleet job a
+green light over a file with an unrepairable line in it.
+
+### `TestR37_ArrayDefectsRefuseLikeTheStringSpelling`
+
+SPEC R-37a: equivalent in every respect includes the refusals. Each case
+below is a defect the STRING spelling already diagnoses, and the fragment is
+the string spelling's own message — an array that fails at a different rule,
+or with a message that sends the operator hunting in the wrong argument, is
+not the same feature spelled differently.
+
+Duplicates are compared over the PATTERN LANGUAGE, not as strings: /x/gen/
+and /x/gen/** are one pattern spelled twice, and a string-equality check
+waves the pair through (R-27.3, and the adversarial-review finding behind
+TestR27_StaticExceptDefectsAreExit3).
+
+### `TestR33a_ListFoldsToTheSameFileAsTheOpsItReplaces`
+
+SPEC R-33a: an owner list produces exactly the file the single-owner ops it
+replaces produce, including byte order. The oracle is BOTH: the literal
+expected bytes, and the same repo built by running the two single-owner ops
+in sequence — a hand-written expectation can be wrong, and a differential
+one alone cannot catch two implementations wrong the same way.
+
+### `TestR33a_ListWhitespaceVariantsAreOneGrammar`
+
+SPEC R-33a/grammar: whitespace inside the brackets is insignificant, as it
+already is for set_owners. `[@a,@b]`, `[@a, @b]`, `[ @a , @b ]` and a
+tab-separated spelling are one op, and a policy reformatted by a generator
+must not produce a different file. Each variant is checked against exact
+bytes, not against the others alone: four identically broken runs (all
+refusing, all writing nothing) would agree with each other.
+
+### `TestR33a_SingleElementListEqualsTheBareForm`
+
+SPEC R-33a: a one-element list is the bare form, byte for byte. "The
+single-owner form stays legal and unchanged" is only half the promise; the
+other half is that a generator emitting `[@a]` for a one-owner intent does
+not produce a different file from a human typing `@a`.
+
+### `TestR33b_ListWithExceptGrantsOnceAndCarvesOnce`
+
+SPEC R-33b/R-26: a list and an except clause on ONE op. The grant line is
+one hunk however many owners it names, and the carve line (R-29) is a
+second, separate hunk — so the count is taken per pattern. Today the
+two-op spelling of this intent emits three hunks for two lines, with the
+grant amended from a state the file never holds. Exact bytes are asserted
+too: a plan that counted right while placing the carve at EOF would hand
+the excepted path to the grantee under last-match-wins (S-1).
+
+### `TestR33b_OneIntentIsOneHunk`
+
+SPEC R-33b: N owners on one scope are ONE line change, not N. The defect
+this requirement exists to fix is visible only in the artifact: today
+`--op add_owner(/x/, @a) --op add_owner(/x/, @b)` emits two hunks against
+the same physical line, the second's old_line equal to the first's
+new_line, so `plan --out` shows a state that is on disk at no point in the
+run. Both line-shapes are covered — the inserted narrowing rule and the
+amended pre-existing one — because they are produced by different arms of
+the planner and only one of them was reproduced when this was found.
+
+### `TestR33c_DuplicateInsideOneListIsExit3`
+
+SPEC R-33c: a duplicate owner inside one list is exit 3 — a fact about the
+policy, identical in every repo, so `check` catches it before repo 1 and
+`sync` writes nothing. The non-adjacent case is included because the
+cheapest duplicate check compares neighbours after a sort that the list
+grammar must not perform (R-33e: order is preserved).
+
+Case-variant handles (`@A` vs `@a`) are deliberately NOT asserted here:
+GitHub's case-insensitivity is audit's A-5 question, and R-33c says nothing
+about it. A test that guessed would be specifying by accident.
+
+### `TestR33d_EmptyListIsExit3`
+
+SPEC R-33d: an empty list on add_owner/remove_owner is exit 3 — "add
+nobody" and "remove nobody" are not intents, they are generator bugs, and a
+tool that accepted them would report a wall of green no-ops across a fleet.
+The bracketed-whitespace and lone-comma spellings are included because they
+reach the tokenizer as an empty list rather than as a syntax error.
+
+### `TestR33e_ListOrderFixesAppendOrderNotResolution`
+
+SPEC R-33e: list order fixes the APPEND order in the written line and
+nothing else. Both orders are asserted against exact bytes — the claim is
+about bytes, and an implementation that sorted owners would satisfy a
+resolution-only oracle while quietly rewriting every line it touches — and
+against resolution via `snapshot`, which is the property that actually
+matters to GitHub, where owners are a set.
+
+### `TestR33f_RenameOwnerTakesNoList`
+
+SPEC R-33f: `rename_owner` takes no list, in either argument position —
+exit 3. It renames one owner to one owner; a list there has no meaning, and
+falling through to `invalid owner token "[@b]"` (today's message) leaves the
+operator hunting a typo in an owner name instead of learning that the
+construct does not exist, exactly as R-27.4 argued for except.
+
+### `TestR34a_CreateMustBeABoolean`
+
+SPEC R-34/R-20: `create` is a boolean, and a wrong type is a policy error
+like any other — a 40-op baseline whose `create` is the STRING "false"
+would otherwise turn a fleet-wide "off" into whatever a non-empty string
+coerces to. The fragment names the type, because "unknown field" (today's
+message) and "wrong type" send the operator to different edits.
+
+### `TestR34a_PolicyCreateIsIdempotent`
+
+SPEC R-34a/R-19: the created file converges. Three runs of the same policy
+leave byte-identical content, and runs 2 and 3 report `unchanged` with
+created:false — the property that lets a nightly fleet job re-run a
+create-bearing policy forever. `created` reporting true on a run that wrote
+nothing would make every night's summary claim 100 new files.
+
+### `TestR34a_PolicyCreateWritesNothingWhenEveryOpSkips`
+
+SPEC R-34a/R-24: `create` is permission to create, not an instruction to.
+When every op skips there is nothing to write, so no file and no `.github/`
+directory appear and the record is `skipped` with no `codeowners_path` —
+indistinguishable, to the commit step, from a repo that was never touched.
+
+The failure this prevents is invisible in a fleet summary: an empty
+CODEOWNERS answers "which repos still need ownership?" with *yes, done*
+forever. Nothing here may synthesize a file to make a repo look covered.
+
+### `TestR34a_PolicyCreateWritesTheMissingFile`
+
+SPEC R-34a: `"create": true` makes `sync` write a missing CODEOWNERS,
+identical in every respect to `--create` — so the oracle is the flag
+itself, run over a twin repo, compared byte for byte. Exact bytes are the
+whole assertion: a created file has no prior content, so its line ORDER is
+entirely this tool's invention and a substring check would accept a file
+whose rules resolve to the wrong owners. `check` must accept the policy
+too, or the fleet script's first line halts before repo 1.
+
+### `TestR34b_CreateFlagWithPolicyIsExit3`
+
+SPEC R-34b: `--create` alongside `--policy` is exit 3, the rule already
+applied to `--on-empty` and `--max-paths-changed` — a flag must not
+silently override the reviewed artifact. The fragment mirrors the existing
+refusals verbatim ("--on-empty is not allowed with --policy: …"), because
+an operator meeting the third member of a family should recognize it.
+
+Both halves matter and both are asserted: the rejection does not depend on
+whether the policy happens to state `create` (the reviewed artifact is the
+authority either way), and it is decided before the repository is opened,
+so nothing is written — least of all the file the flag was asking for.
+
+### `TestR34b_PolicyRunNeverAdvisesTheRejectedFlag`
+
+SPEC R-34b/R-23: once `--create` is exit 3 next to `--policy`, the R-23
+refusal must stop telling a policy run to "re-run with --create" — that is
+advice whose only outcome is exit 3, handed to an operator at the moment
+they are least able to tell a broken policy from an awkward repo. The
+answer for a policy run is `"create": true` in the artifact.
+
+Asserted as an absence, which is exactly what makes it non-vacuous here:
+today the string is present, so this cannot pass by accident on either
+half.
+
+### `TestR34c_MissingFileRefusesWithoutCreate`
+
+SPEC R-34c: absent or false, a missing CODEOWNERS refuses exactly as today
+— exit 2 (this repo needs a human), never exit 3, because a fleet loop has
+to record it and step to the next clone. The `create: false` case is the
+one that matters for review: a policy that states the decision explicitly
+must behave identically to one that omits it, or "we turned it off" and
+"we forgot" are different rollouts.
+
+### `TestR34d_PolicyCreateNeverOverwrites`
+
+SPEC R-34d: R-23 is unchanged — `create` never overwrites, so the field is
+safe to leave set for a fleet where some repos have a file and some do not.
+Exact bytes prove the existing file was AMENDED rather than regenerated:
+the comment survives, the catch-all keeps its position, and the narrowing
+rule lands after it (R-2).
+
+The second assertion is the one that would be missed. "Never overwrites" is
+also satisfied by writing a SECOND file at .github/CODEOWNERS, which leaves
+the original untouched and, under S-8, silently demotes it to a file GitHub
+never loads — the whole repo's ownership replaced by one op's worth of
+rules, with the old file still sitting there looking authoritative.
+
+### `TestR35a_DefaultReachesEveryOpThatStatesNoValue`
+
+SPEC R-35a: a default reaches every op that does not state its own value,
+so a 40-op baseline is 40 strings rather than 40 objects. The oracle is
+FOLD EQUIVALENCE: the same policy with the value written out on every op
+must produce the same file, byte for byte, and the same per-op outcomes.
+Asserting only "the two ops skipped" would be satisfied by a default that
+reached the first op and by luck nothing else.
+
+### `TestR35a_DefaultReachesExceptOps`
+
+SPEC R-35a/R-28: the default carries `on_except_zero_match` too. This repo
+has no .github/CODEOWNERS, so the promised carve-out does not exist; under
+the block's `allow` the grant is written anyway, the inert pattern is
+disclosed, the op is marked proven:"structural", and the run warns.
+
+Exact bytes matter for the same reason they do under a per-op `allow`: an
+implementation that reads the default as "skip the op" while still
+reporting the unmatched pattern is the wall of silent green this knob must
+not become.
+
+### `TestR35b_CheckEchoesTheResolvedValue`
+
+SPEC R-35b: `check` echoes the RESOLVED value, so review sees what will
+run. Without it the reviewer of a 40-op policy has to fold the defaults
+block in their head, which is the arithmetic the block was added to remove
+— and a misplaced default is invisible until a repo somewhere writes a
+declared rule nobody expected.
+
+The assertion is per-op, not "the output mentions declare somewhere": a
+renderer printing the defaults block verbatim and nothing else would
+satisfy that while telling the reviewer nothing about which op runs which
+way. Human output rather than JSON, because `check --format json` reports
+`ops` as a COUNT and R-35b must not be read as a demand to reshape it.
+
+### `TestR35b_PerOpExceptValueWinsOverTheDefault`
+
+SPEC R-35b/R-28: the per-op value wins in the RESTRICTIVE direction too. A
+block-wide `allow` with one op stating `require` must refuse that op's
+repo, exit 2, and write nothing — otherwise "we relaxed this fleet-wide
+except for the one op that guards .github/" is not expressible, and the
+block becomes a way to weaken an op whose author asked for the opposite.
+
+### `TestR35b_PerOpValueWinsOverTheDefault`
+
+SPEC R-35b: a per-op value wins over the default. Both ops below match
+nothing in this repo, so the outcome is decided entirely by which value
+reached which op: the defaulted one declares its rule, the one that states
+`skip` writes nothing. Exact bytes are the assertion — a file carrying the
+charts rule, or missing the deploy rule, is a default applied to the wrong
+op, and either one resolves ownership differently for every file added
+under those directories later.
+
+### `TestR35c_OnEmptyInsideDefaultsIsExit3`
+
+SPEC R-35c: `on_empty` inside `defaults` is exit 3. It is one policy for
+the run, not a per-op setting, and two spellings for one setting is the
+ambiguity docs/policy.md exists to remove — accepting it in both places
+would leave "which one wins" as a precedence rule nobody wrote down.
+
+The fragment cannot be "on_empty" or "defaults": today's rejection of the
+unknown top-level field prints the legal top-level set, which contains
+BOTH. `"on_except_zero_match"` is the discriminator — no message about the
+top level lists it, and every message about the defaults block's field set
+must.
+
+### `TestR35d_BadEnumInsideDefaultsIsExit3`
+
+SPEC R-35d/R-21: a bad enum in the defaults block is exit 3, with the same
+diagnosis the per-op field gets. A default is the higher-stakes place to
+get an enum wrong — one bad value reaches every op in the policy — so it
+cannot be the place with the weaker message.
+
+The present-but-empty case is the same rule as the per-op field: an ABSENT
+default means every op keeps the built-in `require`, while "" states no
+decision at all, and reads to a reviewer as though one was made.
+
+### `TestR35d_UnknownKeyInsideDefaultsIsExit3`
+
+SPEC R-35d: an unknown key inside `defaults` is exit 3, matching R-20's
+treatment of unknown top-level fields. The dangerous case is the near miss:
+a typo'd default is not "no default", it is the WRONG default applied to
+every op in the policy at once, which is the failure the whole strict-parse
+rule exists to prevent.
+
+Both fragments are load-bearing: the offending key (today's message names
+only "defaults", so this cannot pass vacuously) and the block's field set,
+which is what tells the operator where the key was rejected FROM.
+
+### `TestR35e_DefaultsNeverReachAnOpThatCannotCarryThem`
+
+SPEC R-35e: a default is applied only to ops that can carry it. Both fields
+below are REJECTED on the op they are paired with when written per-op —
+`on_zero_match` on rename_owner (its scope comes from current ownership, so
+zero-match can never fire) and `on_except_zero_match` on an op with no
+except clause (R-27.6) — and a policy that states them as defaults must not
+fail for that reason. The default simply does not reach those ops.
+
+This is the requirement that decides whether the block is usable at all: a
+fleet baseline that states `on_zero_match` once and happens to contain one
+rename would otherwise be rejected on every repo, and the operator's only
+route back is to expand the block into 40 per-op values.
+
+### `TestR36a_BlockSuppliesOnEmpty`
+
+SPEC R-36a: `on_empty` comes from the block too, and it is genuinely
+consulted — the three values are three different repositories, so all three
+are pinned. Without the block this run is exit 3 ("an explicit --on-empty
+policy is required"), which is what makes each case here evidence that the
+block was read rather than defaulted past.
+
+### `TestR36a_BlockSuppliesRemoveStalePaths`
+
+SPEC R-36a: `lint --policy p.json` takes `remove_stale_paths` from the block,
+so the repair policy is reviewed in the same committed artifact as the
+ownership policy instead of living in a shell line nobody diffs. Exact bytes:
+a stale rule deleted is a rule whose intent no other record holds, so
+"roughly the right file" is not an outcome worth asserting.
+
+### `TestR36a_EmptyBlockMeansDefaults`
+
+SPEC R-36a: an empty block is legal and states no preference, so every
+default still holds — `remove_stale_paths` off in particular (R-11). A block
+that switched a repair on merely by existing would prune "dead" rules across
+a fleet the first time anyone committed one.
+
+### `TestR36b_FlagDuplicatingABlockFieldIsExit3`
+
+SPEC R-36b: a flag that duplicates a block field alongside --policy is exit 3
+— the rule `sync` already applies to --on-empty and --max-paths-changed
+("--on-empty is not allowed with --policy: set \"on_empty\" in the policy
+file instead"). A flag that silently overrode the reviewed artifact would
+mean the file in git is not the policy that ran.
+
+The rejection is unconditional, exactly as `sync`'s is: it does not depend on
+whether the block happens to set that field, because "the flag agreed with
+the file this time" is not a property anyone reviewing the artifact can see.
+Both flags are rejected before the run, so the file is untouched.
+
+### `TestR36c_LintIgnoresOps`
+
+SPEC R-36c: the other direction, and the dangerous one — `lint` ignores
+`ops`. The op here names an owner the stub API says EXISTS, so an
+implementation that applied it would leave "@org/other" in the file instead
+of having it removed again as a dead owner: the wrong outcome has to be
+distinguishable from the right one, or the test proves nothing. Exact bytes,
+because `lint` writes.
+
+### `TestR36c_SyncIgnoresTheBlock`
+
+SPEC R-36c: one committed file serves both commands, so `sync` must ignore
+the lint block rather than fail on it — and `check` must validate the
+artifact as a whole. A fleet cannot be asked to keep two policy files in
+step; that is the drift this requirement exists to prevent.
+
+### `TestR36d_BadEnumValueInTheBlockIsExit3`
+
+SPEC R-36d/R-20: a known key with an unknown VALUE is exit 3 as well, and the
+message names the value — a policy error is only actionable when the operator
+can see which of the three R-6 outcomes they meant to type. The fragment is
+the misspelled value, because the key name and the word "unknown" both appear
+in today's unrelated message.
+
+The `sync` leg is TestR36e_SyncRefusesAMalformedLintBlock's, for the reason
+given on TestR36d_UnknownKeyInTheBlockIsExit3.
+
+### `TestR36d_UnknownKeyInTheBlockIsExit3`
+
+SPEC R-36d: an unknown key inside the block is exit 3, matching R-20's
+treatment of unknown fields everywhere else. A typo'd repair preference that
+was ignored would run the fleet with the DEFAULT while the reviewed artifact
+says otherwise — the failure mode R-20 exists to make impossible.
+
+The fragment is the misspelled key: today the whole block is one unknown
+field, so the current message names "lint" and never the key inside it.
+
+`check` and `lint` are asserted here; `sync` is asserted by
+TestR36e_SyncRefusesAMalformedLintBlock, which is where the requirement that
+a NON-ACTING command diagnose this defect lives — together with the control
+that keeps that requirement from being met by blanket refusal. Repeating the
+sync leg here would restate it more weakly: R-36e snapshots the whole tree,
+this test only reads CODEOWNERS.
+
+### `TestR36e_LintRefusesAMalformedOp`
+
+SPEC R-36e: the other direction — `lint --policy` exits 3 on a malformed op,
+even though `lint` never applies one (R-36c). Both defects below are
+repo-independent: the first is a string that does not parse, the second is an
+op-object field that can never apply to the op carrying it, which only the
+per-op validation sees. Neither depends on which repository is in front of it,
+which is what puts them in the exit-3 class rather than exit 2.
+
+The `lint` block in every case is well-formed, so the only available cause of
+exit 3 is the section `lint` does not act on.
+
+Vacuity: `lint` has no --policy flag today, so every case here already exits 3
+with "flag provided but not defined: -policy" plus the usage block. The
+fragments are the loader's own diagnosis of each defect, which appears in
+neither. The second fragment is also why that subtest is NOT named after the
+field it is about: the phrase would land in t.TempDir's path and satisfy the
+assertion by accident.
+
+The control subtest carries TestR36c_LintIgnoresOps's claim into this test on
+purpose, so an implementation that reaches R-36e by refusing every file with a
+populated `ops` array fails here too.
+
+### `TestR36e_SyncRefusesAMalformedLintBlock`
+
+SPEC R-36e: `sync` exits 3 on a malformed `lint` block. "Ignores" in R-36c
+means does not ACT on, never does not VALIDATE: one artifact is reviewed once
+and run everywhere, so a defect that surfaces only when someone happens to run
+`lint` is exactly the fleet-scale failure the exit-3 class exists to prevent.
+The defect is repo-independent, so it is exit 3 and not exit 2, and `sync`
+must reach the same verdict `check` does on the same bytes (R-36d).
+
+The `ops` array in every case here is well-formed and would apply cleanly, so
+the ONLY thing that can produce exit 3 is the block `sync` does not act on.
+
+The control subtest is load-bearing and is the reason this test cannot be
+satisfied by rejecting every file that contains a `lint` block: it is
+TestR36c_SyncIgnoresTheBlock's claim restated inside the R-36e test, so an
+implementation that "satisfies" R-36e by blanket refusal fails HERE, not only
+in a test someone might read as superseded.
+
+Fragments are the misspelled key and the misspelled value: today the whole
+block is one unknown top-level field, so the current message names "lint" and
+never what is inside it. No subtest name below contains a fragment — t.TempDir
+puts the test name in the path and the path is in the message.
+
+### `TestR37a_ArrayAndStringSpellingsWriteIdenticalBytes`
+
+SPEC R-37a/R-37e: the array spelling and the string spelling of one carve-out
+produce the same file, byte for byte, and the same record. Byte equality
+between the two runs is the strongest form the equivalence claim has: a
+carve line that exists but sits in the wrong place resolves the excepted path
+to the grantee under last-match-wins (S-1), and only order-sensitive bytes
+catch that. The literal is also asserted, so a pair of runs that are equally
+wrong cannot pass.
+
+### `TestR37a_ArrayWorksOnEveryScopedVerb`
+
+SPEC R-37a: the array reaches every verb that has a scope, not just
+add_owner — a spec that only carved for add_owner would make `except` an
+add_owner feature in practice (the R-29 reasoning, one level up). The
+set_owners case also carries an owner LIST on the same op, because the two
+JSON-shaped features on one object are where a hand-written decoder drops
+one of them. Exact bytes pin both halves: the base mutation happened AND the
+excepted path kept its owners.
+
+### `TestR37b_BothSpellingsOnOneOpIsExit3`
+
+SPEC R-37b: one intent, one place. An op carrying an except clause in its op
+string AND an `except` array is exit 3, before any repo is read — a policy
+whose two halves might disagree must never reach a decision about which one
+wins.
+
+The fragment is the requirement id: today this policy dies with `unknown
+field "except"`, which contains the words "except" and "op", so any obvious
+semantic fragment passes vacuously against a binary that does not implement
+the array at all. Every policy-error message in this codebase already cites
+its requirement.
+
+### `TestR37c_ArrayPatternMayContainALiteralSpace`
+
+SPEC R-37c: the array needs no delimiter, so the escaping rules the string
+grammar imposes do not apply to it and a pattern containing a space is a
+plain JSON string. This is the one case where the array is strictly more
+expressive than the string spelling it is otherwise equivalent to, so both
+halves are asserted: the array accepts it, and the string form's unescaped
+spelling is still refused.
+
+The written carve line is the CODEOWNERS spelling — the space escaped —
+because the file has its own grammar; the JSON does not.
+
+### `TestR37d_EmptyArrayIsExit3`
+
+SPEC R-37d: an empty array is exit 3 — state no `except`, not an empty one.
+A generator that emits `"except": []` when it has nothing to carve is asking
+for the broad grant with no carve-out, which is exactly the S-8
+precedence-escalation shape R-28's default refuses per repo; as a static fact
+about the policy it belongs at exit 3, once, not at exit 2 a hundred times.
+
+Fragment is the requirement id, for the reason given on R-37b: today's
+unknown-field message already contains every obvious semantic word.
+
+### `TestR37e_AllowPathReportsIdenticallyBetweenSpellings`
+
+SPEC R-37e/R-28/R-32: the opt-out reports identically too. `allow` is a
+declare-class weakening of INV-1 — the grant is written with no carve, so a
+matching file created later falls under it — and the three things that make
+it visible (proven: "structural", except_unmatched, a warning) must not go
+missing merely because the carve-out was spelled as an array. Exact bytes
+pin that `allow` APPLIES the grant rather than quietly skipping the op.
+
+### `TestR37e_ZeroMatchRefusalIsIdenticalBetweenSpellings`
+
+SPEC R-37e/R-28: an except pattern matching zero tracked files refuses this
+repo at exit 2 under the default, and the refusal an operator reads must not
+depend on which spelling the policy used — a fleet that mixes the two would
+otherwise produce two different diagnoses for one condition. The stderrs are
+compared with the op string redacted, since that is the one difference R-37
+licenses.
+
 ### `TestRollout_AuditGateAfterADeclareBaseline`
 
 SPEC R-11/A-4: `audit --fail-on` lets the CI gate ride on the findings that
@@ -1643,8 +2368,8 @@ without opening every clone. Without this field the only workable recipe is
 the clone ends up in 100 PRs. `plan` and `snapshot` have named their file
 since v1; the record that drives the fleet is the one document that did not.
 
-Under --create the path is where the file WOULD be written, so `--dry-run
---create` previews it too.
+Under a create-bearing policy the path is where the file WOULD be written, so
+`--dry-run` previews it too.
 
 ### `TestRollout_SecondWaveReorgVerifiesOutOfScope`
 
@@ -1766,7 +2491,7 @@ up the property the rest of this suite exists to defend.
 
 ### `TestScenario_CreateWritesNothingWhenThereIsNothingToSay`
 
-SPEC R-23/R-24 (restraint): `--create` is permission to create, not an
+SPEC R-23/R-24 (restraint): `"create": true` is permission to create, not an
 instruction to. A repo the policy has nothing to say about ends up with no
 CODEOWNERS, no `.github/` directory, and no `codeowners_path` in its record.
 
@@ -2981,6 +3706,11 @@ it claimed to be. Only an org owner sees secret teams.
 ### `TestParse_Malformed`
 
 SPEC R-17 exit 3: malformed ops are invalid input, rejected at parse time.
+
+### `TestParse_OwnerList`
+
+SPEC R-33: add_owner and remove_owner accept a bracketed owner list, folding
+to the same targets as the single-owner ops it replaces.
 
 ### `TestParse_RemoveOwner`
 
@@ -4350,6 +5080,37 @@ SPEC R-21: require and skip ARE meaningful on remove_owner — "this repo must
 have had @a here" versus "clean it up where it exists". Rejecting them would
 make the only fleet-safe removal impossible.
 
+### `TestR36_LintBlockIsReadBackAsStated`
+
+SPEC R-36: the lint block is read back as stated, so one committed artifact
+carries both halves of the policy. Nothing here acts on it — `sync` never
+will (R-36c) — but the loader is the only place that can prove the block a
+reviewer approved is the block `lint` will run.
+
+### `TestR35e_DefaultDeclareSkipsTheOpsThatRefuseIt`
+
+SPEC R-35e: a default reaches only the ops that can carry the VALUE, not
+merely the ops that can carry the field. `declare` is refused per-op on a
+remove_owner (there is no rule that declares the absence of an owner) and on
+an op with an except clause (R-30), so a baseline that states it once and
+happens to contain either kind must not be rejected on every repository —
+the operator's only route back would be to expand the block into one value
+per op, which is the arithmetic the block exists to remove.
+
+Each op below is asserted to keep the built-in `require`, not merely to
+parse: a default that reached the op and was silently downgraded to `skip`
+would also make the file load, and would then pass over a repo the policy
+meant to refuse.
+
+### `TestR37c_ArrayPatternWithASpaceBecomesEscapedPatternText`
+
+SPEC R-37c: the array drops the DELIMITER, so a pattern containing a space is
+one pattern — and it reaches the op as the pattern text CODEOWNERS itself
+uses, with the space escaped. The file has its own grammar; the JSON does
+not. An unescaped space stored here would re-parse as a pattern plus an owner
+token the moment the carve line was written (the refusal checkScope exists
+for), so the conversion is the whole point of the field.
+
 ## internal/resolve
 
 **`resolve_test.go`**
@@ -4422,4 +5183,4 @@ DIFFERENT states; transitioning between them is a real ownership change.
 
 ---
 
-451 documented test cases across 13 packages.
+510 documented test cases across 13 packages.
