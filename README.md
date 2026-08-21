@@ -283,8 +283,10 @@ under `set -e` a good policy always lets the script continue.
 
 ## How to: write a new CODEOWNERS file
 
-For a repo with no CODEOWNERS at all, `--create` writes one at `.github/CODEOWNERS`.
-It never overwrites an existing file, and it's off by default.
+For a repo with no CODEOWNERS at all, `create` writes one at `.github/CODEOWNERS`. It
+never overwrites an existing file, and it's off by default. A policy run states it as
+`"create": true` in the policy; `--create` is the flag for `--op` runs, and alongside
+`--policy` it is exit 3 — a flag must not decide what the reviewed artifact answers.
 
 It is permission to create a file, not an instruction to. When there is nothing to write —
 every op carrying `on_zero_match: "skip"` matched nothing — it creates no file and no
@@ -311,6 +313,7 @@ For a real file, put the ops in a policy so the whole shape is reviewable in one
 {
   "version": 1,
   "name": "bootstrap ownership",
+  "create": true,
   "ops": [
     "add_owner(*, @org/everyone)",
     "add_owner(/services/api/, @org/api-team)",
@@ -323,7 +326,7 @@ For a real file, put the ops in a policy so the whole shape is reviewable in one
 ```console
 $ codeowners-tool check --policy bootstrap.json
 ok: bootstrap.json — 4 op(s), no policy errors
-$ codeowners-tool sync --policy bootstrap.json --create
+$ codeowners-tool sync --policy bootstrap.json
 applied: 4 op(s) applied, 0 skipped; 4 line change(s), 4 path(s) change owners
   ops[0]  applied (proven: tree)
   ops[1]  applied (proven: tree)
@@ -344,7 +347,7 @@ number of them can share one run. `set_owners(*, …)` overlaps every other scop
 *not* commute with them, so the batch is refused rather than silently resolved by order:
 
 ```console
-$ codeowners-tool sync --policy bootstrap.json --create
+$ codeowners-tool sync --policy bootstrap.json
 error: ops "set_owners(*, [@org/everyone])" and "add_owner(/services/api/, @org/api-team)"
 overlap on "services/api/main.go" and do not commute (R-8: refusing order-dependent batch)
 ```

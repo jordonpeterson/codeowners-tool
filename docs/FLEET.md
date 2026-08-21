@@ -11,6 +11,7 @@ Put the ops in a file once:
 ```json
 {
   "version": 1,
+  "create": true,
   "ops": [
     "add_owner(/services/api/, @org/api-team)",
     "add_owner(/.github/workflows/, @org/ci)"
@@ -18,12 +19,16 @@ Put the ops in a file once:
 }
 ```
 
+`create` lets a repo with no CODEOWNERS get its first one, and never overwrites an
+existing file. It belongs in the policy: `--create` is for `--op` runs, and passing it
+next to `--policy` is exit 3, so the artifact in git is always the policy that ran.
+
 Then:
 
 ```bash
 while read -r repo; do
   gh repo clone "$repo" "work/$repo" -- --depth 1 -q
-  codeowners-tool sync --repo "work/$repo" --policy policy.json --create
+  codeowners-tool sync --repo "work/$repo" --policy policy.json
 done < repos.txt          # one "org/name" per line
 ```
 
@@ -120,7 +125,7 @@ while read -r repo; do                         # repos.txt: one "org/name" per l
   fi
 
   code=0
-  codeowners-tool sync --repo "work/$repo" --policy policy.json --create \
+  codeowners-tool sync --repo "work/$repo" --policy policy.json \
     --format json --summary-out "bodies/${repo//\//__}.md" >> results.jsonl || code=$?
   case $code in
     # done.txt is the resume guard, so ONLY a converged repo goes in it. Marking
@@ -236,7 +241,8 @@ PR is the one moment somebody is already reading that file.
 A rollout's failure mode is not only "it didn't apply" — it is "it applied to more than
 anyone meant". Three things keep a wave narrow:
 
-**`--create` is permission, not instruction.** A repo where every op skips gets no file,
+**`"create": true` in the policy (or `--create` with `--op`) is permission, not
+instruction.** A repo where every op skips gets no file,
 no `.github/` directory, `"status": "skipped"`, and no `codeowners_path`. Nothing to
 commit, nothing to review, and the repo still answers "no CODEOWNERS yet" to whoever asks
 next. An empty file would answer *done* forever.

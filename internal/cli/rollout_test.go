@@ -79,6 +79,25 @@ func rolloutPolicy(t *testing.T, src string) string {
 	return path
 }
 
+// policyWithCreate returns src with `"create": true` added (R-34a). R-34b makes
+// `--create` alongside `--policy` exit 3, so a fixture that needs permission to
+// write a first CODEOWNERS states it in the reviewed artifact. Derived from the
+// base policy rather than copied, so the two spellings cannot drift apart — and
+// every other field, including a deliberate defect, survives verbatim.
+func policyWithCreate(t *testing.T, src string) string {
+	t.Helper()
+	var doc map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(src), &doc); err != nil {
+		t.Fatalf("policy source is not JSON: %v", err)
+	}
+	doc["create"] = json.RawMessage("true")
+	b, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
+
 // SPEC R-19/R-24: the four clone shapes a fleet runner is handed, and the
 // verdict each must produce.
 //
@@ -140,7 +159,8 @@ func TestRollout_CloneShapesTheRunnerMeets(t *testing.T) {
 	t.Run("repository with no commits", func(t *testing.T) {
 		dir := t.TempDir()
 		gitIn(t, dir, "init", "-q", "-b", "main")
-		rec, code, _ := rolloutSync(t, "--repo", dir, "--policy", policy, "--create")
+		creating := rolloutPolicy(t, policyWithCreate(t, rolloutPolicySrc))
+		rec, code, _ := rolloutSync(t, "--repo", dir, "--policy", creating)
 		if code != cli.ExitRefused {
 			t.Fatalf("exit %d, want 2 — a repo with no commits is one repo's problem, and exit 3 would halt the rollout", code)
 		}
@@ -152,7 +172,7 @@ func TestRollout_CloneShapesTheRunnerMeets(t *testing.T) {
 			t.Error("an error record must carry the reason")
 		}
 		if _, ok := fleetCodeowners(t, dir); ok {
-			t.Error("--create must write nothing into a repository the tool could not read")
+			t.Error("`create` must write nothing into a repository the tool could not read")
 		}
 	})
 }
@@ -168,25 +188,30 @@ func TestRollout_CloneShapesTheRunnerMeets(t *testing.T) {
 // the clone ends up in 100 PRs. `plan` and `snapshot` have named their file
 // since v1; the record that drives the fleet is the one document that did not.
 //
-// Under --create the path is where the file WOULD be written, so `--dry-run
-// --create` previews it too.
+// Under a create-bearing policy the path is where the file WOULD be written, so
+// `--dry-run` previews it too.
 func TestRollout_RecordNamesTheFileItWrote(t *testing.T) {
 	t.Parallel()
 	policy := rolloutPolicy(t, rolloutPolicySrc)
+	// The same policy, with the permission to create stated where R-34b requires
+	// it. Only the two create cases run it, so the three repos that already have
+	// a file still prove they need no such permission.
+	creating := rolloutPolicy(t, policyWithCreate(t, rolloutPolicySrc))
 	sources := map[string]string{
 		"services/api/main.go": "package api\n",
 	}
 	cases := []struct {
-		name  string
-		files map[string]string
-		extra []string
-		want  string
+		name   string
+		files  map[string]string
+		policy string
+		extra  []string
+		want   string
 	}{
 		{name: ".github", files: map[string]string{".github/CODEOWNERS": "* @org/eng\n"}, want: ".github/CODEOWNERS"},
 		{name: "root", files: map[string]string{"CODEOWNERS": "* @org/eng\n"}, want: "CODEOWNERS"},
 		{name: "docs", files: map[string]string{"docs/CODEOWNERS": "* @org/eng\n"}, want: "docs/CODEOWNERS"},
-		{name: "created", files: nil, extra: []string{"--create"}, want: ".github/CODEOWNERS"},
-		{name: "created under dry-run", files: nil, extra: []string{"--create", "--dry-run"}, want: ".github/CODEOWNERS"},
+		{name: "created", files: nil, policy: creating, want: ".github/CODEOWNERS"},
+		{name: "created under dry-run", files: nil, policy: creating, extra: []string{"--dry-run"}, want: ".github/CODEOWNERS"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -198,7 +223,11 @@ func TestRollout_RecordNamesTheFileItWrote(t *testing.T) {
 				files[k] = v
 			}
 			dir := initRepo(t, files)
-			rec, code, errOut := rolloutSync(t, append([]string{"--repo", dir, "--policy", policy}, tc.extra...)...)
+			pol := policy
+			if tc.policy != "" {
+				pol = tc.policy
+			}
+			rec, code, errOut := rolloutSync(t, append([]string{"--repo", dir, "--policy", pol}, tc.extra...)...)
 			if code != cli.ExitOK {
 				t.Fatalf("exit %d, want 0\nstderr: %s", code, errOut)
 			}
@@ -223,7 +252,7 @@ func TestRollout_RecordNamesTheFileItWrote(t *testing.T) {
 		dir := initRepo(t, sources)
 		rec, code, _ := rolloutSync(t, "--repo", dir, "--policy", policy)
 		if code != cli.ExitRefused {
-			t.Fatalf("exit %d, want 2 (no CODEOWNERS, no --create)", code)
+			t.Fatalf("exit %d, want 2 (no CODEOWNERS, and the policy does not say `create`)", code)
 		}
 		if rec.CodeownersPath != "" {
 			t.Errorf("codeowners_path = %q, want empty — nothing was written and nothing may be staged", rec.CodeownersPath)

@@ -102,10 +102,14 @@ func scenarioRules(t *testing.T, repo, rel string) []string {
 
 // scenarioBaseline is the policy a greenfield wave runs: a catch-all nobody
 // argues with, two claimed directories, and a declared rule for a directory a
-// repo may not have yet.
+// repo may not have yet. Permission to write a first CODEOWNERS is stated in
+// the artifact, not on the command line: R-34b makes `--create` alongside
+// `--policy` exit 3, because a flag outside the reviewed file must not decide
+// whether a repo gets one.
 const scenarioBaseline = `{
   "version": 1,
   "name": "org baseline ownership",
+  "create": true,
   "ops": [
     "add_owner(*, @org/everyone)",
     { "id": "api",  "op": "add_owner(/services/api/, @org/api-team)", "on_zero_match": "skip" },
@@ -141,7 +145,7 @@ func TestScenario_CreateWritesExactlyWhatThePolicyJustifies(t *testing.T) {
 	var dir string
 	for i := 0; i < 3; i++ {
 		dir = initRepo(t, files)
-		rec, code, errOut := scenarioSync(t, "--repo", dir, "--policy", policy, "--create")
+		rec, code, errOut := scenarioSync(t, "--repo", dir, "--policy", policy)
 		if code != cli.ExitOK {
 			t.Fatalf("exit %d, want 0\nstderr: %s", code, errOut)
 		}
@@ -198,7 +202,7 @@ func TestScenario_CreateWritesExactlyWhatThePolicyJustifies(t *testing.T) {
 			}
 		}
 	}
-	if _, code, _ := scenarioSync(t, "--repo", dir, "--policy", policy, "--create"); code != cli.ExitOK {
+	if _, code, _ := scenarioSync(t, "--repo", dir, "--policy", policy); code != cli.ExitOK {
 		t.Fatal("second run must converge")
 	}
 }
@@ -220,7 +224,7 @@ func TestScenario_CreateSkipsWhatTheRepoDoesNotHave(t *testing.T) {
 		"src/lib.ts": "//\n",
 	})
 
-	rec, code, errOut := scenarioSync(t, "--repo", dir, "--policy", policy, "--create")
+	rec, code, errOut := scenarioSync(t, "--repo", dir, "--policy", policy)
 	if code != cli.ExitOK {
 		t.Fatalf("exit %d, want 0\nstderr: %s", code, errOut)
 	}
@@ -248,7 +252,7 @@ func TestScenario_CreateSkipsWhatTheRepoDoesNotHave(t *testing.T) {
 	}
 }
 
-// SPEC R-23/R-24 (restraint): `--create` is permission to create, not an
+// SPEC R-23/R-24 (restraint): `"create": true` is permission to create, not an
 // instruction to. A repo the policy has nothing to say about ends up with no
 // CODEOWNERS, no `.github/` directory, and no `codeowners_path` in its record.
 //
@@ -262,6 +266,7 @@ func TestScenario_CreateWritesNothingWhenThereIsNothingToSay(t *testing.T) {
 	t.Parallel()
 	policy := rolloutPolicy(t, `{
   "version": 1,
+  "create": true,
   "ops": [
     { "op": "add_owner(/services/api/, @org/api-team)", "on_zero_match": "skip" },
     { "op": "add_owner(**/*.tf, @org/infra)",           "on_zero_match": "skip" },
@@ -273,7 +278,7 @@ func TestScenario_CreateWritesNothingWhenThereIsNothingToSay(t *testing.T) {
 		"site/index.html": "<!-- -->\n",
 	})
 
-	rec, raw, code := scenarioBothViews(t, "--repo", dir, "--policy", policy, "--create")
+	rec, raw, code := scenarioBothViews(t, "--repo", dir, "--policy", policy)
 	if code != cli.ExitOK {
 		t.Fatalf("exit %d, want 0 — this repo does not need a human, the policy simply has nothing to say about it", code)
 	}
@@ -289,7 +294,7 @@ func TestScenario_CreateWritesNothingWhenThereIsNothingToSay(t *testing.T) {
 	}
 	for _, rel := range []string{".github/CODEOWNERS", "CODEOWNERS", "docs/CODEOWNERS"} {
 		if _, err := os.Stat(filepath.Join(dir, filepath.FromSlash(rel))); err == nil {
-			t.Errorf("a CODEOWNERS appeared at %s; --create is permission, not instruction", rel)
+			t.Errorf("a CODEOWNERS appeared at %s; `create` is permission, not instruction", rel)
 		}
 	}
 	if _, err := os.Stat(filepath.Join(dir, ".github")); err == nil {
@@ -529,13 +534,14 @@ func TestScenario_UnclaimedPathsStayUnownedAndTheTwoKindsDiffer(t *testing.T) {
 	})
 	policy := rolloutPolicy(t, `{
   "version": 1,
+  "create": true,
   "ops": [
     "add_owner(/services/api/, @org/api-team)",
     "add_owner(/services/web/, @org/web-team)"
   ]
 }`)
 
-	rec, code, errOut := scenarioSync(t, "--repo", dir, "--policy", policy, "--create")
+	rec, code, errOut := scenarioSync(t, "--repo", dir, "--policy", policy)
 	if code != cli.ExitOK {
 		t.Fatalf("exit %d, want 0\nstderr: %s", code, errOut)
 	}
