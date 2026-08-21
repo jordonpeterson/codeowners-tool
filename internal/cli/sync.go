@@ -190,14 +190,6 @@ func cmdSync(args []string, stdout, stderr io.Writer) int {
 	if *onEmpty != "" && len(policyPaths) > 0 {
 		return exit3(stderr, errors.New("--on-empty is not allowed with --policy: set \"on_empty\" in the policy file instead, or the artifact in git is not the policy that ran (R-20)"))
 	}
-	// The third member of that family (R-34b), and the one whose false default
-	// hid it: `--policy p.json --create` used to create the file at exit 0
-	// while `--on-empty` in the same position was refused, so the artifact in
-	// git was not the policy that ran. Keyed on presence rather than value for
-	// the reason `passed` exists.
-	if passed["create"] && len(policyPaths) > 0 {
-		return exit3(stderr, errors.New("--create is not allowed with --policy: set \"create\" in the policy file instead, or the artifact in git is not the policy that ran (R-20/R-34)"))
-	}
 	// A non-HEAD --branch may not write — checkBranchIsWritable enforces that
 	// for creates and edits alike, by comparing RESOLVED COMMITS rather than
 	// the literal string "HEAD". Comparing strings rejected `--branch main` on
@@ -232,6 +224,17 @@ func cmdSync(args []string, stdout, stderr io.Writer) int {
 	}
 	if maxPathsSet && *maxPaths < 0 {
 		return exit3(stderr, fmt.Errorf("--max-paths-changed %d must be zero or positive; omit the flag to set no ceiling (R-25)", *maxPaths))
+	}
+	// The third member of that family (R-34b), and the one whose false default
+	// hid it: `--policy p.json --create` used to create the file at exit 0
+	// while `--on-empty` in the same position was refused, so the artifact in
+	// git was not the policy that ran. Keyed on presence rather than value for
+	// the reason `passed` exists, and placed after opSource for the reason the
+	// ceiling's ban is — a policy that does not parse is the more fundamental
+	// problem in the same command line, and reporting the flag first would let
+	// "the broken policy halted the fleet" be proven by the flag instead.
+	if passed["create"] && len(policyPaths) > 0 {
+		return exit3(stderr, errors.New("--create is not allowed with --policy: set \"create\" in the policy file instead, or the artifact in git is not the policy that ran (R-20/R-34)"))
 	}
 	if maxPathsSet && len(policyPaths) > 0 {
 		// Mirrors --on-empty exactly, and for the same reason: the ceiling is a

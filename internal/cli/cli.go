@@ -198,7 +198,7 @@ func usage(w io.Writer) {
            [--cache-dir D] [--cache-ttl DUR] [--repo DIR] [--branch REF] [--file PATH]
   lint     --github-repo owner/name [--token T | $GITHUB_TOKEN] [--api-url URL]
            [--remove-stale-paths] [--on-empty error|inherit|unowned] [--dry-run]
-           [--repo DIR] [--branch REF] [--file PATH] [--format text|json]
+           [--policy FILE] [--repo DIR] [--branch REF] [--file PATH] [--format text|json]
   snapshot [--repo DIR] [--branch REF] [--out snap.json]
   verify   --before before.json --after after.json [--scope PATTERN ...]
   version  print the build this binary was stamped with
