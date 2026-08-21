@@ -74,7 +74,7 @@ else (bad enum values, ops that can't carry the `on_zero_match` you gave them, a
 | `--repo` | Local git repository. Default `.`. |
 | `--branch` | Ref whose tracked tree governs resolution (S-7). Default `HEAD`. |
 | `--file` | CODEOWNERS path override, repo-relative. |
-| `--on-empty` | Policy when `remove_owner` empties an owner set. Allowed only with `--op`; with `--policy`, set `on_empty` in the file instead. |
+| `--on-empty` | Policy when `remove_owner` empties an owner set. Allowed only with `--op`; with `--policy`, set `on_empty` in the file instead. An unknown value is exit 3, checked before any repository is opened. |
 | `--create` | Permission to write a CODEOWNERS if the repo has none — not an instruction to. Off by default, never overwrites, and a run with nothing to write creates nothing (no file, no `.github/`). With `--file`, the file is created at that path instead of `.github/CODEOWNERS`. |
 | `--max-paths-changed` | R-25 ceiling: refuse (exit 2) if the run would change the owners of more than N paths. Off by default. Allowed only with `--op`; with `--policy`, set `max_paths_changed` in the file. |
 | `--dry-run` | Makes no change to CODEOWNERS. `--out` and `--summary-out` still emit. |
@@ -102,6 +102,7 @@ rules the tool follows.
 | `op` | per op | yes | Op string, same syntax as `--op`. |
 | `id` | per op | no | Short label used in JSON results and error messages. |
 | `on_zero_match` | per op | no | `require` (default) \| `skip` \| `declare` |
+| `on_except_zero_match` | per op | no | `require` (default) \| `allow` — only on ops whose scope carries an `except` clause; governs an except pattern that matches zero tracked files ([except.md](except.md), R-28) |
 | `note` | per op | no | Reaches the PR reviewer via `--summary-out`. |
 
 Unknown fields are a hard error — a typo'd `on_zero_mtach` that silently fell back to the
@@ -283,6 +284,13 @@ Scope is a directory, file path, or glob — same syntax as CODEOWNERS patterns.
 | `remove_owner(scope, owner)` | Owner stops owning every path in scope. If a rule's owner set would empty, an `--on-empty` policy is **required**. |
 | `rename_owner(old, new)` | Global identifier substitution — the only op safe as pure text replacement (it can't change any rule's match set). |
 
+The scope of `add_owner`, `set_owners` and `remove_owner` may carry an `except`
+clause — `add_owner(/.github/ except /.github/CODEOWNERS, @team)` grants
+everything under the scope while the excepted paths keep exactly their current
+owners. Flat subtraction only: no unions, no nested or grouped excepts, no
+except-of-except. Full semantics, refusal rules and the carve-out record fields:
+**[except.md](except.md)** (R-26…R-32).
+
 ## The two invariants
 
 - **INV-1 (in scope):** after apply, every in-scope path resolves to exactly what the op
@@ -317,6 +325,16 @@ narrowing pattern is derivable — amending would violate INV-2, appending would
 
 Ops that took this path report `"proven": "structural"` in the JSON and are called out in
 `--summary-out`, so a reviewer can find them without reading the diff.
+
+## What `on_except_zero_match: allow` costs
+
+The same class of weakening, reachable from `except` ([except.md](except.md), R-28): an
+except pattern that matches nothing tracked means the carve-out the policy promises does
+not exist in this repo, so under `allow` the grant is written with **no carve line** — a
+matching file created later falls under the grant, and nothing in the repo today can
+verify the carve-out you asked for. INV-2 is unaffected. The op reports
+`"proven": "structural"`, the inert pattern is listed in `except_unmatched`, and a warning
+is emitted. The default (`require`) refuses instead — exit 2, "normalize this repo first".
 
 ## Creating a file (R-23), and not creating one
 
@@ -511,6 +529,13 @@ Unlike the `sync` record, `actions`, `changes` and `ownership_rows` are always p
 `sync` uses a coarse three-code contract — its question is "did this repo converge?" — and
 returns exactly `0`, `2`, or `3`, never anything else. Every other command uses the
 precise taxonomy below.
+
+An exit-3 verdict is reached **before the repository is opened**, so that run emits
+no JSON record and writes neither `--out` nor `--summary-out`. This is deliberate — a
+row for a repo that was never read would be a phantom entry in the aggregation — but
+it means a fleet that aggregates `records/*.json` will not see those repos at all.
+The exit code is the signal, and `sync` says so on stderr when either sink was asked
+for.
 
 **The two tables do not use the same numbers for the same things**, so don't read across.
 `sync` maps the precise codes onto its own by asking a single question — *is this about

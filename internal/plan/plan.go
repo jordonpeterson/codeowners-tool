@@ -86,14 +86,32 @@ type Row struct {
 }
 
 // OpResult is one op's outcome (R-24). Proven distinguishes an op checked
-// against real tracked files ("tree") from a declare op that matched none
-// and could only be proven structurally ("structural", INV-6).
+// against real tracked files ("tree") from one that could only be proven
+// structurally ("structural", INV-6) — a declare that matched nothing, or an
+// except-carrying op that wrote under on_except_zero_match=allow.
 type OpResult struct {
 	ID     string `json:"id,omitempty"`
 	Op     string `json:"op"`
 	Status string `json:"status"`           // applied | skipped | unchanged
 	Proven string `json:"proven,omitempty"` // tree | structural
 	Reason string `json:"reason,omitempty"`
+
+	// R-32, additive and omitempty so records for ops without an except
+	// clause stay byte-identical to before the feature existed. Excepted is
+	// every tracked excepted path with its resolved owners in the final
+	// after-batch state; ExceptUnmatched lists except patterns that matched
+	// zero tracked files (reachable with a written file only under
+	// on_except_zero_match=allow, R-28).
+	Excepted        []ExceptedPath `json:"excepted,omitempty"`
+	ExceptUnmatched []string       `json:"except_unmatched,omitempty"`
+}
+
+// ExceptedPath is one carved-out path and who holds it after the batch — the
+// per-repo surface for the don't-touch-≠-revoke misread: a grantee already
+// owning an excepted path is visible here, not silent (R-32).
+type ExceptedPath struct {
+	Path   string   `json:"path"`
+	Owners []string `json:"owners"`
 }
 
 // Plan is the machine-readable output of `plan` and the sole input of
@@ -136,10 +154,19 @@ func Build(content []byte, tree []string, opList []ops.Op, opts Options) (*Plan,
 	}
 
 	// Per-op scope path sets (R-5: empty scope is invalid input, unless a
-	// policy op opts out per R-21).
+	// policy op opts out per R-21). For an except-carrying op the set is the
+	// EFFECTIVE scope — {tracked scope matches} \ {tracked except matches}
+	// (R-26) — and every mechanism downstream of here (R-8, the rename
+	// fixpoint, synthesis, the INV-1/INV-2 gate) ranges over it unchanged:
+	// excepted paths are simply out of the op's scope, so the existing
+	// invariants, not new machinery, prove them untouched.
 	scopeSets := make([]map[string]bool, len(opList))
+	exceptSets := make([]map[string]bool, len(opList))
+	exceptUnmatched := make([][]string, len(opList))
+	structural := make([]bool, len(opList))
 	skipped := make([]bool, len(opList))
 	declared := make([]bool, len(opList))
+	var allowWarnings []string
 	for i, op := range opList {
 		set := map[string]bool{}
 		if op.Kind == ops.RenameOwner {
@@ -157,12 +184,41 @@ func Build(content []byte, tree []string, opList []ops.Op, opts Options) (*Plan,
 			if err != nil {
 				return nil, &InvalidError{Msg: fmt.Sprintf("invalid scope %q: %v", op.Scope, err)}
 			}
+			raw := 0
 			for _, p := range tree {
 				if pat.Match(p) {
 					set[p] = true
+					raw++
 				}
 			}
+			excepted := map[string]bool{}
+			var zeroPats []string
+			for _, e := range op.Except {
+				ep, err := pattern.Compile(e)
+				if err != nil {
+					return nil, &InvalidError{Msg: fmt.Sprintf("invalid except pattern %q: %v", e, err)}
+				}
+				n := 0
+				for _, p := range tree {
+					if ep.Match(p) {
+						excepted[p] = true
+						delete(set, p)
+						n++
+					}
+				}
+				if n == 0 {
+					zeroPats = append(zeroPats, e)
+				}
+			}
+			exceptSets[i] = excepted
 			if len(set) == 0 {
+				// R-28's two emptiness questions are ORDERED, and this arm is
+				// the first: an empty EFFECTIVE scope is disposed of by
+				// on_zero_match, and on_except_zero_match (the else-if below)
+				// is never consulted — an op that writes nothing can reopen
+				// nothing, which is what keeps "if this repo has /services/"
+				// skip-policies from refusing on every repo that lacks the
+				// directory.
 				switch op.OnZeroMatch {
 				case ops.ZeroMatchSkip:
 					// The op stays in opList with an empty scope set rather
@@ -178,13 +234,50 @@ func Build(content []byte, tree []string, opList []ops.Op, opts Options) (*Plan,
 							"on_zero_match=declare is meaningless on %s: there is no rule to remove an owner from (R-21)", op.Raw)}
 					}
 					declared[i] = true
-				default:
+				case ops.ZeroMatchRequire, "":
 					// "" and "require" are the same state, and this arm — not a
 					// comparison against "require" — is what makes that true:
 					// every op parsed from --op carries "", and R-21's
 					// compatibility guarantee is that those keep hitting R-5
 					// exactly as before the field existed.
+					//
+					// The two refusals are distinguished deliberately: "scope
+					// matches nothing" sends the operator to the scope, while
+					// "everything in scope is excepted" is how a too-broad
+					// except announces itself — blaming the scope there sends
+					// them hunting a typo in the wrong argument (R-28).
+					if raw > 0 {
+						return nil, &InvalidError{Msg: fmt.Sprintf(
+							"scope %q matches %d tracked file(s), but every one of them is excepted — the except clause empties the op in this repo (R-28)", op.Scope, raw)}
+					}
 					return nil, &InvalidError{Msg: fmt.Sprintf("scope %q matches zero tracked files (R-5: refusing to create a dead rule)", op.Scope)}
+				}
+			} else if len(zeroPats) > 0 {
+				// R-28's second question, reached only when the op WILL write.
+				switch op.OnExceptZeroMatch {
+				case ops.ExceptZeroMatchAllow:
+					// Declare-class weakening of INV-1, marked like one: the
+					// grant goes in with no carve for the unmatched pattern,
+					// so nothing in this repo can verify the carve-out — the
+					// op is proven "structural", listed in except_unmatched
+					// (R-32), and warned about. No dead rule is written for
+					// the pattern (R-5).
+					exceptUnmatched[i] = zeroPats
+					structural[i] = true
+					for _, e := range zeroPats {
+						allowWarnings = append(allowWarnings, fmt.Sprintf(
+							"except pattern %q matches zero tracked files; on_except_zero_match=allow writes the grant with NO carve for it, so a matching file created later falls under the grant — a declare-class weakening of INV-1, marked proven=structural (R-28)", e))
+					}
+				default:
+					// "" and "require" are one state, exactly as above. An
+					// except that bites nothing means the carve-out this
+					// policy promises does not exist here — in the motivating
+					// case, granting .github/ to a repo whose CODEOWNERS
+					// still sits at the root would reopen the S-8
+					// precedence-escalation hole for a later-created
+					// /.github/CODEOWNERS.
+					return nil, &RefusalError{Msg: fmt.Sprintf(
+						"refusing: except pattern %q matches zero tracked files — the carve-out this policy promises does not exist in this repo, and writing the grant without it would reopen the hole the except exists to close (R-28); normalize this repo first, or set on_except_zero_match=allow to accept the weakening", zeroPats[0])}
 				}
 			}
 		}
@@ -292,6 +385,9 @@ func Build(content []byte, tree []string, opList []ops.Op, opts Options) (*Plan,
 	for _, op := range opList {
 		pl.Ops = append(pl.Ops, op.Raw)
 	}
+	for _, w := range allowWarnings {
+		pl.addWarning(w)
+	}
 
 	// Synthesize edits op by op on the evolving file. A declare op runs against
 	// the SAME evolving file, which is what lets two declares on one scope
@@ -321,21 +417,35 @@ func Build(content []byte, tree []string, opList []ops.Op, opts Options) (*Plan,
 		case declared[i]:
 			err = synthDeclare(f, op, batch, &declares, pl)
 		default:
-			switch op.Kind {
-			case ops.AddOwner:
-				err = synthAdd(f, tree, op, scopeSets[i], desired, pl)
-			case ops.SetOwners:
-				err = synthSet(f, tree, op, scopeSets[i], desired, pl)
-			case ops.RemoveOwner:
-				err = synthRemove(f, tree, op, scopeSets[i], desired, opts.OnEmpty, pl)
-			case ops.RenameOwner:
-				err = synthRename(f, op, desired, pl)
+			// R-29's baseline: the excepted paths' owners on the EVOLVING file,
+			// captured before this op edits it — not the before-batch snapshot.
+			// A sibling rename ordered earlier must see its rename respected;
+			// restating stale before-batch owners in a carve would force a
+			// spurious gate refusal.
+			var base map[string]exceptBaseline
+			if len(exceptSets[i]) > 0 {
+				base, err = exceptedBaseline(f, tree, op, exceptSets[i])
+			}
+			if err == nil {
+				switch op.Kind {
+				case ops.AddOwner:
+					err = synthAdd(f, tree, op, scopeSets[i], desired, pl)
+				case ops.SetOwners:
+					err = synthSet(f, tree, op, scopeSets[i], desired, pl)
+				case ops.RemoveOwner:
+					err = synthRemove(f, tree, op, scopeSets[i], desired, opts.OnEmpty, pl)
+				case ops.RenameOwner:
+					err = synthRename(f, op, desired, pl)
+				}
+			}
+			if err == nil && len(exceptSets[i]) > 0 {
+				err = synthCarves(f, tree, op, exceptSets[i], base, pl)
 			}
 		}
 		if err != nil {
 			return nil, err
 		}
-		pl.OpResults = append(pl.OpResults, opResultFor(op, skipped[i], declared[i], len(pl.Changes) > mark))
+		pl.OpResults = append(pl.OpResults, opResultFor(op, skipped[i], declared[i], structural[i], len(pl.Changes) > mark))
 	}
 
 	// ASSERT: the gate. Serialize, RE-PARSE, and re-resolve over the real
@@ -376,6 +486,26 @@ func Build(content []byte, tree []string, opList []ops.Op, opts Options) (*Plan,
 	// needs told. Prove it structurally instead, or refuse.
 	if err := proveDeclares(file.Parse(afterBytes), declares, batch, pl); err != nil {
 		return nil, err
+	}
+
+	// R-32: the record explains the carve-outs. Owners come from the FINAL
+	// after-batch state, not the before snapshot: when a sibling op reassigns
+	// a carved path (R-31's layered policy), the after-batch owners are the
+	// ones an operator auditing "who ended up holding the carve-outs" needs.
+	// Populated before the converged early-return below, because run 2 of a
+	// nightly job must keep disclosing the same facts run 1 did (R-19).
+	for i, op := range opList {
+		if len(op.Except) == 0 {
+			continue
+		}
+		var ex []ExceptedPath
+		for _, p := range tree {
+			if exceptSets[i][p] {
+				ex = append(ex, ExceptedPath{Path: p, Owners: after[p].Owners})
+			}
+		}
+		pl.OpResults[i].Excepted = ex
+		pl.OpResults[i].ExceptUnmatched = exceptUnmatched[i]
 	}
 
 	if bytes.Equal(afterBytes, content) {
@@ -525,6 +655,7 @@ func simulate(op ops.Op, owners []string) []string {
 
 func synthAdd(f *file.File, tree []string, op ops.Op, scope map[string]bool, desired map[string][]string, pl *Plan) error {
 	cur := resolve.All(f, tree)
+	derive := deriveDomain(op, scope, tree)
 	warnShadowedDuplicates(f, tree, scope, pl)
 
 	groups := map[int]bool{}
@@ -563,7 +694,7 @@ func synthAdd(f *file.File, tree []string, op ops.Op, scope map[string]bool, des
 				Reason: fmt.Sprintf("pattern %q can only ever match paths inside scope %q; amended in place (R-2/R-4)", r.PatternText, op.Scope),
 			})
 		} else {
-			inter, exact, ok := intersectPattern(op.Scope, r, scope, tree)
+			inter, exact, ok := intersectPattern(op.Scope, r, derive, tree)
 			if !ok {
 				return &RefusalError{Msg: fmt.Sprintf(
 					"refusing: rule %q also governs paths outside scope %q, and no sound narrowing pattern is derivable — amending would violate INV-2, appending would violate INV-1",
@@ -746,6 +877,7 @@ func synthRemove(f *file.File, tree []string, op ops.Op, scope map[string]bool, 
 // was made.
 func removePass(f *file.File, tree []string, op ops.Op, scope map[string]bool, onEmpty string, pl *Plan) (bool, error) {
 	cur := resolve.All(f, tree)
+	derive := deriveDomain(op, scope, tree)
 
 	groups := map[int][]string{}
 	for p := range scope {
@@ -810,7 +942,7 @@ func removePass(f *file.File, tree []string, op ops.Op, scope map[string]bool, o
 			}
 		} else {
 			// Rule also governs out-of-scope paths: split via narrowing insert.
-			inter, exact, ok := intersectPattern(op.Scope, r, scope, tree)
+			inter, exact, ok := intersectPattern(op.Scope, r, derive, tree)
 			if !ok {
 				return false, &RefusalError{Msg: fmt.Sprintf(
 					"refusing: rule %q also governs paths outside scope %q and no sound narrowing pattern is derivable", r.PatternText, op.Scope)}
@@ -948,7 +1080,12 @@ func treeExact(cand string, rule *file.Rule, scopeSet map[string]bool, tree []st
 }
 
 // basenameGlob recognizes a single-segment pattern — one that matches a
-// basename at any depth.
+// basename at any depth. It deliberately does NOT strip an explicit "**/"
+// prefix, even though "**/G" and "G" select the same files: this helper also
+// seeds the one-level (`dir/*`) candidate in intersectPattern, and widening it
+// widens every derivation site at once. The one spelling-equivalence the suite
+// demands (TestR2_NarrowingIsIndependentOfScopeSpelling) is handled where its
+// boundary can be enforced, in globScopeIntersect.
 func basenameGlob(pat string) (string, bool) {
 	if pat == "" || pat == "**" || strings.Contains(pat, "/") {
 		return "", false
@@ -1050,17 +1187,41 @@ func deriveIntersection(scope string, rule *file.Rule, scopeSet map[string]bool,
 // and matches exactly (scope ∩ rule) over the tree — the caller refuses on
 // false, so an inexact derivation degrades to a refusal, never a wrong write.
 func globScopeIntersect(scope string, rule *file.Rule, scopeSet map[string]bool, tree []string) (string, bool) {
-	// The scope must be a bare basename glob: anchored or multi-segment scopes
-	// cannot be concatenated onto a directory prefix without the two path
-	// fragments overlapping.
-	if strings.Contains(scope, "/") {
-		return "", false
-	}
 	dir, ok := ruleDirPrefix(rule.PatternText)
 	if !ok {
 		return "", false
 	}
-	cand := dir + "**/" + scope
+	// The scope must be a single-segment basename glob: anchored or
+	// multi-segment scopes cannot be concatenated onto a directory prefix
+	// without the two path fragments overlapping.
+	//
+	// "**/G" spells the same language as the bare "G", and refusing it while
+	// deriving for "G" made the operator's spelling, not the scope's match
+	// set, decide the outcome — add_owner(**/build.gradle, …) exited 2 on the
+	// very repo where add_owner(build.gradle, …) derived
+	// /.github/**/build.gradle (TestR2_NarrowingIsIndependentOfScopeSpelling).
+	// The trimmed spelling is admitted only against an ANCHORED rule prefix,
+	// though: against an unanchored one the suite pins BOTH outcomes — the
+	// bare glob derives (TestR2_FileGlobScopeAcrossUnanchoredDirRule,
+	// *.gradle × app2/ → **/app2/**/*.gradle) and the "**/" spelling refuses
+	// (the fleet's "refuse" shape, add_owner(**/*.tf, …) × infra/, whose
+	// exit-2 is the needs-human lane every TestFleet_* contract is built on).
+	// Trimming unconditionally flipped that repo from "refused" to "applied":
+	// tree-exact here, but a silent widening of what the tool writes on its
+	// own — expressibility grows via a reviewed R-2 shape, not as a side
+	// effect. So the equivalence holds exactly as far as a test demands it
+	// and not one shape further.
+	seg := scope
+	if s, spelled := strings.CutPrefix(scope, "**/"); spelled {
+		if strings.HasPrefix(dir, "**/") {
+			return "", false
+		}
+		seg = s
+	}
+	if _, ok := basenameGlob(seg); !ok {
+		return "", false
+	}
+	cand := dir + "**/" + seg
 	pat, err := pattern.Compile(cand)
 	if err != nil {
 		return "", false
