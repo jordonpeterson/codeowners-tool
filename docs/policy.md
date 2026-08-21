@@ -151,26 +151,21 @@ R-33d, R-34b, R-35d, R-36d, R-37b and R-37d are all exit 3 while nothing here ad
 new exit 2.
 
 **One exception, found in review and stated rather than hidden.** `defaults` does
-reach R-8's *statically provable* half. `ops.StaticConflict` skips any pair whose
-scope is conditional — `on_zero_match` of `skip` or `declare` — because a scope that
-may match nothing cannot be proven to overlap. So `defaults: {"on_zero_match":
-"skip"}` suppresses that check for every op at once: a batch that `check` refuses at
-exit 3 without the block is accepted with it, and the same batch is then refused per
-repository at exit 2 by the tree-based check instead. No wrong bytes are written —
-`plan.Build` still catches it — and a per-op `skip` has always done the same, so this
-is the block inheriting an existing rule rather than a new hole. But it converts a
-repo-0 defect into an N-repository one, which is the failure mode R-36e argues
-against, and `check`'s echo reports only `skip` per op. **A reviewer reading a policy
-with a `skip` or `declare` default should know the static R-8 verdict is weaker than
-it looks.** Disclosing that in `check` is the natural follow-up; this document does
-not yet require it.
+reach R-8's *statically provable* half. `StaticConflict` skips pairs whose scope is
+conditional (`on_zero_match` of `skip` or `declare`), so a `skip` default suppresses
+that check for every op at once: a batch `check` refuses at exit 3 without the block
+is accepted with it, then refused per repository at exit 2 instead. No wrong bytes
+result — `plan.Build` still catches it — and a per-op `skip` always did the same. But
+it turns a repo-0 defect into an N-repository one, the failure R-36e argues against,
+and `check` echoes only `skip` per op. **A reviewer seeing a `skip` or `declare`
+default should know the static R-8 verdict is weaker than it looks.** Disclosing it in
+`check` is the natural follow-up, not yet required here.
 
 ## R-38 — one owner identity, everywhere
 
-`@handles` are case-insensitive on GitHub. `lint` has always known this
-(`foldOwner`), and R-33c now uses it to reject `[@Org/Team, @org/team]` as one owner
-named twice. Matching does not use it, so the tool refuses that duplicate inside one
-list and then writes the same duplicate across two ops:
+`@handles` are case-insensitive on GitHub. `lint` has always known this (`foldOwner`)
+and R-33c now uses it, so the tool rejects `[@Org/Team, @org/team]` inside one list —
+then writes that same duplicate across two ops, because matching does not:
 
 ```
 file: /x/ @org/team
@@ -187,22 +182,19 @@ reports **converged** on every repository that capitalised the handle.
   remove, rename's old name, `set_owners`, commutation, and resolution — with no
   site free to use its own.
 - **R-38b Add is a no-op when the owner already owns**, whatever spelling either side
-  used, and the line is left byte-identical. The file's existing spelling wins: this
-  tool does not restyle a handle it was not asked to change, and rewriting it would
-  churn a diff on every repository in a fleet.
+  used, and the line stays byte-identical. The file's spelling wins: restyling a handle
+  nobody asked to change would churn a diff on every repository in a fleet.
 - **R-38c Remove takes every spelling with it.** `remove_owner(/x/, @org/team)`
   against a hand-written `/x/ @org/team @Org/Team` leaves neither. The removal
   contract is that no named owner owns any in-scope path afterwards; a surviving
   spelling of the same owner breaks it.
-- **R-38d Rename matches the old name under the same identity**, and writes the new
-  name exactly as the op spells it — a rename is the one verb whose purpose is to
-  change the text, so it is also the one place a spelling change is intended.
+- **R-38d Rename matches the old name under the same identity** and writes the new
+  name exactly as spelled — a rename is the one verb meant to change the text.
 - **R-38e Idempotence holds across spellings.** Re-running any op with a differently
   cased handle is `unchanged` at exit 0 with a byte-identical file. This is the
   property that makes a fleet re-run safe, and it is the one the old behaviour broke
   most quietly.
 - **R-38f Pre-existing duplicates are not silently repaired.** A hand-written line
-  naming one owner twice is treated as that owner for every comparison, but `sync`
-  does not rewrite the line to collapse it — repair is `lint`'s verb, and a `sync`
-  that quietly edits what the policy did not name is the surprise this tool exists to
-  avoid. Removing the owner does of course remove both, per R-38c.
+  naming one owner twice is that owner for every comparison, but `sync` does not
+  rewrite the line to collapse it — repair is `lint`'s verb. Removing the owner still
+  takes both, per R-38c.
