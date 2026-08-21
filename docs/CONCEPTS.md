@@ -14,6 +14,7 @@ What the tool does, in the words you need to follow everything else.
 * **`on_empty`** : what to do when a removal takes a rule's last owner.
 * **Dry run** : produce the plan without writing anything.
 * **Snapshot** : the resolved owner list for every tracked path — ground truth for what changed.
+* **No exclusions** : CODEOWNERS has no `!` negation, so there is no "except this subdirectory". Carve one out with a later, narrower rule — the last match wins.
 
 ## Commands
 
@@ -50,10 +51,24 @@ verify --before before.json --after after.json --scope '/services/api/'
 * **Triage a fleet by exit code, not by log.** 0 converged, 2 needs a human on that repo, 3 stop the rollout.
 * **Reach for `add_owner` by default.** `set_owners` is correct only when you mean "these and nobody else".
 * **Gate CI on `lint --dry-run`.** A successful write can still exit 4 when a line needs a person, so the writing run is the wrong signal.
+* **Re-run freely.** Applying the same ops or policy twice is a no-op: the second run reports `unchanged` at exit 0 and the file is byte-identical. `--create` is included in that.
 * **Start `lint` with `--dry-run` always.** It rewrites files and needs network; one lookup it cannot answer and nothing is written.
 
 ## Exit codes
 
 `sync` and `check` use a coarse contract — **0** converged, **2** this repo needs a human, **3** the policy is broken. The other commands use the full ladder: **0** ok, **1** no-op, **2** refused, **3** invalid input, **4** audit findings, **5** inconclusive, **6** rolled back.
 
-Renames proposed for the awkward names above: [PROPOSAL-NAMING.md](PROPOSAL-NAMING.md).
+## If the proposals land
+
+This file documents the tool as it ships today. [PROPOSAL-NAMING.md](PROPOSAL-NAMING.md) argues
+for these renames, which would arrive with the `version: 2` policy format in
+[PROPOSAL-POLICY-V2.md](PROPOSAL-POLICY-V2.md) — v1 files keep today's names forever.
+
+| today | proposed |
+|---|---|
+| `add_owner` | `add` |
+| `set_owners` | `replace_all` |
+| `remove_owner` | `remove` |
+| `rename_owner` | `rename` |
+| `on_zero_match: require \| skip \| declare` | `if_no_files_match: error \| skip \| write_anyway` |
+| `on_empty` | `if_no_owners_left` |

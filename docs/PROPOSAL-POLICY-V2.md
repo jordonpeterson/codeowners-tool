@@ -6,7 +6,7 @@ one answers the design question: if the JSON were shaped for a human, what shape
 Two constraints are non-negotiable, because they *are* the product:
 
 1. **The verb stays visible.** Co-own vs displace is the mistake the tool exists to prevent,
-   so no format may make `add` vs `set` implicit or inferable.
+   so no format may make `add` vs `replace_all` implicit or inferable.
 2. **Layout stays deterministic.** A hundred near-identical PRs are only reviewable if one
    input yields one byte sequence.
 
@@ -32,14 +32,14 @@ layout stays as reproducible as it is today.
 {
   "version": 2,
   "name": "org baseline ownership",
-  "on_empty": "error",
+  "if_no_owners_left": "error",
 
   "ownership": {
     "*":                   { "add": ["@org/everyone"] },
     "/services/api/":      { "add": ["@org/api-team", "@org/platform"] },
-    "/docs/":              { "add": ["@org/docs-team"], "on_zero_match": "skip" },
+    "/docs/":              { "add": ["@org/docs-team"], "if_no_files_match": "skip" },
     "/.github/workflows/": { "add": ["@org/ci", "@org/security"], "note": "release keys" },
-    "/legacy/":            { "set": [] },
+    "/legacy/":            { "replace_all": [] },
     "**/*.tf":             { "remove": ["@org/infra-legacy"] }
   },
 
@@ -48,9 +48,12 @@ layout stays as reproducible as it is today.
 ```
 
 Scope is the key, the verb is the field, the value is always a list. That is the whole format.
+The verb and condition names are the ones argued for in [PROPOSAL-NAMING.md](PROPOSAL-NAMING.md),
+since v2 is the dialect they ship in.
 
 The same policy today is **nine ops, five of them objects**, because two teams on one scope is
-two ops and anything carrying `on_zero_match` or a `note` must be wrapped:
+two ops and anything carrying `on_zero_match` or a `note` must be wrapped (v1 names, since
+this is the file as it exists today):
 
 ```json
 "ops": [
@@ -72,7 +75,7 @@ copied onto every entry:
 ```json
 {
   "version": 2,
-  "defaults": { "on_zero_match": "declare" },
+  "defaults": { "if_no_files_match": "write_anyway" },
   "ownership": {
     "/.github/workflows/": { "add": ["@org/ci"] },
     "/deploy/":            { "add": ["@org/sre"] },
@@ -97,7 +100,7 @@ inserts an entry above it. Fleet queries get better for free: `group_by(.scope)`
 edit to the policy, `group_by(.op)` does not.
 
 **Two entries for one scope.** The map makes it impossible, which is precisely what the R-8
-error already advises ("state one intent per scope"). `set` plus `add` on one scope is a
+error already advises ("state one intent per scope"). `replace_all` plus `add` on one scope is a
 contradiction that can no longer be written; `add` plus `remove` is one entry whose two lists
 must be disjoint — checked at load, so it lands on repo 0 rather than on whichever repo first
 has both owners.
@@ -125,14 +128,14 @@ policy.json:1:21: ops[0]: op "add_owner(/services/api/)" is not valid: add_owner
 With fields, the position is the field's and the entry names itself:
 
 ```
-policy.json:6:26: ownership["/services/api/"]: no verb; give the entry one of "add", "set", "remove"
+policy.json:6:26: ownership["/services/api/"]: no verb; give the entry one of "add", "replace_all", "remove"
 ```
 
 ## Alternatives considered
 
 **Keyed by owner** — `{"@org/platform": {"add": ["/services/api/", "/services/web/"]}}`. Reads
 well for "what does my team own", and it is the best shape for one team over many directories.
-Rejected: an exact owner set is a property of a *scope*, so `set` cannot be expressed from the
+Rejected: an exact owner set is a property of a *scope*, so `replace_all` cannot be expressed from the
 owner side at all, and a format that can only co-own is not this tool.
 
 **A bare list as shorthand for `add`** — `{"/docs/": ["@org/docs-team"]}`. Tempting, and the
@@ -140,7 +143,7 @@ implied verb would be the safe one. Rejected under constraint 1: the verb is the
 this product exists to make conscious, and one word is a fair price for keeping it on screen.
 
 **A plain ownership map with no verbs** — `{"/docs/": ["@a"]}` meaning "these own it". This is
-`set` semantics by default, i.e. silently destructive, which is the exact trap in the README's
+`replace_all` semantics by default, i.e. silently destructive, which is the exact trap in the README's
 opening paragraph. Rejected outright.
 
 **Owner and scope lists on the existing op strings** (P1/P2 of the companion doc). Still the
@@ -158,7 +161,7 @@ rather than misreading it. `ops` and `ownership` are mutually exclusive in one f
 - **Does `phases` (companion doc, P4) become an array of `ownership` blocks?** That is the
   natural v2 spelling for the `set_owners(*, …)` baseline trap, and it would settle whether
   v2 ships with or without it.
-- **Is `defaults` allowed to carry `on_empty`?** It is top-level today, and per-scope override
+- **Is `defaults` allowed to carry `if_no_owners_left`?** It is top-level today, and per-scope override
   is a coherent thing to want the moment one removal wants `inherit` and another wants `error`.
 - **Should `rename` keep insertion order?** A map is nicer to read and makes chains
   statically detectable; if ordered renames turn out to have a real use case, an array of pairs
