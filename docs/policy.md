@@ -1,8 +1,8 @@
 # The policy as the source of truth — specification
 
-**Status: specified, not implemented.** Requirements R-33…R-37 are the target for
-the e2e suites written against this document before the implementation exists
-(CONTRIBUTING.md: the failing test comes first).
+**Status: R-33…R-37 implemented. R-38 specified, not implemented.** Each requirement
+is the target for e2e suites written against this document before the implementation
+exists (CONTRIBUTING.md: the failing test comes first).
 
 ## Motivation
 
@@ -164,3 +164,45 @@ against, and `check`'s echo reports only `skip` per op. **A reviewer reading a p
 with a `skip` or `declare` default should know the static R-8 verdict is weaker than
 it looks.** Disclosing that in `check` is the natural follow-up; this document does
 not yet require it.
+
+## R-38 — one owner identity, everywhere
+
+`@handles` are case-insensitive on GitHub. `lint` has always known this
+(`foldOwner`), and R-33c now uses it to reject `[@Org/Team, @org/team]` as one owner
+named twice. Matching does not use it, so the tool refuses that duplicate inside one
+list and then writes the same duplicate across two ops:
+
+```
+file: /x/ @org/team
+add_owner(/x/, @Org/Team)     → "applied", file becomes  /x/ @org/team @Org/Team
+remove_owner(/x/, @ORG/TEAM)  → "unchanged", exit 0, and @org/team still owns /x/
+```
+
+The second line is the one that matters. A fleet run of "revoke the departed team"
+reports **converged** on every repository that capitalised the handle.
+
+- **R-38a One identity.** Two owner tokens are the same owner exactly when
+  `ops.FoldOwner` says so: `@handles` compare case-insensitively, e-mail owners
+  compare exactly. This identity governs *every* comparison of two owners — add,
+  remove, rename's old name, `set_owners`, commutation, and resolution — with no
+  site free to use its own.
+- **R-38b Add is a no-op when the owner already owns**, whatever spelling either side
+  used, and the line is left byte-identical. The file's existing spelling wins: this
+  tool does not restyle a handle it was not asked to change, and rewriting it would
+  churn a diff on every repository in a fleet.
+- **R-38c Remove takes every spelling with it.** `remove_owner(/x/, @org/team)`
+  against a hand-written `/x/ @org/team @Org/Team` leaves neither. The removal
+  contract is that no named owner owns any in-scope path afterwards; a surviving
+  spelling of the same owner breaks it.
+- **R-38d Rename matches the old name under the same identity**, and writes the new
+  name exactly as the op spells it — a rename is the one verb whose purpose is to
+  change the text, so it is also the one place a spelling change is intended.
+- **R-38e Idempotence holds across spellings.** Re-running any op with a differently
+  cased handle is `unchanged` at exit 0 with a byte-identical file. This is the
+  property that makes a fleet re-run safe, and it is the one the old behaviour broke
+  most quietly.
+- **R-38f Pre-existing duplicates are not silently repaired.** A hand-written line
+  naming one owner twice is treated as that owner for every comparison, but `sync`
+  does not rewrite the line to collapse it — repair is `lint`'s verb, and a `sync`
+  that quietly edits what the policy did not name is the surprise this tool exists to
+  avoid. Removing the owner does of course remove both, per R-38c.
