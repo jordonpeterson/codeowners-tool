@@ -433,33 +433,82 @@ func resolveExistingPrefix(dir string) string {
 	}
 }
 
-// refuseSymlinkedTarget refuses to write a CODEOWNERS that is itself a symlink,
-// wherever the link points.
+// refuseSymlinkedTarget refuses to write a CODEOWNERS that is a symlink, or
+// that sits BEHIND one — any component of the write path below the repository
+// root, wherever the link points.
 //
-// containedWritePath keeps the write INSIDE the clone; this closes the case it
-// lets through — a link whose target is also inside. GitHub does not follow a
-// symlinked CODEOWNERS at all, so writing through one edits a file that
-// governs nothing while reporting success: the "applied, dead on arrival"
-// outcome the write verbs exist to prevent, only with the dead file hidden
-// behind a live-looking path. Refusal over a warning, matching the tool's
-// fail-closed posture — a warning under a fleet's `--format json >> results`
-// is a count nobody reads.
+// containedWritePath keeps the write INSIDE the clone; this closes the cases
+// it lets through. The final component: GitHub does not follow a symlinked
+// CODEOWNERS, so writing through one edits a file that governs nothing while
+// reporting success — the "applied, dead on arrival" outcome the write verbs
+// exist to prevent, only with the dead file hidden behind a live-looking path.
+// A PARENT component is the same outcome one level up: git commits a symlinked
+// directory as a link BLOB, not a tree, so with `.github -> real-gh` there is
+// no `.github/CODEOWNERS` in the tree GitHub reads, and Lstat'ing only the
+// final component (a real file, reached through the link) let sync, apply and
+// lint all write through it at exit 0. Refusal over a warning, matching the
+// tool's fail-closed posture — a warning under a fleet's `--format json >>
+// results` is a count nobody reads.
 //
-// Only the CODEOWNERS path itself is Lstat'ed, so a symlink anywhere else in
-// the repository stays irrelevant, and an absent file (the --create case) has
-// no link to refuse.
+// Only the components of the write path below the repository root are
+// Lstat'ed, so a symlink anywhere else in the repository stays irrelevant, an
+// absent component (the --create case) has no link to refuse, and a --repo
+// reached through links above the root (macOS /var -> /private/var) stays
+// legitimate. The walk is bounded by the path's own depth.
 func refuseSymlinkedTarget(target string) error {
-	fi, err := os.Lstat(target)
-	if err != nil || fi.Mode()&os.ModeSymlink == 0 {
-		return nil
-	}
-	dest, err := os.Readlink(target)
+	// Abs can only fail when the CWD is gone; degrade to the raw spelling —
+	// the walk then covers the final component, the pre-walk behavior.
+	abs, err := filepath.Abs(target)
 	if err != nil {
-		dest = "(unreadable link target)"
+		abs = filepath.Clean(target)
 	}
-	return &plan.RefusalError{Msg: fmt.Sprintf(
-		"refusing to write %s: it is a symlink to %s, and GitHub does not follow a symlinked CODEOWNERS, so the write would edit a file that governs nothing while reporting applied; replace the link with a real file — nothing was written",
-		filepath.ToSlash(target), filepath.ToSlash(dest))}
+	for _, comp := range writePathComponents(abs) {
+		fi, err := os.Lstat(comp)
+		if err != nil || fi.Mode()&os.ModeSymlink == 0 {
+			continue
+		}
+		dest, err := os.Readlink(comp)
+		if err != nil {
+			dest = "(unreadable link target)"
+		}
+		if comp != abs {
+			return &plan.RefusalError{Msg: fmt.Sprintf(
+				"refusing to write %s: %s is a symlink to %s, and git records a symlinked directory as a link, not a tree, so no CODEOWNERS exists behind it at the path GitHub reads — the write would edit a file that governs nothing while reporting applied; replace the link with a real directory — nothing was written",
+				filepath.ToSlash(target), filepath.ToSlash(comp), filepath.ToSlash(dest))}
+		}
+		return &plan.RefusalError{Msg: fmt.Sprintf(
+			"refusing to write %s: it is a symlink to %s, and GitHub does not follow a symlinked CODEOWNERS, so the write would edit a file that governs nothing while reporting applied; replace the link with a real file — nothing was written",
+			filepath.ToSlash(target), filepath.ToSlash(dest))}
+	}
+	return nil
+}
+
+// writePathComponents lists abs and every directory between it and the
+// enclosing repository's root, root EXCLUSIVE — those are exactly the
+// components a committed symlink can occupy, and the ones GitHub resolves
+// through the tracked tree.
+//
+// The root is found lexically — the nearest ancestor holding a .git entry —
+// rather than by asking git, because rev-parse resolves symlinks in its answer
+// while this walk must stay on the spelling the caller joined --repo and the
+// repo-relative path into; a lexical boundary is what keeps everything at or
+// above the root uninspected. Every caller has already passed checkRepoRoot,
+// so that ancestor IS the --repo the write is contained to. Found no root at
+// all, the walk degrades to the final component alone — the pre-walk behavior,
+// and the only thing decidable without a boundary.
+func writePathComponents(abs string) []string {
+	var comps []string
+	for dir := abs; ; {
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return []string{abs}
+		}
+		comps = append([]string{dir}, comps...)
+		if _, err := os.Stat(filepath.Join(parent, ".git")); err == nil {
+			return comps
+		}
+		dir = parent
+	}
 }
 
 type multiFlag []string
