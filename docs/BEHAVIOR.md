@@ -680,6 +680,12 @@ a bare line deletion.
 
 > ---------- R-36e: every command validates the whole file ----------
 
+**`prerelease_bugs_test.go`**
+
+> Pre-release findings: each test in this file states behavior the tool SHOULD
+> have and currently does not. They are expected to FAIL until the bug they
+> document is fixed; fix the bug, and the test becomes its regression guard.
+
 **`rollout_test.go`**
 
 > The rollout scenarios.
@@ -1109,6 +1115,78 @@ repos with a mistyped `--out` directory that is 100 real edits reported as
 
 The record on stdout is the durable trace and goes first, unconditionally; a
 sink that cannot be written is a warning on stderr and nothing more.
+
+### `TestKnownBug_AuditJSONCleanIsPureJSON`
+
+KNOWN BUG: `audit --format json` on a clean repo prints the literal line
+"audit clean" after the JSON object, so the one case CI most wants to pipe
+to jq — the healthy repo — is the one case the output isn't parseable.
+Under `--format json`, stdout is data.
+
+### `TestKnownBug_AuditRejectsUnknownFormat`
+
+KNOWN BUG: `audit` silently accepts an unknown `--format` and falls back to
+text. sync, check, and lint all reject unknown formats at exit 3 — "never a
+silent fallback to text" — and audit is documented with the same
+`--format json|text` contract.
+
+### `TestKnownBug_BranchMismatchErrorNamesHeadCleanly`
+
+KNOWN BUG: the S-7 branch-mismatch refusal interpolates raw `git rev-parse
+--abbrev-ref --end-of-options HEAD` output, and rev-parse echoes the
+`--end-of-options` operator as an output line — so the one-line error (and
+the JSON record's error field) reads "HEAD is --end-of-options\nmain (…)".
+
+### `TestKnownBug_EscapedHashPatternRefused`
+
+KNOWN BUG: a `\#`-escaped pattern is accepted and written, but S-6/S-2 says
+GitHub honors no `\#` escape — on GitHub the written line is dead, so the
+tool reports `proven: tree` for a rule that provably does not hold there.
+The unescaped spelling `add_owner(#tag.md, …)` is already refused; the
+escaped spelling must be refused too, and nothing written.
+
+### `TestKnownBug_FileFlagSpellingNoFalseGovernsNothing`
+
+KNOWN BUG: `--file ./.github/CODEOWNERS` (or any uncleaned spelling of a
+governing location) triggers a false "governs nothing" warning. trackedAt
+cleans the spelling before matching the tracked file; the S-8 location
+check compares the raw string, so a live change is reported as dead in the
+warning, the --out record, and the --summary-out PR body.
+
+### `TestKnownBug_PlanBelowRepoRootRefused`
+
+KNOWN BUG: plan and apply skip the repo-root guard that sync enforces.
+sync refuses `--repo <subdir>` because the CODEOWNERS it would write lands
+at a path GitHub never reads (checkRepoRoot). plan happily plans against the
+subtree and apply writes the dead file, reporting success — the "applied,
+dead on arrival" outcome the guard exists to prevent. plan must refuse
+exactly as sync does.
+
+### `TestKnownBug_PositionalArgsRejected`
+
+KNOWN BUG: positional arguments are silently discarded, and every flag
+after them with them. `audit ../other-repo --checks a999` (note the missing
+--repo) audits the CWD with all defaults and exits 0 — the invalid
+`--checks a999`, which the parser would reject loudly, is never seen. A
+tool this strict about flag values must not swallow whole arguments.
+
+### `TestKnownBug_SetOwnersDisclosesAuthoredDuplicate`
+
+KNOWN BUG: set_owners on a scope whose pattern already exists earlier in
+the file authors a shadowed duplicate — the old line stays, dead under
+last-match-wins but still naming its owners to human readers — and the run
+that creates it says nothing. The R-7 duplicate warning fires only on the
+NEXT run that touches the file. The run creating the duplicate must
+disclose it.
+
+### `TestKnownBug_SymlinkedCodeownersNotSilentSuccess`
+
+KNOWN BUG: a symlinked .github/CODEOWNERS inside the clone is written
+through and reported applied with no warning. The tool's own docs state
+GitHub does not follow a symlinked CODEOWNERS, so the run edited a file
+that governs nothing while reporting success. An out-of-repo symlink target
+is already refused (containedWritePath); the in-repo case must at minimum
+not be a silent success.
 
 ### `TestLintVerb_CaseOnlyMissIsSparedNotDeleted`
 
@@ -5864,4 +5942,4 @@ DIFFERENT states; transitioning between them is a real ownership change.
 
 ---
 
-559 documented test cases across 13 packages.
+568 documented test cases across 13 packages.
