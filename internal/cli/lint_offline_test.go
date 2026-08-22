@@ -1,7 +1,7 @@
 package cli_test
 
 // The offline tree-only mode of `lint --remove-stale-paths` (UAT finding,
-// TestKnownBug_OfflineStaleRuleRemovalReportable).
+// TestOfflineStaleRuleRemovalReportable).
 //
 // R-12 makes owner existence — an API fact — undecidable offline, so lint
 // without credentials refuses at exit 5. Whether a pattern matches zero

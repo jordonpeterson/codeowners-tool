@@ -1,6 +1,5 @@
-// Pre-release findings for co-own.sh: tests here state behavior the script
-// SHOULD have and currently does not. They are expected to FAIL until the bug
-// they document is fixed; fix it, and the test becomes its regression guard.
+// Regression guard from the pre-release review of co-own.sh: the test began
+// life as a failing repro of a confirmed bug and now pins the fixed behavior.
 package fleet
 
 import (
@@ -44,12 +43,12 @@ func runScriptScoped(t *testing.T, repo, scope, owner string) (result, int) {
 	return res, code
 }
 
-// KNOWN BUG: co-own.sh strips the anchoring slash from a single-segment scope
+// Pre-release finding, fixed: co-own.sh strips the anchoring slash from a single-segment scope
 // (`/docs/` becomes the unanchored `docs`, which matches at any depth), so
 // both the op it runs and the `verify --scope` that is supposed to prove the
 // edit use a broader scope than the operator typed. Ownership changes outside
 // the declared scope, and verify blesses it as "all within scope".
-func TestKnownBug_CoOwnAnchoredScopeStaysAnchored(t *testing.T) {
+func TestCoOwnAnchoredScopeStaysAnchored(t *testing.T) {
 	needBinaries(t)
 	repo := mkRepo(t,
 		"* @org/broad\n/sub/docs/ @org/other\n/docs/ @org/platform\n",

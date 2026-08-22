@@ -1,6 +1,6 @@
-// Pre-release findings: each test in this file states behavior the tool SHOULD
-// have and currently does not. They are expected to FAIL until the bug they
-// document is fixed; fix the bug, and the test becomes its regression guard.
+// Regression guards from the pre-release review: each test began life as a
+// failing repro of a confirmed bug and now pins the fixed behavior. The doc
+// comments keep the original finding so the guarded failure mode stays legible.
 package cli_test
 
 import (
@@ -14,13 +14,13 @@ import (
 	"github.com/jordonpeterson/codeowners-tool/internal/cli"
 )
 
-// KNOWN BUG: plan and apply skip the repo-root guard that sync enforces.
+// Pre-release finding, fixed: plan and apply skip the repo-root guard that sync enforces.
 // sync refuses `--repo <subdir>` because the CODEOWNERS it would write lands
 // at a path GitHub never reads (checkRepoRoot). plan happily plans against the
 // subtree and apply writes the dead file, reporting success — the "applied,
 // dead on arrival" outcome the guard exists to prevent. plan must refuse
 // exactly as sync does.
-func TestKnownBug_PlanBelowRepoRootRefused(t *testing.T) {
+func TestPlanBelowRepoRootRefused(t *testing.T) {
 	repo := initRepo(t, map[string]string{
 		".github/CODEOWNERS":     "* @org/root\n",
 		"a.md":                   "",
@@ -44,12 +44,12 @@ func TestKnownBug_PlanBelowRepoRootRefused(t *testing.T) {
 	}
 }
 
-// KNOWN BUG: a `\#`-escaped pattern is accepted and written, but S-6/S-2 says
+// Pre-release finding, fixed: a `\#`-escaped pattern is accepted and written, but S-6/S-2 says
 // GitHub honors no `\#` escape — on GitHub the written line is dead, so the
 // tool reports `proven: tree` for a rule that provably does not hold there.
 // The unescaped spelling `add_owner(#tag.md, …)` is already refused; the
 // escaped spelling must be refused too, and nothing written.
-func TestKnownBug_EscapedHashPatternRefused(t *testing.T) {
+func TestEscapedHashPatternRefused(t *testing.T) {
 	repo := initRepo(t, map[string]string{
 		".github/CODEOWNERS": "* @org/every\n",
 		"#tag.md":            "",
@@ -66,13 +66,13 @@ func TestKnownBug_EscapedHashPatternRefused(t *testing.T) {
 	}
 }
 
-// KNOWN BUG: a symlinked .github/CODEOWNERS inside the clone is written
+// Pre-release finding, fixed: a symlinked .github/CODEOWNERS inside the clone is written
 // through and reported applied with no warning. The tool's own docs state
 // GitHub does not follow a symlinked CODEOWNERS, so the run edited a file
 // that governs nothing while reporting success. An out-of-repo symlink target
 // is already refused (containedWritePath); the in-repo case must at minimum
 // not be a silent success.
-func TestKnownBug_SymlinkedCodeownersNotSilentSuccess(t *testing.T) {
+func TestSymlinkedCodeownersNotSilentSuccess(t *testing.T) {
 	repo := initRepo(t, map[string]string{
 		"docs/OWNERS_REAL": "* @org/every\n",
 		"a.md":             "",
@@ -92,11 +92,11 @@ func TestKnownBug_SymlinkedCodeownersNotSilentSuccess(t *testing.T) {
 	}
 }
 
-// KNOWN BUG: the S-7 branch-mismatch refusal interpolates raw `git rev-parse
+// Pre-release finding, fixed: the S-7 branch-mismatch refusal interpolates raw `git rev-parse
 // --abbrev-ref --end-of-options HEAD` output, and rev-parse echoes the
 // `--end-of-options` operator as an output line — so the one-line error (and
 // the JSON record's error field) reads "HEAD is --end-of-options\nmain (…)".
-func TestKnownBug_BranchMismatchErrorNamesHeadCleanly(t *testing.T) {
+func TestBranchMismatchErrorNamesHeadCleanly(t *testing.T) {
 	repo := initRepo(t, map[string]string{
 		".github/CODEOWNERS": "* @org/e\n",
 		"a.md":               "",
@@ -118,12 +118,12 @@ func TestKnownBug_BranchMismatchErrorNamesHeadCleanly(t *testing.T) {
 	}
 }
 
-// KNOWN BUG: `--file ./.github/CODEOWNERS` (or any uncleaned spelling of a
+// Pre-release finding, fixed: `--file ./.github/CODEOWNERS` (or any uncleaned spelling of a
 // governing location) triggers a false "governs nothing" warning. trackedAt
 // cleans the spelling before matching the tracked file; the S-8 location
 // check compares the raw string, so a live change is reported as dead in the
 // warning, the --out record, and the --summary-out PR body.
-func TestKnownBug_FileFlagSpellingNoFalseGovernsNothing(t *testing.T) {
+func TestFileFlagSpellingNoFalseGovernsNothing(t *testing.T) {
 	repo := initRepo(t, map[string]string{
 		".github/CODEOWNERS": "* @org/e\n",
 		"a.md":               "",
@@ -137,13 +137,13 @@ func TestKnownBug_FileFlagSpellingNoFalseGovernsNothing(t *testing.T) {
 	}
 }
 
-// KNOWN BUG: set_owners on a scope whose pattern already exists earlier in
+// Pre-release finding, fixed: set_owners on a scope whose pattern already exists earlier in
 // the file authors a shadowed duplicate — the old line stays, dead under
 // last-match-wins but still naming its owners to human readers — and the run
 // that creates it says nothing. The R-7 duplicate warning fires only on the
 // NEXT run that touches the file. The run creating the duplicate must
 // disclose it.
-func TestKnownBug_SetOwnersDisclosesAuthoredDuplicate(t *testing.T) {
+func TestSetOwnersDisclosesAuthoredDuplicate(t *testing.T) {
 	repo := initRepo(t, map[string]string{
 		".github/CODEOWNERS": "/x/ @org/a\n* @org/e\n",
 		"x/a.go":             "",
@@ -162,11 +162,11 @@ func TestKnownBug_SetOwnersDisclosesAuthoredDuplicate(t *testing.T) {
 	}
 }
 
-// KNOWN BUG: `audit --format json` on a clean repo prints the literal line
+// Pre-release finding, fixed: `audit --format json` on a clean repo prints the literal line
 // "audit clean" after the JSON object, so the one case CI most wants to pipe
 // to jq — the healthy repo — is the one case the output isn't parseable.
 // Under `--format json`, stdout is data.
-func TestKnownBug_AuditJSONCleanIsPureJSON(t *testing.T) {
+func TestAuditJSONCleanIsPureJSON(t *testing.T) {
 	repo := initRepo(t, map[string]string{
 		".github/CODEOWNERS": "* @org/t\n",
 		"f.md":               "",
@@ -181,12 +181,12 @@ func TestKnownBug_AuditJSONCleanIsPureJSON(t *testing.T) {
 	}
 }
 
-// KNOWN BUG: positional arguments are silently discarded, and every flag
+// Pre-release finding, fixed: positional arguments are silently discarded, and every flag
 // after them with them. `audit ../other-repo --checks a999` (note the missing
 // --repo) audits the CWD with all defaults and exits 0 — the invalid
 // `--checks a999`, which the parser would reject loudly, is never seen. A
 // tool this strict about flag values must not swallow whole arguments.
-func TestKnownBug_PositionalArgsRejected(t *testing.T) {
+func TestPositionalArgsRejected(t *testing.T) {
 	repo := initRepo(t, map[string]string{
 		".github/CODEOWNERS": "* @org/t\n",
 		"f.md":               "",
@@ -202,11 +202,11 @@ func TestKnownBug_PositionalArgsRejected(t *testing.T) {
 	}
 }
 
-// KNOWN BUG: `audit` silently accepts an unknown `--format` and falls back to
+// Pre-release finding, fixed: `audit` silently accepts an unknown `--format` and falls back to
 // text. sync, check, and lint all reject unknown formats at exit 3 — "never a
 // silent fallback to text" — and audit is documented with the same
 // `--format json|text` contract.
-func TestKnownBug_AuditRejectsUnknownFormat(t *testing.T) {
+func TestAuditRejectsUnknownFormat(t *testing.T) {
 	repo := initRepo(t, map[string]string{
 		".github/CODEOWNERS": "* @org/t\n",
 		"f.md":               "",
@@ -217,7 +217,7 @@ func TestKnownBug_AuditRejectsUnknownFormat(t *testing.T) {
 	}
 }
 
-// KNOWN BUG (UAT finding): a tree-provably-dead rule cannot be repaired
+// Pre-release finding (UAT), fixed: a tree-provably-dead rule cannot be repaired
 // offline. `lint --dry-run --remove-stale-paths` refuses everything at exit 5
 // citing R-12 ("owner existence is not decidable offline") — but whether a
 // pattern matches zero tracked files is a git-tree fact the offline audit
@@ -225,7 +225,7 @@ func TestKnownBug_AuditRejectsUnknownFormat(t *testing.T) {
 // requested repair, the dry run should report the pending dead-rule removal
 // (exit 4) instead of demanding a token; today the only offline remedy is the
 // hand edit the tool exists to prevent.
-func TestKnownBug_OfflineStaleRuleRemovalReportable(t *testing.T) {
+func TestOfflineStaleRuleRemovalReportable(t *testing.T) {
 	repo := initRepo(t, map[string]string{
 		".github/CODEOWNERS": "* @org/everyone\n/ghost/ @org/ghost-team\n",
 		"a.md":               "",
