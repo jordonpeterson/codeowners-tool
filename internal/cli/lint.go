@@ -48,7 +48,10 @@ func errReason(err error) string {
 //   - It requires a token and --github-repo. Whether an owner exists is not
 //     decidable offline, and stage 2 is the point of the mode; running it
 //     without the ability to answer that question would silently degrade to a
-//     whitespace tidy while reporting success.
+//     whitespace tidy while reporting success. One carve-out: with
+//     --remove-stale-paths, an offline run may still make the ONE repair that
+//     is a tree fact rather than an API fact — deleting dead patterns — with
+//     owner checks skipped and disclosed (see runLint).
 type lintRun struct {
 	repo, branch, filePath string
 	githubRepo, token      string
@@ -60,6 +63,10 @@ type lintRun struct {
 	removeStale            bool
 	onEmpty                string
 	dryRun                 bool
+	// offline marks the tree-only mode: no credentials, --remove-stale-paths
+	// requested. Set inside runLint, never by callers — it is a fact about the
+	// run (which credentials were absent), not a flag.
+	offline bool
 	// policy records that a --policy file configured this run, not flags. It
 	// governs only how a refusal is WORDED: the remedy for an unset R-6 policy
 	// is a field in the file here and a flag under `audit --lint`, and naming
@@ -77,14 +84,17 @@ type lintDoc struct {
 	// process status, so a CI gate is `jq -e .needs_human` rather than a
 	// two-clause expression that has to know the string "unrepairable-line" —
 	// which a reviewer got wrong on the first try, going green over rot.
-	NeedsHuman   bool          `json:"needs_human"`
-	ExitCode     int           `json:"exit_code"`
-	Actions      []lint.Action `json:"actions"`
-	Unverifiable []string      `json:"unverifiable,omitempty"`
-	Changes      []plan.Change `json:"changes"`
-	Rows         []plan.Row    `json:"ownership_rows"`
-	Diff         string        `json:"diff"`
-	Warnings     []string      `json:"warnings,omitempty"`
+	NeedsHuman bool `json:"needs_human"`
+	ExitCode   int  `json:"exit_code"`
+	// OwnerChecksSkipped marks an offline run: only dead patterns were
+	// judged, and nothing here says the owners exist (R-12).
+	OwnerChecksSkipped bool          `json:"owner_checks_skipped,omitempty"`
+	Actions            []lint.Action `json:"actions"`
+	Unverifiable       []string      `json:"unverifiable,omitempty"`
+	Changes            []plan.Change `json:"changes"`
+	Rows               []plan.Row    `json:"ownership_rows"`
+	Diff               string        `json:"diff"`
+	Warnings           []string      `json:"warnings,omitempty"`
 }
 
 // cmdLint is the `lint` verb: the same run, with a flagset that contains only
@@ -117,6 +127,10 @@ func cmdLint(args []string, stdout, stderr io.Writer) int {
 	dryRun := fs.Bool("dry-run", false, "report the fixes and write nothing (exit 4 if any are pending)")
 	if err := fs.Parse(args); err != nil {
 		return flagParseCode(err)
+	}
+	if err := rejectLeftoverArgs(fs); err != nil {
+		fmt.Fprintln(stderr, "error:", err)
+		return ExitInvalid
 	}
 	removeStalePaths, onEmptyPolicy := *removeStale, *onEmpty
 	if len(policyPaths) > 0 {
@@ -254,13 +268,22 @@ func runLint(r lintRun, stdout, stderr io.Writer) int {
 	if r.githubRepo == "" {
 		missing = append(missing, "--github-repo owner/name")
 	}
-	if len(missing) > 0 {
-		fmt.Fprintf(stderr, "error: lint needs %s. Whether an owner still exists is not decidable offline, and removing owners on a guess is what R-12 forbids — nothing was written.\n", strings.Join(missing, " and "))
+	// One narrow carve-out: R-12 is about OWNER existence, an API fact. Whether
+	// a pattern matches zero tracked files is a git-TREE fact the offline audit
+	// (A-4/A-5) itself proves, so when --remove-stale-paths names that repair
+	// as what this run is for, the run proceeds OFFLINE — stage 3 alone, owner
+	// checks skipped and said so, no owner removed, verified, or repaired. Any
+	// run that would need an owner answer still refuses here.
+	r.offline = len(missing) > 0
+	if r.offline && !r.removeStale {
+		fmt.Fprintf(stderr, "error: lint needs %s. Whether an owner still exists is not decidable offline, and removing owners on a guess is what R-12 forbids — nothing was written. The one repair decidable offline is --remove-stale-paths (a dead pattern is a tree fact); pass it to run that repair alone, with owner checks skipped.\n", strings.Join(missing, " and "))
 		return ExitInconclusive
 	}
-	if len(strings.SplitN(r.githubRepo, "/", 2)) != 2 || strings.Count(r.githubRepo, "/") != 1 {
-		fmt.Fprintln(stderr, "error: --github-repo must be owner/name")
-		return ExitInvalid
+	if !r.offline {
+		if len(strings.SplitN(r.githubRepo, "/", 2)) != 2 || strings.Count(r.githubRepo, "/") != 1 {
+			fmt.Fprintln(stderr, "error: --github-repo must be owner/name")
+			return ExitInvalid
+		}
 	}
 	// The disk cache is refused rather than used, and this is the one place
 	// where lint must NOT inherit audit's behavior.
@@ -318,6 +341,12 @@ func runLint(r lintRun, stdout, stderr io.Writer) int {
 	if err := containedWritePath(r.repo, target); err != nil {
 		return errExit(err, stderr)
 	}
+	// Same refusal as sync and apply: a link that stays INSIDE the clone is
+	// still a CODEOWNERS GitHub does not follow, so a repair written through it
+	// repairs a file that governs nothing. See refuseSymlinkedTarget.
+	if err := refuseSymlinkedTarget(target); err != nil {
+		return errExit(err, stderr)
+	}
 	content, err := os.ReadFile(target)
 	if err != nil {
 		return errExit(&plan.InvalidError{Msg: err.Error()}, stderr)
@@ -337,24 +366,32 @@ func runLint(r lintRun, stdout, stderr io.Writer) int {
 		}
 	}
 
-	client := ghapi.New(r.apiURL, r.token, ghapi.NewMemCache())
-	// --github-repo is a precondition, not decoration: it establishes that this
-	// token can see the repository whose CODEOWNERS is about to be rewritten.
-	// Without it the flag was required and then never used — the org for every
-	// team lookup comes from the owner token itself — so a token with no
-	// relationship to this repo ran to completion, and an operator asking "why
-	// did lint delete my team" had no signal that the credential was wrong.
-	// Fails closed, like every other lookup here.
-	owner, name, _ := strings.Cut(r.githubRepo, "/")
-	if err := client.ProbeRepo(owner, name); err != nil {
-		fmt.Fprintf(stderr, "error: cannot confirm this token can see %s (%s) — refusing to remove owners on a credential whose access to the repository is unproven (R-12); nothing was written\n", r.githubRepo, errReason(err))
-		return ExitInconclusive
+	// Offline the client is never built and ProbeRepo never runs: there is no
+	// credential to prove anything with, and the run removes no owners for it
+	// to vouch for — lint.Build never calls the Verifier under SkipOwnerChecks.
+	var verifier lint.Verifier
+	if !r.offline {
+		client := ghapi.New(r.apiURL, r.token, ghapi.NewMemCache())
+		// --github-repo is a precondition, not decoration: it establishes that this
+		// token can see the repository whose CODEOWNERS is about to be rewritten.
+		// Without it the flag was required and then never used — the org for every
+		// team lookup comes from the owner token itself — so a token with no
+		// relationship to this repo ran to completion, and an operator asking "why
+		// did lint delete my team" had no signal that the credential was wrong.
+		// Fails closed, like every other lookup here.
+		owner, name, _ := strings.Cut(r.githubRepo, "/")
+		if err := client.ProbeRepo(owner, name); err != nil {
+			fmt.Fprintf(stderr, "error: cannot confirm this token can see %s (%s) — refusing to remove owners on a credential whose access to the repository is unproven (R-12); nothing was written\n", r.githubRepo, errReason(err))
+			return ExitInconclusive
+		}
+		verifier = client
 	}
 
-	res, buildErr := lint.Build(content, tree, client, lint.Options{
+	res, buildErr := lint.Build(content, tree, verifier, lint.Options{
 		RemoveStalePaths: r.removeStale,
 		WorkTree:         workTree,
 		OnEmpty:          r.onEmpty,
+		SkipOwnerChecks:  r.offline,
 	})
 
 	var inconclusive *lint.InconclusiveError
@@ -423,7 +460,8 @@ func emitLint(res *lint.Result, coPath string, applied bool, r lintRun, stdout i
 		doc := lintDoc{
 			Path: coPath, Applied: applied, DryRun: r.dryRun,
 			NeedsHuman: code == ExitFindings, ExitCode: code,
-			Actions: res.Actions, Unverifiable: res.Unverifiable,
+			OwnerChecksSkipped: r.offline,
+			Actions:            res.Actions, Unverifiable: res.Unverifiable,
 			Changes: res.Plan.Changes, Rows: res.Plan.Rows,
 			Diff: res.Plan.Diff, Warnings: res.Plan.Warnings,
 		}
@@ -448,6 +486,11 @@ func emitLint(res *lint.Result, coPath string, applied bool, r lintRun, stdout i
 		// file is fine directly above a nonzero exit code is the one output
 		// that makes a CI log read green over a red result.
 		fmt.Fprintf(stdout, "lint: nothing to repair automatically in %s, but %d line(s) need a person\n", coPath, stuck)
+	case n == 0 && r.offline:
+		// The offline mode's success claim is narrower than lint's, and the
+		// headline must not borrow the wider one: "owners that do not exist"
+		// names a check this run skipped.
+		fmt.Fprintf(stdout, "lint: nothing to remove in %s — this offline run covered only dead patterns (--remove-stale-paths); add a token and --github-repo for the owner checks\n", coPath)
 	case n == 0:
 		// Scoped, not "clean". Lint covers three things; `audit` runs twelve
 		// checks, and a bare "lint clean" sends somebody away from a file that
@@ -458,6 +501,11 @@ func emitLint(res *lint.Result, coPath string, applied bool, r lintRun, stdout i
 		fmt.Fprintf(stdout, "lint: %d fix(es) applied to %s — the file was written\n", n, coPath)
 	default:
 		fmt.Fprintf(stdout, "lint: %d fix(es) pending in %s (--dry-run; nothing written)\n", n, coPath)
+	}
+	if r.offline {
+		// The disclosure the offline mode is conditioned on: what was skipped,
+		// and that the fail-closed contract for owners is intact (R-12).
+		fmt.Fprintf(stdout, "  note: owner checks were skipped — this run had no GitHub credentials, so no owner was verified, repaired, or removed (R-12); only rules whose patterns match nothing tracked and nothing on disk were considered\n")
 	}
 	// What lint DID, then what it deliberately did not: a flat list made the
 	// one line that is not a fix look like one, and made the headline count
