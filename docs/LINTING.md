@@ -7,7 +7,7 @@ Two commands, and the difference between them is whether they write:
 | What it does | Reports 12 checks (A-1 … A-12) | Repairs 3 of them |
 | Writes? | **Never** | Yes, unless `--dry-run` |
 | Reads | the file committed at `--branch` | the file **in your working tree** |
-| Needs a token? | Only for the owner checks | **Always** |
+| Needs a token? | Only for the owner checks | Yes, bar one offline mode ([below](#errors-you-will-actually-hit)) |
 
 `audit --lint` is the older spelling of `lint` and still works — same code path.
 
@@ -39,7 +39,7 @@ Drop `--dry-run` to write it. Every flag is in
 | Flag | Why |
 |---|---|
 | `--dry-run` | Report, write nothing. Exit 4 if anything is pending. |
-| `--github-repo owner/name` | Required. Proves the token can see this repo. |
+| `--github-repo owner/name` | Required, bar the offline mode. Proves the token can see this repo. |
 | `--remove-stale-paths` | Also delete rules matching no files. Off by default. |
 | `--on-empty error\|inherit\|unowned` | Required *only* if a removal would empty a rule. |
 | `--file PATH` | For a CODEOWNERS you have not committed yet. |
@@ -125,7 +125,7 @@ One rule: **0 when the file needs nothing further from a person, 4 when it does.
 | 2 | Refused — `--on-empty=error`, the size cap, wrong `--branch`, or `--repo` below the repo root |
 | 3 | Invalid input — a missing `--on-empty`, a bad flag combination, or the file changed under the run |
 | 4 | Still needs a person — pending fixes under `--dry-run`, an unrepairable line, or a case-only typo |
-| 5 | Inconclusive — a lookup could not be answered, or no token. **Nothing written** |
+| 5 | Inconclusive — a lookup could not be answered, or credentials missing (bar the offline mode below). **Nothing written** |
 | 6 | Post-write validation failed; rolled back |
 
 `lint` never returns 1. A file needing no repair is this command's success, and exiting
@@ -134,9 +134,12 @@ One rule: **0 when the file needs nothing further from a person, 4 when it does.
 ## Errors you will actually hit
 
 **`lint needs a token … and --github-repo`** (exit 5). Owner existence is not decidable
-offline, and that is the whole point of the command. It names whichever one you left out.
-This holds even when the only repair you asked for is `--remove-stale-paths` — offline
-dead-rule removal is not currently supported, although it is decidable from the tree.
+offline; the refusal names whichever credential you left out. One exception: with
+`--remove-stale-paths` and *neither* credential given, the run proceeds offline and does
+stage 3 alone — dead rules are removed against the tree, invalid lines are still reported
+(exit 4), and no owner is verified, repaired, or removed; the skip is disclosed in the
+output and as `owner_checks_skipped` in the JSON record. Supplying one credential without
+the other still refuses — a run that named a repo or held a token asked for the full lint.
 
 **`inconclusive: … no owner was removed and nothing was written`** (exit 5). One lookup
 could not be answered — rate limit, expired token, an org your token cannot enumerate —

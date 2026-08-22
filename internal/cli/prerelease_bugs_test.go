@@ -226,6 +226,10 @@ func TestAuditRejectsUnknownFormat(t *testing.T) {
 // (exit 4) instead of demanding a token; today the only offline remedy is the
 // hand edit the tool exists to prevent.
 func TestOfflineStaleRuleRemovalReportable(t *testing.T) {
+	// The tree-only mode engages only when NEITHER credential is given, and
+	// this test is the "neither" case — an ambient $GITHUB_TOKEN would turn it
+	// into the partial-credential refusal instead.
+	t.Setenv("GITHUB_TOKEN", "")
 	repo := initRepo(t, map[string]string{
 		".github/CODEOWNERS": "* @org/everyone\n/ghost/ @org/ghost-team\n",
 		"a.md":               "",

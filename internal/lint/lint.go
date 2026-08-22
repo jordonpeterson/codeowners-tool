@@ -91,12 +91,14 @@ type Options struct {
 	// owner repairs, no owner removals. It exists for the offline
 	// `lint --remove-stale-paths` path — whether a pattern matches zero files
 	// is a git-tree fact (audit's A-4/A-5), decidable with no API, while owner
-	// existence is not (R-12). Stages 1 and 2 are therefore SKIPPED, not
-	// degraded: a split handle is an owner repair (it puts an unverified owner
-	// into force), so offline it is left exactly as written, like every other
-	// owner. Requires RemoveStalePaths — without it there is no repair this
-	// mode is allowed to make. The Verifier may be nil when this is set; it is
-	// never called.
+	// existence is not (R-12). Stage 2 is skipped outright, and stage 1's
+	// REPAIR is too: a split handle is an owner repair (it puts an unverified
+	// owner into force), so offline it is left exactly as written, like every
+	// other owner. Stage 1's REPORTING still runs — an invalid line GitHub is
+	// skipping is a file fact, and it is reported (NeedsHuman) with a reason
+	// that says whether a credentialed run could repair it. Requires
+	// RemoveStalePaths — without it there is no repair this mode is allowed to
+	// make. The Verifier may be nil when this is set; it is never called.
 	SkipOwnerChecks bool
 	// OnEmpty is R-6's policy for the case where removing a dead owner would
 	// leave a rule with no owners: "error", "inherit", or "unowned". "" is the
@@ -517,44 +519,55 @@ func Build(content []byte, tree []string, v Verifier, opts Options) (*Result, er
 	// Before any lookup: `@ org/team` is one owner nobody has asked about yet,
 	// not two owners that do not exist.
 	//
-	// Skipped entirely under SkipOwnerChecks, reporting included: the repair
-	// puts a previously skipped line — and the owner on it — into force, which
-	// the run only gets to trust because stage 2 then verifies that owner.
-	// Offline neither half can run, and reporting the line as "unrepairable"
-	// would be false (online it is repairable). This mode's claim is scoped to
-	// dead patterns, and the caller says so in its output.
-	if !opts.SkipOwnerChecks {
-		for i, ln := range f.Lines {
-			if ln.Kind != file.LineInvalid {
-				continue
-			}
-			old := ln.Raw
-			fixed, ok := RepairLine(old)
-			if !ok {
-				// Reported, never touched. A line the tool does not understand is
-				// a rule somebody wrote and believes is in force; guessing at it or
-				// deleting it are both worse than saying so.
-				res.Actions = append(res.Actions, Action{
-					Kind: ActionUnrepairable, Line: i + 1, Before: old,
-					Reason: fmt.Sprintf("%s: %s — left exactly as written; GitHub skips this line, so nothing here owns anything",
-						ln.Err.Kind, ln.Err.Message),
-				})
-				continue
-			}
-			f.ReplaceLine(i, fixed)
-			r := f.Lines[i].Rule
-			res.Actions = append(res.Actions, Action{
-				Kind: ActionRepairOwner, Line: i + 1, Pattern: r.PatternText,
-				Before: old, After: fixed,
-				Reason: fmt.Sprintf("whitespace inside an @handle made GitHub skip the whole line; rejoined to %s — the pattern is unchanged, so this line now governs the files it always claimed to",
-					strings.Join(r.OwnersCopy(), " ")),
-			})
-			res.Plan.Changes = append(res.Plan.Changes, plan.Change{
-				Action: "amend", Line: i + 1, Pattern: r.PatternText,
-				NewOwners: r.OwnersCopy(), OldLine: old, NewLine: fixed,
-				Reason: "repaired owner spacing (stage 1): the line was invalid and therefore skipped; it is now in force",
-			})
+	// Under SkipOwnerChecks the REPAIR half is skipped — it puts a previously
+	// skipped line, and the owner on it, into force, which the run only gets
+	// to trust because stage 2 then verifies that owner. The REPORTING still
+	// happens: "GitHub is skipping this broken line" is a file fact, no API
+	// needed, and exiting 0 over it would be a green check over rot. A line
+	// the online run would repair is reported as needing that credentialed
+	// run, never as flatly unrepairable.
+	for i, ln := range f.Lines {
+		if ln.Kind != file.LineInvalid {
+			continue
 		}
+		old := ln.Raw
+		fixed, ok := RepairLine(old)
+		if opts.SkipOwnerChecks {
+			reason := fmt.Sprintf("%s: %s — left exactly as written; GitHub skips this line, so nothing here owns anything",
+				ln.Err.Kind, ln.Err.Message)
+			if ok {
+				reason = fmt.Sprintf("%s: %s — a split @handle a credentialed run repairs mechanically; left exactly as written here, because the repair puts the reassembled owner into force and offline nothing can verify that owner exists (R-12)",
+					ln.Err.Kind, ln.Err.Message)
+			}
+			res.Actions = append(res.Actions, Action{
+				Kind: ActionUnrepairable, Line: i + 1, Before: old, Reason: reason,
+			})
+			continue
+		}
+		if !ok {
+			// Reported, never touched. A line the tool does not understand is
+			// a rule somebody wrote and believes is in force; guessing at it or
+			// deleting it are both worse than saying so.
+			res.Actions = append(res.Actions, Action{
+				Kind: ActionUnrepairable, Line: i + 1, Before: old,
+				Reason: fmt.Sprintf("%s: %s — left exactly as written; GitHub skips this line, so nothing here owns anything",
+					ln.Err.Kind, ln.Err.Message),
+			})
+			continue
+		}
+		f.ReplaceLine(i, fixed)
+		r := f.Lines[i].Rule
+		res.Actions = append(res.Actions, Action{
+			Kind: ActionRepairOwner, Line: i + 1, Pattern: r.PatternText,
+			Before: old, After: fixed,
+			Reason: fmt.Sprintf("whitespace inside an @handle made GitHub skip the whole line; rejoined to %s — the pattern is unchanged, so this line now governs the files it always claimed to",
+				strings.Join(r.OwnersCopy(), " ")),
+		})
+		res.Plan.Changes = append(res.Plan.Changes, plan.Change{
+			Action: "amend", Line: i + 1, Pattern: r.PatternText,
+			NewOwners: r.OwnersCopy(), OldLine: old, NewLine: fixed,
+			Reason: "repaired owner spacing (stage 1): the line was invalid and therefore skipped; it is now in force",
+		})
 	}
 
 	// The independently computed baseline for the gate below: what GitHub
@@ -740,9 +753,12 @@ func Build(content []byte, tree []string, v Verifier, opts Options) (*Result, er
 		}
 
 		for _, o := range removed {
+			// The folded key, matching how the map is written: `dead[o]` on a
+			// dead owner spelled @Org/Team was a lookup of a key that is not
+			// there, and the action shipped with an empty Reason.
 			res.Actions = append(res.Actions, Action{
 				Kind: ActionRemoveOwner, Line: i + 1, Owner: o, Pattern: r.PatternText,
-				Before: old, Reason: dead[o],
+				Before: old, Reason: dead[ops.FoldOwner(o)],
 			})
 		}
 		if deletedLine {

@@ -483,8 +483,8 @@ rejected, because a subset of a whole-file repair is ambiguous rather than small
 
 | Flag | Meaning |
 |---|---|
-| `--github-repo owner/name` | **Required.** Probed, so a token that cannot see the repo stops the run. |
-| `--token` / `$GITHUB_TOKEN` | **Required.** Owner existence is not decidable offline. |
+| `--github-repo owner/name` | **Required**, bar the offline mode below. Probed, so a token that cannot see the repo stops the run. |
+| `--token` / `$GITHUB_TOKEN` | **Required**, bar the offline mode below. Owner existence is not decidable offline. |
 | `--dry-run` | Compute and report; write nothing. Exit 4 if anything is pending. |
 | `--remove-stale-paths` | Stage 3. Deletes rules matching nothing tracked **and** nothing on disk. |
 | `--on-empty error\|inherit\|unowned` | R-6, required only when a removal would empty a rule. `inherit` deletes the line. |
@@ -494,6 +494,11 @@ rejected, because a subset of a whole-file repair is ambiguous rather than small
 `--cache-dir` and `--cache-ttl` are rejected (exit 3): a cached negative is served without
 revalidation, and here that answer deletes an owner rather than printing a finding.
 Lookups are still cached in memory per run.
+
+**Offline tree-only mode:** with `--remove-stale-paths` and *neither* a token nor
+`--github-repo`, the run does stage 3 alone — dead rules judged against the tree, invalid
+lines still reported at exit 4, no owner verified, repaired, or removed — and the skip is
+disclosed. One credential without the other still refuses at exit 5.
 
 | # | Stage | Opt-in | What it does |
 |---|---|---|---|
@@ -524,7 +529,7 @@ when the two agree.
 | 2 | Refused — `--on-empty=error`, size cap, or either repository guard |
 | 3 | Invalid input — missing `--on-empty`, a rejected flag, an empty tree under `--remove-stale-paths`, or hash drift between read and write |
 | 4 | Still needs a person — pending fixes under `--dry-run`, an unrepairable line, or a case-only typo |
-| 5 | Inconclusive, or no token/`--github-repo`. Nothing written |
+| 5 | Inconclusive, or missing credentials (bar the offline mode above). Nothing written |
 | 6 | Post-write validation failed; rolled back |
 
 `lint` never returns 1: a file needing no repair is its success, and "no-op" would make
@@ -534,6 +539,8 @@ every healthy repository in a fleet read as a failure under `set -e`.
 `exit_code`, `actions[]` (`kind`, `line`, `owner`, `pattern`, `reason`), `unverifiable[]`,
 `changes[]`, `ownership_rows[]`, `diff`, `warnings[]`. `needs_human` and `exit_code` come
 from the same function that sets the process status, so `jq -e .needs_human` is the gate.
+An offline run additionally carries `owner_checks_skipped: true` — the record says
+nothing about whether the owners exist.
 Unlike the `sync` record, `actions`, `changes` and `ownership_rows` are always present
 (possibly empty).
 

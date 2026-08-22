@@ -11,10 +11,12 @@ package lint_test
 //
 //   - stage 3 runs exactly as it does online — same staleness judgment, same
 //     A-5 sparing of case-only misses;
-//   - stages 1 and 2 are SKIPPED, not degraded: no owner is looked up,
-//     repaired, or removed, and no invalid line is rewritten or reported as
-//     unrepairable (offline lint cannot say whether it is repairable — that
-//     claim belongs to the run that can also verify the reassembled owner);
+//   - the owner WORK of stages 1 and 2 is skipped, not degraded: no owner is
+//     looked up, repaired, or removed, and no invalid line is rewritten;
+//   - stage 1's REPORTING still runs: an invalid line GitHub is skipping is a
+//     file fact, no API needed, so it is reported (NeedsHuman → exit 4) — a
+//     line the online run would repair with a reason that names the
+//     credentialed run, any other with the same reason as online;
 //   - SkipOwnerChecks without RemoveStalePaths is invalid input, because with
 //     owner work forbidden there is nothing left the run may do (R-11/R-12).
 
@@ -82,12 +84,13 @@ func TestOffline_OwnersAreNeverLookedUpOrRemoved(t *testing.T) {
 	}
 }
 
-// SPEC R-12 offline: stage 1 is an OWNER repair — it puts a previously skipped
-// line, and the unverified owner on it, into force — so offline it is skipped
-// entirely. The line is left byte-for-byte, and it is NOT reported as
-// unrepairable: online it is repairable, and a false "unrepairable" would send
-// a human to hand-edit the exact line the online run fixes mechanically.
-func TestOffline_SplitHandleIsLeftAsWrittenAndNotReported(t *testing.T) {
+// SPEC R-12 offline: stage 1's REPAIR is an owner repair — it puts a
+// previously skipped line, and the unverified owner on it, into force — so
+// offline the line is left byte-for-byte. But it IS reported: GitHub skipping
+// the line is a file fact, and a run that exits 0 over it goes green over rot.
+// The reason is honest about which run can fix it — a credentialed one, which
+// repairs it mechanically and verifies the reassembled owner.
+func TestOffline_SplitHandleIsReportedNotRepaired(t *testing.T) {
 	content := []byte("* @keep\n/x/ @ org/team\n/ghost/ @keep\n")
 	tree := []string{"x/a.go"}
 
@@ -102,11 +105,49 @@ func TestOffline_SplitHandleIsLeftAsWrittenAndNotReported(t *testing.T) {
 	if n := len(fcActionsOfKind(res, lint.ActionRepairOwner)); n != 0 {
 		t.Errorf("%d owner repair(s) in an offline run — repairing an owner offline is what R-12 forbids", n)
 	}
-	if n := len(fcActionsOfKind(res, lint.ActionUnrepairable)); n != 0 {
-		t.Errorf("invalid line reported unrepairable offline: %+v — the claim belongs to the run that can verify the repair", res.Actions)
+	stuck := fcActionsOfKind(res, lint.ActionUnrepairable)
+	if len(stuck) != 1 {
+		t.Fatalf("unrepairable reports = %+v, want exactly one for the split handle — GitHub is skipping that line, and silence over it is exit 0 over rot", res.Actions)
+	}
+	if !strings.Contains(stuck[0].Reason, "credentialed run") {
+		t.Errorf("reason = %q: a line the online run repairs mechanically must be reported as needing that run, not as flatly unrepairable", stuck[0].Reason)
+	}
+	if res.NeedsHuman() != 1 {
+		t.Errorf("NeedsHuman = %d, want 1 — the broken line keeps the run at exit 4", res.NeedsHuman())
 	}
 	if strings.Contains(after, "/ghost/") {
 		t.Errorf("after = %q: the genuinely dead rule survived — sparing owners is not a blanket refusal to do the tree work", after)
+	}
+}
+
+// SPEC offline reporting: a line no run can repair — `@keep /docs` is shaped
+// exactly like two rules on one line — is reported offline with the SAME
+// reason as online. GitHub skipping it is a file fact, and docs/LINTING.md
+// promises exit 4 for it; an offline exit 0 would let a CI gate on
+// .needs_human go green over a broken line.
+func TestOffline_UnrepairableLineIsReportedSameAsOnline(t *testing.T) {
+	content := []byte("* @keep\n/x/ @keep /docs\n/ghost/ @keep\n")
+	tree := []string{"x/a.go"}
+
+	res, err := lint.Build(content, tree, nil, offlineOpts(tree))
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	stuck := fcActionsOfKind(res, lint.ActionUnrepairable)
+	if len(stuck) != 1 {
+		t.Fatalf("unrepairable reports = %+v, want exactly one", res.Actions)
+	}
+	if !strings.Contains(stuck[0].Reason, "GitHub skips this line") {
+		t.Errorf("reason = %q, want the online wording — nothing about this line's diagnosis needed an API", stuck[0].Reason)
+	}
+	if strings.Contains(stuck[0].Reason, "credentialed run") {
+		t.Errorf("reason = %q: this line is ambiguous for EVERY run, and pointing at a credentialed one promises a repair it will also refuse", stuck[0].Reason)
+	}
+	if res.NeedsHuman() != 1 {
+		t.Errorf("NeedsHuman = %d, want 1", res.NeedsHuman())
+	}
+	if after := fcAfter(res); !strings.Contains(after, "/x/ @keep /docs") {
+		t.Errorf("after = %q: the invalid line was touched", after)
 	}
 }
 

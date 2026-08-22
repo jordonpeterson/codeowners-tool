@@ -49,9 +49,10 @@ func errReason(err error) string {
 //     decidable offline, and stage 2 is the point of the mode; running it
 //     without the ability to answer that question would silently degrade to a
 //     whitespace tidy while reporting success. One carve-out: with
-//     --remove-stale-paths, an offline run may still make the ONE repair that
-//     is a tree fact rather than an API fact — deleting dead patterns — with
-//     owner checks skipped and disclosed (see runLint).
+//     --remove-stale-paths and NEITHER credential given, an offline run may
+//     still make the ONE repair that is a tree fact rather than an API fact —
+//     deleting dead patterns — with owner checks skipped and disclosed
+//     (see runLint).
 type lintRun struct {
 	repo, branch, filePath string
 	githubRepo, token      string
@@ -63,9 +64,10 @@ type lintRun struct {
 	removeStale            bool
 	onEmpty                string
 	dryRun                 bool
-	// offline marks the tree-only mode: no credentials, --remove-stale-paths
-	// requested. Set inside runLint, never by callers — it is a fact about the
-	// run (which credentials were absent), not a flag.
+	// offline marks the tree-only mode: NEITHER a token nor --github-repo was
+	// given, --remove-stale-paths requested. Set inside runLint, never by
+	// callers — it is a fact about the run (which credentials were absent),
+	// not a flag. Partial credentials never reach it: they refuse at exit 5.
 	offline bool
 	// policy records that a --policy file configured this run, not flags. It
 	// governs only how a refusal is WORDED: the remedy for an unset R-6 policy
@@ -268,22 +270,46 @@ func runLint(r lintRun, stdout, stderr io.Writer) int {
 	if r.githubRepo == "" {
 		missing = append(missing, "--github-repo owner/name")
 	}
-	// One narrow carve-out: R-12 is about OWNER existence, an API fact. Whether
-	// a pattern matches zero tracked files is a git-TREE fact the offline audit
-	// (A-4/A-5) itself proves, so when --remove-stale-paths names that repair
-	// as what this run is for, the run proceeds OFFLINE — stage 3 alone, owner
-	// checks skipped and said so, no owner removed, verified, or repaired. Any
-	// run that would need an owner answer still refuses here.
-	r.offline = len(missing) > 0
-	if r.offline && !r.removeStale {
-		fmt.Fprintf(stderr, "error: lint needs %s. Whether an owner still exists is not decidable offline, and removing owners on a guess is what R-12 forbids — nothing was written. The one repair decidable offline is --remove-stale-paths (a dead pattern is a tree fact); pass it to run that repair alone, with owner checks skipped.\n", strings.Join(missing, " and "))
-		return ExitInconclusive
-	}
-	if !r.offline {
+	// Checked whenever the flag was TYPED, token or no token: a malformed
+	// --github-repo is a misspelled argument the operator plainly meant to use,
+	// and letting the credential refusal (or the offline mode) speak first
+	// would silently ignore the value they typed.
+	if r.githubRepo != "" {
 		if len(strings.SplitN(r.githubRepo, "/", 2)) != 2 || strings.Count(r.githubRepo, "/") != 1 {
 			fmt.Fprintln(stderr, "error: --github-repo must be owner/name")
 			return ExitInvalid
 		}
+	}
+	// One narrow carve-out: R-12 is about OWNER existence, an API fact. Whether
+	// a pattern matches zero tracked files is a git-TREE fact the offline audit
+	// (A-4/A-5) itself proves, so when --remove-stale-paths names that repair
+	// as what this run is for, the run proceeds OFFLINE — stage 3 alone, owner
+	// checks skipped and said so, no owner removed, verified, or repaired.
+	//
+	// Only when NEITHER credential was offered. A run that named a repo or
+	// held a token asked for the credentialed lint, and silently narrowing it
+	// to dead patterns would report success over owner checks the operator
+	// believes ran — so partial credentials refuse below, naming what is
+	// absent, exactly as before the mode existed.
+	r.offline = r.token == "" && r.githubRepo == ""
+	switch {
+	case r.offline && !r.removeStale:
+		// The escape hatch is named in the operator's own dialect: the flag is
+		// exit-3-banned next to --policy (R-36b), so pointing a policy-mode
+		// run at it would send them straight into a second refusal.
+		hatch := "pass --remove-stale-paths"
+		if r.policy {
+			hatch = `set "remove_stale_paths": true in the policy file's "lint" block`
+		}
+		fmt.Fprintf(stderr, "error: lint needs %s. Whether an owner still exists is not decidable offline, and removing owners on a guess is what R-12 forbids — nothing was written. The one repair decidable offline is removing dead patterns (a tree fact); %s to run that repair alone, with owner checks skipped.\n", strings.Join(missing, " and "), hatch)
+		return ExitInconclusive
+	case !r.offline && len(missing) > 0:
+		msg := fmt.Sprintf("error: lint needs %s. Whether an owner still exists is not decidable offline, and removing owners on a guess is what R-12 forbids — nothing was written.", strings.Join(missing, " and "))
+		if r.removeStale {
+			msg += " The tree-only offline mode (dead-pattern removal alone) engages only when neither a token nor --github-repo is given — supply what is missing, or drop the one you passed."
+		}
+		fmt.Fprintln(stderr, msg)
+		return ExitInconclusive
 	}
 	// The disk cache is refused rather than used, and this is the one place
 	// where lint must NOT inherit audit's behavior.
@@ -505,7 +531,7 @@ func emitLint(res *lint.Result, coPath string, applied bool, r lintRun, stdout i
 	if r.offline {
 		// The disclosure the offline mode is conditioned on: what was skipped,
 		// and that the fail-closed contract for owners is intact (R-12).
-		fmt.Fprintf(stdout, "  note: owner checks were skipped — this run had no GitHub credentials, so no owner was verified, repaired, or removed (R-12); only rules whose patterns match nothing tracked and nothing on disk were considered\n")
+		fmt.Fprintf(stdout, "  note: owner checks were skipped — this run was given neither a token nor --github-repo, so no owner was verified, repaired, or removed (R-12); dead patterns were judged against the tree, and invalid lines were reported but left as written\n")
 	}
 	// What lint DID, then what it deliberately did not: a flat list made the
 	// one line that is not a fix look like one, and made the headline count
