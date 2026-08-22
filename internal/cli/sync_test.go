@@ -64,6 +64,14 @@ func syncOpResult(t *testing.T, rec cli.SyncRecord, id string) (int, bool) {
 
 // checkDirSnapshot records every file under dir by content, so a test can
 // prove a command wrote nothing at all.
+// checkDirSnapshot maps every working-tree file under dir to its content.
+// .git is excluded deliberately: the tool's one writer path writes CODEOWNERS
+// files, never repository internals — but git itself rewrites .git bookkeeping
+// behind the fixture's own commands (git 2.55 detaches maintenance after
+// commit), and those writes landing between two snapshots made "writes
+// nothing" tests fail on whichever one the race hit (R-33 skip/dry-run,
+// R-35b/R-35d on the 2.55 CI runners). Hashing .git asserts git's internals
+// are byte-stable across a run, which was never this tool's contract.
 func checkDirSnapshot(t *testing.T, dir string) map[string]string {
 	t.Helper()
 	snap := map[string]string{}
@@ -72,6 +80,9 @@ func checkDirSnapshot(t *testing.T, dir string) map[string]string {
 			return err
 		}
 		if d.IsDir() {
+			if d.Name() == ".git" {
+				return filepath.SkipDir
+			}
 			return nil
 		}
 		b, err := os.ReadFile(p)
