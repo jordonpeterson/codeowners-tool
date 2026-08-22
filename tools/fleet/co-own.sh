@@ -78,15 +78,19 @@ CFILE="$(jq -r '.codeowners_path // empty' "$TMP/before.json")"
 # root, unanchored ones also match under any parent. Wildcards are not modeled
 # here — such a scope selects no paths and is skipped as "nothing in scope";
 # the tool's snapshot/verify stay the authority on any edit regardless.
+# Owners compare under the tool's identity (R-38): @handles fold case, an
+# email stays byte-exact. Snapshot preserves file spellings, so byte equality
+# here would call @Org/Platform a different owner than --owner @org/platform.
 state() {
   jq -r --arg s "$S" --arg o "$OWNER" --arg anchored "$ANCHORED" '
+    def fold: if startswith("@") then ascii_downcase else . end;
     [.ownership | to_entries[]
      | select(.key as $k | ($k == $s) or ($k | startswith($s + "/"))
          or (($anchored == "0")
              and (($k | endswith("/" + $s)) or ($k | contains("/" + $s + "/")))))
      | .value // []] as $sets
     | if ($sets | length) == 0 then "none"
-      elif [$sets[] | index($o)] | any(. == null) then "no-owner"
+      elif [$sets[] | map(fold) | index($o | fold)] | any(. == null) then "no-owner"
       elif [$sets[] | length >= 2] | all then "shared"
       else "exclusive" end' "$1"
 }
@@ -98,13 +102,15 @@ esac
 
 # Exclusivity must come from a dedicated "SCOPE OWNER" line; anything else
 # (a broad sole-owner rule, extra owners, an inline comment) has no move that
-# provably stays inside the scope, so it goes to a human instead.
+# provably stays inside the scope, so it goes to a human instead. The owner
+# match folds like state() does: @handles case-insensitively, emails byte-exact.
 if ! awk -v s="$S" -v o="$OWNER" '
+  function fold(x) { return x ~ /^@/ ? tolower(x) : x }
   { line = $0; sub(/\r$/, "", line)
     n = split(line, f, /[ \t]+/); i = 1
     if (n > 0 && f[1] == "") i = 2
     p = f[i]; sub(/^\/+/, "", p); sub(/\/+$/, "", p)
-    if (n - i + 1 == 2 && p == s && f[i+1] == o) { deleted = 1; next }
+    if (n - i + 1 == 2 && p == s && fold(f[i+1]) == fold(o)) { deleted = 1; next }
     print }
   END { exit deleted ? 0 : 1 }
 ' "$REPO/$CFILE" > "$TMP/without-line"; then
@@ -141,13 +147,14 @@ if [ "$(state "$TMP/fallback.json")" != shared ]; then
   # owner". Invert: keep the line, add the broader team(s) to it — one
   # add_owner with an owner list is one line change (R-33b).
   FALLBACK="$(jq -r --arg s "$S" --arg o "$OWNER" --arg anchored "$ANCHORED" '
+    def fold: if startswith("@") then ascii_downcase else . end;
     [.ownership | to_entries[]
      | select(.key as $k | ($k == $s) or ($k | startswith($s + "/"))
          or (($anchored == "0")
              and (($k | endswith("/" + $s)) or ($k | contains("/" + $s + "/")))))
      | .value // []] | unique as $sets
     | if ($sets | length) != 1 then ""
-      else [$sets[0][] | select(. != $o)] | join(", ") end' "$TMP/fallback.json")"
+      else [$sets[0][] | select(fold != ($o | fold))] | join(", ") end' "$TMP/fallback.json")"
   [ -n "$FALLBACK" ] || restore_and_human "nothing co-ownable behind the line; a human decides who shares $SCOPE"
   git -C "$REPO" reset -q --hard "$BASE"
   RC=0

@@ -251,6 +251,15 @@ func Build(content []byte, tree []string, opList []ops.Op, opts Options) (*Plan,
 							"scope %q matches %d tracked file(s), but every one of them is excepted — the except clause empties the op in this repo (R-28)", op.Scope, raw)}
 					}
 					return nil, &InvalidError{Msg: fmt.Sprintf("scope %q matches zero tracked files (R-5: refusing to create a dead rule)", op.Scope)}
+				default:
+					// Policy parsing validates the field, but the struct is
+					// exported: a library caller (or a future value) can carry
+					// anything here, and falling through would synthesize
+					// nothing while reporting the repo converged — the silent
+					// no-op rollout this switch exists to prevent.
+					return nil, &InvalidError{Msg: fmt.Sprintf(
+						"unknown on_zero_match value %q on %s; legal values are %q, %q, or %q",
+						op.OnZeroMatch, op.Raw, ops.ZeroMatchRequire, ops.ZeroMatchSkip, ops.ZeroMatchDeclare)}
 				}
 			} else if len(zeroPats) > 0 {
 				// R-28's second question, reached only when the op WILL write.
@@ -268,7 +277,7 @@ func Build(content []byte, tree []string, opList []ops.Op, opts Options) (*Plan,
 						allowWarnings = append(allowWarnings, fmt.Sprintf(
 							"except pattern %q matches zero tracked files; on_except_zero_match=allow writes the grant with NO carve for it, so a matching file created later falls under the grant — a declare-class weakening of INV-1, marked proven=structural (R-28)", e))
 					}
-				default:
+				case ops.ExceptZeroMatchRequire, "":
 					// "" and "require" are one state, exactly as above. An
 					// except that bites nothing means the carve-out this
 					// policy promises does not exist here — in the motivating
@@ -278,6 +287,13 @@ func Build(content []byte, tree []string, opList []ops.Op, opts Options) (*Plan,
 					// /.github/CODEOWNERS.
 					return nil, &RefusalError{Msg: fmt.Sprintf(
 						"refusing: except pattern %q matches zero tracked files — the carve-out this policy promises does not exist in this repo, and writing the grant without it would reopen the hole the except exists to close (R-28); normalize this repo first, or set on_except_zero_match=allow to accept the weakening", zeroPats[0])}
+				default:
+					// Same defense as on_zero_match: an unrecognized value is
+					// bad input that fails identically everywhere (exit 3),
+					// not a per-repo refusal masquerading as require.
+					return nil, &InvalidError{Msg: fmt.Sprintf(
+						"unknown on_except_zero_match value %q on %s; legal values are %q or %q",
+						op.OnExceptZeroMatch, op.Raw, ops.ExceptZeroMatchRequire, ops.ExceptZeroMatchAllow)}
 				}
 			}
 		}
