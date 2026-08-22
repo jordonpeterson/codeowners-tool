@@ -70,8 +70,9 @@ $ codeowners-tool snapshot | jq .ownership
 ```
 
 In that map `[]` means a rule matches the path and deliberately assigns no owners;
-`null` means no rule matches it at all. (Every command also has its own help:
-`codeowners-tool sync --help`.)
+`null` means no rule matches it at all. `snapshot` reads the CODEOWNERS **committed**
+at `--branch` (default `HEAD`) — the file GitHub sees — so commit before snapshotting.
+(Every command also has its own help: `codeowners-tool sync --help`.)
 
 To change ownership, state the intent and preview it — nothing writes until you drop
 `--dry-run`:
@@ -96,7 +97,7 @@ derives for you.
 
 **You state an intent — an *op*.** Same syntax whether you pass it with `--op` or list it
 in a policy file. Scope is a directory, file path, or glob, using CODEOWNERS pattern
-syntax.
+syntax; a space in a path is escaped with a backslash (`docs/release\ notes.md`).
 
 | Op | What it means |
 |---|---|
