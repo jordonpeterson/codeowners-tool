@@ -1,8 +1,7 @@
 # Guide: making changes end to end
 
-Worked examples for each kind of change. Concepts are in the
-[README](../README.md#basic-concepts); every flag and exit code is in
-[REFERENCE.md](REFERENCE.md).
+Worked examples for each kind of change. Concepts: [README](../README.md#basic-concepts);
+every flag and exit code: [REFERENCE.md](REFERENCE.md).
 
 ## A basic example
 
@@ -21,8 +20,7 @@ $ cat .github/CODEOWNERS
 /services/api/   @org/api-team
 ```
 
-Docs team should co-own the README. Look before you leap:
-
+Docs team should co-own the README — look before you leap:
 ```console
 $ codeowners-tool sync --op 'add_owner(README.md, @org/docs-team)' --dry-run
 applied: 1 op(s) applied, 0 skipped; 1 line change(s), 1 path(s) change owners
@@ -129,8 +127,6 @@ deliberately no default:
 ```console
 $ codeowners-tool sync --op 'remove_owner(/services/api/, @org/api-team)'
 error: removing @org/api-team empties the owner set of "/services/api/"; an explicit --on-empty policy (error|inherit|unowned) is required — there is deliberately no default (R-6) (governing file: .github/CODEOWNERS)
-$ echo $?
-2
 ```
 
 `--on-empty inherit` deletes the rule and lets the preceding broader one take over;
@@ -169,6 +165,12 @@ codeowners-tool snapshot --branch feature --out after.json
 codeowners-tool verify --before before.json --after after.json --scope /services/api/
 ```
 
+Two hygiene rules make that proof trustworthy. `snapshot` reads the **committed**
+CODEOWNERS at `--branch` (default `HEAD`) — so commit the change before taking the
+"after" snapshot. And leave the evidence files themselves uncommitted: a path that
+enters the tracked tree counts as an ownership change, so `verify` will rightly flag
+your own `before.json` as out of scope.
+
 ## When it refuses
 
 Sometimes there is no line that does what you asked and nothing else. Given
@@ -178,8 +180,6 @@ Sometimes there is no line that does what you asked and nothing else. Given
 ```console
 $ codeowners-tool sync --op 'add_owner(**/*.tf, @org/infra)'
 error: refusing: rule "infra/" also governs paths outside scope "**/*.tf", and no sound narrowing pattern is derivable — amending would violate INV-2, appending would violate INV-1 (governing file: .github/CODEOWNERS)
-$ echo $?
-2
 ```
 
 In English: `infra/` covers the `.tf` file *and* the README. Editing that line would
@@ -187,7 +187,14 @@ change the README's owners, which you never asked for (INV-2). Adding a `**/*.tf
 before it would be overridden by it (INV-1). So it stops.
 
 This is a normal outcome for some repos, not a bug — the tool fails closed rather than
-guessing. The fix is usually to replace the over-broad rule the error names with
-narrower ones, then re-run. Exit `2` means *this repo* needs a human; exit `3` means
+guessing. Two ways out, both stated in the op itself:
+
+- **Narrow the scope** to something a sound rule *can* be written for — the concrete
+  paths, or a directory-local glob: `add_owner(/infra/*.tf, @org/infra)`.
+- **Carve the conflicting paths out** with an `except` clause:
+  `add_owner(infra/ except infra/README.md, @org/infra)` — see [except.md](except.md).
+
+(A same-owners `set_owners` does not help: it changes no ownership, so the tool reports
+`unchanged` and writes nothing.) Exit `2` means *this repo* needs a human; exit `3` means
 *the policy* is broken and will fail identically everywhere — the split that makes a
 hundred-repo run survivable ([FLEET.md](FLEET.md)).

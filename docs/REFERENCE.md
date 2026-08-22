@@ -272,15 +272,28 @@ codeowners-tool snapshot --branch feature --out after.json
 codeowners-tool verify --before before.json --after after.json --scope /services/api/
 ```
 
+## `snapshot` and `verify`
+
+`snapshot` resolves the CODEOWNERS **committed at `--branch`** (default `HEAD`) against
+that ref's tracked tree — an uncommitted edit is invisible to it, exactly as it is to
+GitHub. In the `ownership` map, `[]` means a rule matches the path and deliberately
+assigns no owners; `null` means no rule matches it at all.
+
+`verify` compares two snapshots and exits `0` when every ownership change falls inside
+a declared `--scope` (repeatable), `2` — printing each offending path — when any change
+falls outside them (with no `--scope`, any change at all violates), and `3` for a
+malformed snapshot. A path that enters or leaves the tracked tree counts as a change
+(R-18), so don't commit the snapshot files themselves between the two snapshots.
+
 ## Operations
 
 Scope is a directory, file path, or glob — same syntax as CODEOWNERS patterns.
 
 | Op | Meaning |
 |---|---|
-| `add_owner(scope, owner)` | Owner becomes a **co-owner**; every pre-existing owner of every path in scope is retained. |
+| `add_owner(scope, owner)` | Owner — or a bracketed list `[a, b]` (R-33) — becomes a **co-owner**; every pre-existing owner of every path in scope is retained. |
 | `set_owners(scope, [owners])` | Exact owner set for every path in scope, displacing prior owners. `[]` is legal: it deliberately un-owns the scope. |
-| `remove_owner(scope, owner)` | Owner stops owning every path in scope. If a rule's owner set would empty, an `--on-empty` policy is **required**. |
+| `remove_owner(scope, owner)` | Owner — or a bracketed list (R-33) — stops owning every path in scope. If a rule's owner set would empty, an `--on-empty` policy is **required**. |
 | `rename_owner(old, new)` | Global identifier substitution — the only op safe as pure text replacement (it can't change any rule's match set). |
 
 The scope of `add_owner`, `set_owners` and `remove_owner` may carry an `except`

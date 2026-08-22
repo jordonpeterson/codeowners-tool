@@ -1153,6 +1153,17 @@ cleans the spelling before matching the tracked file; the S-8 location
 check compares the raw string, so a live change is reported as dead in the
 warning, the --out record, and the --summary-out PR body.
 
+### `TestKnownBug_OfflineStaleRuleRemovalReportable`
+
+KNOWN BUG (UAT finding): a tree-provably-dead rule cannot be repaired
+offline. `lint --dry-run --remove-stale-paths` refuses everything at exit 5
+citing R-12 ("owner existence is not decidable offline") — but whether a
+pattern matches zero tracked files is a git-tree fact the offline audit
+(A-4/A-5) itself proves, no API needed. With --remove-stale-paths as the
+requested repair, the dry run should report the pending dead-rule removal
+(exit 4) instead of demanding a token; today the only offline remedy is the
+hand edit the tool exists to prevent.
+
 ### `TestKnownBug_PlanBelowRepoRootRefused`
 
 KNOWN BUG: plan and apply skip the repo-root guard that sync enforces.
@@ -5942,4 +5953,4 @@ DIFFERENT states; transitioning between them is a real ownership change.
 
 ---
 
-568 documented test cases across 13 packages.
+569 documented test cases across 13 packages.

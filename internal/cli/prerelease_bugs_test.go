@@ -217,6 +217,29 @@ func TestKnownBug_AuditRejectsUnknownFormat(t *testing.T) {
 	}
 }
 
+// KNOWN BUG (UAT finding): a tree-provably-dead rule cannot be repaired
+// offline. `lint --dry-run --remove-stale-paths` refuses everything at exit 5
+// citing R-12 ("owner existence is not decidable offline") — but whether a
+// pattern matches zero tracked files is a git-tree fact the offline audit
+// (A-4/A-5) itself proves, no API needed. With --remove-stale-paths as the
+// requested repair, the dry run should report the pending dead-rule removal
+// (exit 4) instead of demanding a token; today the only offline remedy is the
+// hand edit the tool exists to prevent.
+func TestKnownBug_OfflineStaleRuleRemovalReportable(t *testing.T) {
+	repo := initRepo(t, map[string]string{
+		".github/CODEOWNERS": "* @org/everyone\n/ghost/ @org/ghost-team\n",
+		"a.md":               "",
+	})
+	code, stdout, stderr := runCLI(t, "lint", "--repo", repo, "--dry-run", "--remove-stale-paths")
+	if code != cli.ExitFindings {
+		t.Errorf("offline lint --dry-run --remove-stale-paths on a tree-provably-dead rule: want exit 4 (pending fix), got %d\nstdout: %s\nstderr: %s",
+			code, stdout, stderr)
+	}
+	if out := stdout + stderr; !strings.Contains(out, "/ghost/") {
+		t.Errorf("the pending removal should name the dead pattern /ghost/\noutput:\n%s", out)
+	}
+}
+
 // gitRun is a helper for tests that need extra git steps after initRepo.
 func gitRun(t *testing.T, dir string, args ...string) {
 	t.Helper()

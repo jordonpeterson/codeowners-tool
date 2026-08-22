@@ -135,6 +135,8 @@ One rule: **0 when the file needs nothing further from a person, 4 when it does.
 
 **`lint needs a token … and --github-repo`** (exit 5). Owner existence is not decidable
 offline, and that is the whole point of the command. It names whichever one you left out.
+This holds even when the only repair you asked for is `--remove-stale-paths` — offline
+dead-rule removal is not currently supported, although it is decidable from the tree.
 
 **`inconclusive: … no owner was removed and nothing was written`** (exit 5). One lookup
 could not be answered — rate limit, expired token, an org your token cannot enumerate —
