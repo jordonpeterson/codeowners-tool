@@ -36,7 +36,7 @@ audit    [--checks a1,a3,a6] [--fail-on any|warning|error|never] [--format json|
          [--cache-dir D] [--cache-ttl DUR] [--repo DIR] [--branch REF] [--file PATH]
 lint     --github-repo owner/name [--token T | $GITHUB_TOKEN] [--api-url URL]
          [--remove-stale-paths] [--on-empty error|inherit|unowned] [--dry-run]
-         [--repo DIR] [--branch REF] [--file PATH] [--format text|json]
+         [--policy FILE] [--repo DIR] [--branch REF] [--file PATH] [--format text|json]
 snapshot [--repo DIR] [--branch REF] [--out snap.json]
 verify   --before before.json --after after.json [--scope PATTERN ...]
 version  print the build this binary was stamped with
@@ -405,7 +405,7 @@ Under `inherit`/`unowned` the resulting reassignment is shown in the plan's owne
 
 ## Audit checks
 
-Read-only **except `audit --lint`** ([below](#audit---lint)). Plain `audit` never writes —
+Read-only **except `audit --lint`** ([below](#lint)). Plain `audit` never writes —
 where a fix is expressible it emits op strings for a human to review and run through
 `plan`/`apply`. Even under `--lint` the bytes reach disk only through `apply`, which
 remains the system's single writer path.
