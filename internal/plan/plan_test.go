@@ -252,6 +252,29 @@ func TestR7_DuplicatePatternsEditEffective(t *testing.T) {
 	}
 }
 
+// SPEC R-7, same-run case (pre-release finding): set_owners on a scope whose
+// pattern already exists earlier inserts after the last intersecting rule,
+// leaving the earlier byte-equal line permanently shadowed but still naming
+// its old owners to readers. The run that AUTHORS the duplicate must disclose
+// it — not only the next run that touches the file.
+func TestR7_SetOwnersDisclosesAuthoredDuplicate(t *testing.T) {
+	tree := []string{"x/a.go", "README.md"}
+	p, err := build(t, "/x/ @a\n* @e\n", tree, plan.Options{}, "set_owners(/x/, [@n])")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Count(p.AfterContent, "/x/ "); got != 2 {
+		t.Fatalf("both /x/ lines must remain (R-1: only disclose, never reorder):\n%s", p.AfterContent)
+	}
+	joined := strings.Join(p.Warnings, " ")
+	if !strings.Contains(joined, "duplicate") || !strings.Contains(joined, "shadow") {
+		t.Errorf("run that authored the duplicate must warn, warnings=%v", p.Warnings)
+	}
+	if !strings.Contains(joined, "line 1") || !strings.Contains(joined, "line 3") {
+		t.Errorf("warning must name the shadowed line and the inserted line, warnings=%v", p.Warnings)
+	}
+}
+
 // SPEC R-8: order-dependent overlapping batches are rejected, not resolved
 // by input order. Commuting batches are fine.
 func TestR8_ConflictingBatchRejected(t *testing.T) {

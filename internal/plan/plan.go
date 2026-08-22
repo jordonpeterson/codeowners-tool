@@ -825,6 +825,19 @@ func synthSet(f *file.File, tree []string, op ops.Op, scope map[string]bool, des
 			NewOwners: op.Owners, NewLine: f.LineText(at),
 			Reason: "inserted after the last rule whose match set intersects the scope, so no later rule recaptures any in-scope path (R-3)",
 		})
+		// R-7 disclosure for a duplicate THIS run authors: the insert lands
+		// after the last intersecting rule, so an earlier byte-equal pattern is
+		// left permanently shadowed while still naming its old owners to human
+		// readers. warnShadowedDuplicates above ran on the pre-op file and
+		// cannot see it — without this, the run creating the dead line is the
+		// one run that says nothing about it (pre-release finding).
+		for _, r := range f.Rules() {
+			if r.LineIndex != at && r.PatternText == op.Scope {
+				pl.addWarning(fmt.Sprintf(
+					"line %d: duplicate pattern %q is shadowed by line %d, which this run inserted — the earlier line is dead under last-match-wins (R-7); run `audit` to clean up duplicates",
+					r.LineIndex+1, op.Scope, at+1))
+			}
+		}
 	}
 
 	for p := range scope {
