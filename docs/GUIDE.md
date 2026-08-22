@@ -48,8 +48,7 @@ Three things happened that are worth noticing:
   which is what keeps out-of-scope ownership (INV-2) untouched.
 - `/services/api/` was **not touched at all**, including its original spacing.
 
-Run it again and nothing happens: the second run reports `unchanged` and changes
-zero bytes.
+Run it again and nothing happens: the second run reports `unchanged`, zero bytes change.
 
 > **Pattern note.** `README.md` is unanchored, so like gitignore it matches a
 > `README.md` at *any* depth. Write `/README.md` if you mean only the one at the root.
