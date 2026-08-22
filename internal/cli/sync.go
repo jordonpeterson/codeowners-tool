@@ -202,6 +202,11 @@ func cmdSync(args []string, stdout, stderr io.Writer) int {
 	if err := fs.Parse(args); err != nil {
 		return flagParseCode(err)
 	}
+	// Argument-only, like every exit-3 verdict below: a stray positional arg
+	// means the parser read nothing after it, flags included.
+	if err := rejectLeftoverArgs(fs); err != nil {
+		return exit3(stderr, err)
+	}
 	// Which flags were TYPED, as opposed to which hold a non-zero value. Every
 	// "not allowed with --policy" ban below is a ban on the flag being
 	// PRESENT: `--create=false` overrides a reviewed `"create": true` exactly
@@ -388,7 +393,17 @@ func (r *syncRun) execute() (SyncRecord, int) {
 	// keeps that choice inside the clone. Refusal, not error: the repo was read
 	// fine and the tool is declining to write into it, and it is a fact about
 	// THIS clone, so exit 2 and the fleet loop steps to the next one.
-	if err := containedWritePath(r.repoArg, filepath.Join(r.repoArg, filepath.FromSlash(rel))); err != nil {
+	target := filepath.Join(r.repoArg, filepath.FromSlash(rel))
+	if err := containedWritePath(r.repoArg, target); err != nil {
+		rec.Status = StatusRefused
+		rec.Error = err.Error()
+		return rec, ExitRefused
+	}
+	// The refusal containment cannot make: a symlink whose target stays INSIDE
+	// the clone is still a CODEOWNERS GitHub does not follow, so writing
+	// through it is the same dead-on-arrival outcome with a live-looking path.
+	// See refuseSymlinkedTarget.
+	if err := refuseSymlinkedTarget(target); err != nil {
 		rec.Status = StatusRefused
 		rec.Error = err.Error()
 		return rec, ExitRefused
@@ -628,7 +643,12 @@ func headLabel(repoDir, head string) string {
 	if len(short) > 7 {
 		short = short[:7]
 	}
-	name, err := gitLine(repoDir, "rev-parse", "--abbrev-ref", "--end-of-options", "HEAD")
+	// No --end-of-options here: in --abbrev-ref (filter) mode rev-parse ECHOES
+	// the operator as an output line, so the S-7 refusal read "HEAD is
+	// --end-of-options\nmain (sha)" and the detached check below could never
+	// fire. "HEAD" is a literal this function supplies, never operator input,
+	// so there is nothing for the operator to smuggle past.
+	name, err := gitLine(repoDir, "rev-parse", "--abbrev-ref", "HEAD")
 	if err != nil || name == "" || name == "HEAD" {
 		return short
 	}
@@ -750,11 +770,22 @@ func (e *unreadableCodeownersError) Error() string {
 
 func (e *unreadableCodeownersError) Unwrap() error { return e.err }
 
+// relClean is the canonical spelling of a repo-relative path: slash-separated
+// and cleaned, so `./.github/CODEOWNERS`, `.github//CODEOWNERS` and
+// `docs/../CODEOWNERS` all spell the file they name. Every comparison against
+// a git-reported path goes through it — git lists clean slash paths, and
+// comparing an operator's raw --file spelling against one reported a live
+// change as "governs nothing" (S-8) in the warning, the --out record and the
+// --summary-out PR body.
+func relClean(rel string) string {
+	return filepath.ToSlash(filepath.Clean(filepath.FromSlash(rel)))
+}
+
 // trackedAt reports whether rel is one of the paths git lists for the ref.
 // Comparison is against the cleaned, slash-separated spelling because rel can
 // come from --file, where `./docs/CODEOWNERS` names the tracked `docs/CODEOWNERS`.
 func trackedAt(tree []string, rel string) bool {
-	want := filepath.ToSlash(filepath.Clean(filepath.FromSlash(rel)))
+	want := relClean(rel)
 	for _, p := range tree {
 		if p == want {
 			return true
@@ -855,7 +886,8 @@ func governingWarnings(tree []string, rel string, content []byte) []string {
 			rel, strings.Join(gittree.CodeownersLocations, ", ")))
 	}
 	if present := gittree.FindCodeownersPaths(tree); len(present) > 0 {
-		if rel != present[0] && isCodeownersLocation(rel) {
+		// relClean on the --file side only: present comes from git, already clean.
+		if relClean(rel) != present[0] && isCodeownersLocation(rel) {
 			out = append(out, fmt.Sprintf(
 				"this run writes %s, but GitHub resolves ownership from %s (S-8: .github/ > root > docs/, first found wins, never merged) — the rules written here govern nothing until that is the file being edited",
 				rel, present[0]))
@@ -876,10 +908,14 @@ func governingWarnings(tree []string, rel string, content []byte) []string {
 }
 
 // isCodeownersLocation reports whether a repo-relative path is one of the three
-// GitHub actually reads (S-8).
+// GitHub actually reads (S-8). Classified over the cleaned spelling, like
+// trackedAt: `./.github/CODEOWNERS` governs exactly what `.github/CODEOWNERS`
+// governs, and classifying the raw string drew the false "governs nothing"
+// warning for an alternate spelling of a governing file.
 func isCodeownersLocation(rel string) bool {
+	clean := relClean(rel)
 	for _, loc := range gittree.CodeownersLocations {
-		if rel == loc {
+		if clean == loc {
 			return true
 		}
 	}
@@ -1300,6 +1336,9 @@ func cmdCheck(args []string, stdout, stderr io.Writer) int {
 	// An unknown flag is a parse error, which is exit 3 below.
 	if err := fs.Parse(args); err != nil {
 		return flagParseCode(err)
+	}
+	if err := rejectLeftoverArgs(fs); err != nil {
+		return exit3(stderr, err)
 	}
 	if *format != "text" && *format != "json" {
 		return exit3(stderr, fmt.Errorf("unknown --format %q; want text or json", *format))
