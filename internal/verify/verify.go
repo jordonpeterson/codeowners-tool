@@ -103,10 +103,16 @@ func Compare(before, after *Snapshot, scopes []string) (*Result, error) {
 
 	res := &Result{}
 	for _, p := range sorted {
-		b, bok := before.Ownership[p]
-		a, aok := after.Ownership[p]
-		b, a = resolve.CanonicalOwners(b), resolve.CanonicalOwners(a)
-		if bok && aok && resolve.OwnersEqual(b, a) {
+		// Absence from a snapshot means the path was not in that tree, which
+		// is unowned — the same nil the map holds for "no rule matched". It is
+		// NOT an ownership change, and gating equality on presence made it
+		// one: adding an ordinary unowned file between two snapshots failed
+		// the rollout gate at exit 2, citing "(unowned) → (unowned)". Owners
+		// alone decide. A file that appears under an existing rule still
+		// differs (nil → owners) and is still reported, as does a deleted one.
+		b := resolve.CanonicalOwners(before.Ownership[p])
+		a := resolve.CanonicalOwners(after.Ownership[p])
+		if resolve.OwnersEqual(b, a) {
 			continue
 		}
 		c := Change{Path: p, Before: b, After: a}

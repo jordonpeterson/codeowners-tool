@@ -184,6 +184,7 @@ type syncRun struct {
 func cmdSync(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("sync", flag.ContinueOnError)
 	fs.SetOutput(stderr)
+	verbHelp(fs, stderr, args, "sync — converge one repository on the ownership the ops describe, and write it.\nReads and writes the working-tree CODEOWNERS; resolves against --branch's tree.\nReturns only 0 (converged), 2 (this repo needs a human) or 3 (the policy is broken).", opGrammar, policySchema)
 	var opSpecs, policyPaths multiFlag
 	fs.Var(&opSpecs, "op", "operation (repeatable); mutually exclusive with --policy")
 	fs.Var(&policyPaths, "policy", "policy file (R-20); mutually exclusive with --op")
@@ -1358,6 +1359,7 @@ func renderSummary(rec SyncRecord, r *syncRun) string {
 func cmdCheck(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("check", flag.ContinueOnError)
 	fs.SetOutput(stderr)
+	verbHelp(fs, stderr, args, "check — validate ops or a policy file. Reads no repository and writes nothing.\nExit 0 if valid, 3 if not. Run it once before a fleet rollout: a policy error fails\nidentically on every repo, so catching it here costs one run instead of a hundred.", opGrammar, policySchema)
 	var opSpecs, policyPaths multiFlag
 	fs.Var(&opSpecs, "op", "operation to syntax-check (repeatable); mutually exclusive with --policy")
 	fs.Var(&policyPaths, "policy", "policy file to validate; mutually exclusive with --op")

@@ -282,8 +282,15 @@ assigns no owners; `null` means no rule matches it at all.
 `verify` compares two snapshots and exits `0` when every ownership change falls inside
 a declared `--scope` (repeatable), `2` — printing each offending path — when any change
 falls outside them (with no `--scope`, any change at all violates), and `3` for a
-malformed snapshot. A path that enters or leaves the tracked tree counts as a change
-(R-18), so don't commit the snapshot files themselves between the two snapshots.
+malformed snapshot. Owners alone decide: a path absent from one snapshot is *unowned*
+in it, so entering or leaving the tracked tree is a change only when the path carries
+owners on one side (R-18). Adding an ordinary unowned file between the two snapshots —
+the snapshot artifacts included — no longer fails the gate.
+
+**`snapshot` reads the tree committed at `--branch`; `sync` and `lint` write the working
+tree.** A snapshot/verify pair wrapped around an uncommitted `sync` therefore compares
+two identical snapshots and reports success. Commit between them; `snapshot` warns when
+the working-tree CODEOWNERS differs from the ref it is reading.
 
 ## Operations
 

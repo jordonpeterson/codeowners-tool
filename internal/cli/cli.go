@@ -21,6 +21,7 @@
 package cli
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -199,6 +200,11 @@ func Run(argv []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stdout, Version)
 		return ExitOK
 	case "-h", "--help", "help":
+		// `help sync` used to print the top-level usage — the wrong answer
+		// rather than an error. Route it to the verb the caller named.
+		if len(argv) > 1 && argv[1] != "" {
+			return Run([]string{argv[1], "--help"}, stdout, stderr)
+		}
 		usage(stdout)
 		return ExitOK
 	default:
@@ -206,6 +212,63 @@ func Run(argv []string, stdout, stderr io.Writer) int {
 		usage(stderr)
 		return ExitInvalid
 	}
+}
+
+// The two blocks below are the reference an operator could previously reach
+// only by submitting something wrong and reading the refusal. The parser is an
+// excellent teacher, but only to someone already at a terminal iterating: a CI
+// author writes their gate once, from what they can read.
+
+const opGrammar = `Operations (--op, repeatable — one op per flag):
+  add_owner(SCOPE, @owner)      add an owner, keeping the ones already there
+  add_owner(SCOPE, [@a, @b])    add several
+  set_owners(SCOPE, [@a, @b])   replace the owner set — the brackets are required
+  remove_owner(SCOPE, @owner)   drop an owner; see --on-empty if it empties the set
+  rename_owner(@old, @new)      rename one owner everywhere; takes no scope
+
+SCOPE is a CODEOWNERS pattern (/services/api/, **/*.tf), optionally narrowed:
+  add_owner(/services/ except /services/legacy/, @org/platform)
+Owners are @user, @org/team, or a bare email. Write a space as '\ '.`
+
+const policySchema = `Policy file (--policy) — "version" and a non-empty "ops" are required:
+  {"version": 1,
+   "ops": ["add_owner(/docs/, @org/docs)",
+           {"op": "add_owner(/deploy/, @org/sre)", "id": "sre", "on_zero_match": "skip"}],
+   "on_empty": "error", "create": false, "max_paths_changed": 50,
+   "defaults": {"on_zero_match": "require"},
+   "lint": {"remove_stale_paths": true, "on_empty": "inherit"}}
+
+An op is the string --op takes, or an object wrapping it. A flag that duplicates
+a policy field is refused: set it in the file, so the artifact in git is the
+policy that ran.`
+
+// verbHelp replaces Go's bare "Usage of X:" flag dump with a statement of what
+// the verb does, plus any reference blocks it needs. Every verb previously
+// opened on an alphabetically sorted flag, and only audit and lint were
+// described anywhere at all.
+func verbHelp(fs *flag.FlagSet, w io.Writer, args []string, purpose string, blocks ...string) {
+	fs.Usage = func() {
+		fmt.Fprintf(w, "%s\n\nFlags:\n", purpose)
+		fs.PrintDefaults()
+		// Go calls Usage on every flag error too. A mistyped flag wants the
+		// error and the flag list; it does not want the op grammar and the
+		// policy schema printed underneath, so those are for someone who asked.
+		if !wantsHelp(args) {
+			return
+		}
+		for _, b := range blocks {
+			fmt.Fprintf(w, "\n%s\n", b)
+		}
+	}
+}
+
+func wantsHelp(args []string) bool {
+	for _, a := range args {
+		if a == "-h" || a == "-help" || a == "--help" {
+			return true
+		}
+	}
+	return false
 }
 
 func usage(w io.Writer) {
@@ -244,6 +307,30 @@ Exit codes: 0 ok · 1 no-op · 2 refused (invariant/size) · 3 invalid input
             4 audit findings · 5 inconclusive (fail-closed) · 6 rolled back
 sync/check use a coarser contract and return only:
             0 converged · 2 this repo needs a human · 3 the policy is broken
+sync reports "already correct" as 0, not 1; read .status to tell the two apart.
+
+EXAMPLES
+  # look first, then write
+  codeowners-tool sync --op 'add_owner(/services/api/, @org/api)' --dry-run
+  codeowners-tool sync --op 'add_owner(/services/api/, @org/api)'
+
+  # fleet: validate the policy once, then run it per repo
+  codeowners-tool check --policy policy.json
+  codeowners-tool sync --repo "$r" --policy policy.json --format json --out "records/$r.json"
+
+  # prove nothing outside /services/ changed owners
+  codeowners-tool snapshot --out before.json
+  codeowners-tool sync --policy policy.json
+  git commit -am 'codeowners'        # snapshot reads the COMMITTED tree
+  codeowners-tool snapshot --out after.json
+  codeowners-tool verify --before before.json --after after.json --scope '/services/'
+
+  # CI gate: fail when the file still needs a person
+  codeowners-tool lint --dry-run --github-repo org/repo --format json | jq -e .needs_human
+
+Run "codeowners-tool help VERB" for a verb's own flags, the op grammar and the
+policy schema. The R-, S- and A- identifiers cited there are defined in
+docs/REFERENCE.md (behaviour) and docs/policy.md (policy files).
 `)
 }
 
@@ -519,6 +606,7 @@ func (m *multiFlag) Set(v string) error { *m = append(*m, v); return nil }
 func cmdPlan(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("plan", flag.ContinueOnError)
 	fs.SetOutput(stderr)
+	verbHelp(fs, stderr, args, "plan — compute the change and write it to a file, touching no CODEOWNERS.\n`apply` consumes that file and re-proves it. Takes --op only; there is no --policy here.", opGrammar)
 	var opSpecs multiFlag
 	fs.Var(&opSpecs, "op", "operation (repeatable)")
 	repo := fs.String("repo", ".", "path to local git repository")
@@ -593,6 +681,7 @@ func cmdPlan(args []string, stdout, stderr io.Writer) int {
 func cmdApply(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("apply", flag.ContinueOnError)
 	fs.SetOutput(stderr)
+	verbHelp(fs, stderr, args, "apply — write a plan produced by `plan`, re-proving its invariants first.\nRefuses if CODEOWNERS changed since the plan was computed.")
 	planPath := fs.String("plan", "", "plan JSON produced by `plan`")
 	repo := fs.String("repo", "", "path to local git repository (default: plan's repo)")
 	if err := fs.Parse(args); err != nil {
@@ -649,6 +738,7 @@ func cmdApply(args []string, stdout, stderr io.Writer) int {
 func cmdSnapshot(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("snapshot", flag.ContinueOnError)
 	fs.SetOutput(stderr)
+	verbHelp(fs, stderr, args, "snapshot — record every tracked path's effective owners at --branch, for `verify`.\nReads the COMMITTED tree, not the working tree: commit a change before snapshotting it,\nor a snapshot/verify pair around it compares two identical snapshots.")
 	repo := fs.String("repo", ".", "path to local git repository")
 	branch := fs.String("branch", "HEAD", "ref to snapshot")
 	filePath := fs.String("file", "", "CODEOWNERS path override")
@@ -667,6 +757,15 @@ func cmdSnapshot(args []string, stdout, stderr io.Writer) int {
 	content, err := gittree.ReadFileAtRef(*repo, *branch, coPath)
 	if err != nil {
 		return errExit(&plan.InvalidError{Msg: err.Error()}, stderr)
+	}
+	// snapshot answers "what does GitHub see?", so it reads the tree at
+	// --branch; sync and lint write the WORKING TREE. When the two differ this
+	// picture is of a file the caller has already edited, and the obvious CI
+	// shape — snapshot, sync, snapshot, verify — hashes two identical
+	// snapshots and certifies that nothing changed. The run is still valid, so
+	// this discloses rather than refuses.
+	if wt, rerr := os.ReadFile(filepath.Join(*repo, coPath)); rerr == nil && !bytes.Equal(wt, content) {
+		fmt.Fprintf(stderr, "warning: %s differs in the working tree from %s, and this snapshot is of %s — commit first, or a snapshot/verify pair around an uncommitted change compares two identical snapshots and reports success\n", coPath, *branch, *branch)
 	}
 	res := plan.ResolveContent(string(content), tree)
 	snap := verify.Snapshot{Repo: *repo, Ref: *branch, Path: coPath, Ownership: map[string][]string{}}
@@ -690,6 +789,7 @@ func cmdSnapshot(args []string, stdout, stderr io.Writer) int {
 func cmdVerify(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("verify", flag.ContinueOnError)
 	fs.SetOutput(stderr)
+	verbHelp(fs, stderr, args, "verify — compare two snapshots and prove no ownership changed outside --scope.\nExit 0 if the invariant holds, 2 if it does not. With no --scope, any change is a violation.\n--scope takes CODEOWNERS patterns, the same spelling an op's scope uses.")
 	beforePath := fs.String("before", "", "before snapshot")
 	afterPath := fs.String("after", "", "after snapshot")
 	var scopes multiFlag
@@ -734,6 +834,7 @@ func cmdVerify(args []string, stdout, stderr io.Writer) int {
 func cmdAudit(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("audit", flag.ContinueOnError)
 	fs.SetOutput(stderr)
+	verbHelp(fs, stderr, args, "audit — report on the CODEOWNERS committed at --branch. Twelve checks (A-1..A-12); never writes.\n--fail-on picks which findings exit 4; the default `any` includes info-severity ones.\nA-1..A-3 need --token and --github-repo; the rest run offline.")
 	repo := fs.String("repo", ".", "path to local git repository")
 	branch := fs.String("branch", "HEAD", "ref to audit")
 	filePath := fs.String("file", "", "CODEOWNERS path override")

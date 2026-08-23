@@ -115,6 +115,7 @@ type lintDoc struct {
 func cmdLint(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("lint", flag.ContinueOnError)
 	fs.SetOutput(stderr)
+	verbHelp(fs, stderr, args, "lint — repair the working-tree CODEOWNERS: rejoin @handles split by whitespace,\nremove owners that no longer exist, and (with --remove-stale-paths) delete rules\nmatching nothing. Needs --github-repo and a token; start with --dry-run.\nExit 4 means a person is still needed — gate CI on the dry run, not the write.", policySchema)
 	var policyPaths multiFlag
 	fs.Var(&policyPaths, "policy", "policy file (R-36): the repair preferences come from its \"lint\" block; its ops are validated and never applied")
 	repo := fs.String("repo", ".", "path to local git repository")

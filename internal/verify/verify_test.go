@@ -77,12 +77,37 @@ func TestR18_UnownedVsZeroOwnersDistinct(t *testing.T) {
 	}
 }
 
-// A path added or removed from the tree is reported, not silently ignored.
+// A path added or removed from the tree is reported, not silently ignored —
+// when it carries owners on either side.
 func TestR18_TreeChangesSurface(t *testing.T) {
 	before := snap(map[string][]string{"a.go": {"@a"}})
 	after := snap(map[string][]string{"a.go": {"@a"}, "new.go": {"@a"}})
 	res, _ := verify.Compare(before, after, nil)
 	if res.OK() {
 		t.Error("new path must surface as a change")
+	}
+}
+
+// ...but presence in the tree is not itself ownership. A path absent from one
+// snapshot and unowned in the other is unowned on both sides, and reporting it
+// failed the rollout gate at exit 2 over an ordinary new source file, citing
+// the self-contradictory "(unowned) → (unowned)". Owners alone decide, so the
+// gate no longer forces operators to keep snapshot artifacts out of the repo
+// or to scope around routine development.
+func TestR18_AbsentIsUnowned_NotAChange(t *testing.T) {
+	before := snap(map[string][]string{"a.go": {"@a"}})
+	after := snap(map[string][]string{"a.go": {"@a"}, "vendor/new.txt": nil})
+	res, _ := verify.Compare(before, after, nil)
+	if !res.OK() {
+		t.Errorf("an added unowned path is not an ownership change: %+v", res.Violations)
+	}
+	if len(res.Changed) != 0 {
+		t.Errorf("changed = %+v, want empty", res.Changed)
+	}
+
+	// A deleted owned path is still a change, in the other direction.
+	gone := snap(map[string][]string{})
+	if res, _ := verify.Compare(before, gone, nil); res.OK() {
+		t.Error("a deleted OWNED path must still surface")
 	}
 }

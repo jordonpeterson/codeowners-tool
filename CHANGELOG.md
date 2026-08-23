@@ -10,6 +10,41 @@ changes to which class a failure lands in are called out explicitly.
 
 ## [Unreleased]
 
+### Fixed (from a blind `--help`-only usability run)
+
+- **`verify` no longer fails the gate over a file nobody owns.** Comparison
+  gated equality on a path being present in *both* snapshots, so any path that
+  entered or left the tree was a change regardless of ownership: adding an
+  ordinary unowned source file between the two snapshots returned exit 2 with
+  the self-contradictory evidence `(unowned) → (unowned)`, and the documented
+  remedy was to keep the snapshot artifacts out of the repository. Owners alone
+  decide now — an absent path is unowned, the same `null` the map already holds
+  for "no rule matched". A path that appears under an existing rule (`null` →
+  owners) or is deleted while owned is still reported. **Behaviour change to a
+  documented rule:** R-18's "a path that enters or leaves the tracked tree
+  counts as a change" is narrowed to ownership; `docs/REFERENCE.md` restates it.
+
+- **`snapshot` discloses an uncommitted CODEOWNERS.** It reads the tree
+  committed at `--branch`, while `sync` and `lint` write the working tree, so
+  the obvious CI shape — snapshot, sync, snapshot, verify — hashed two
+  identical snapshots and certified that nothing had changed. The snapshot is
+  still valid, so this warns rather than refuses, and the exit code is
+  unchanged.
+
+### Added
+
+- **`--help` carries the op grammar and the policy schema.** Both were
+  previously reachable only by submitting something wrong and reading the
+  refusal: `set_owners` and `rename_owner` appeared nowhere in any help output,
+  and `--policy FILE (R-20)` was the whole description of the file format. Every
+  verb now opens with a statement of what it does rather than an alphabetically
+  sorted flag, top-level help gained an `EXAMPLES` section (including the
+  snapshot → commit → verify ordering the gate depends on) and a pointer to the
+  documents defining the R-, S- and A- identifiers its flag descriptions cite.
+  `help VERB` routes to that verb instead of silently printing the top-level
+  usage. The reference blocks print on an explicit help request only, so a
+  mistyped flag still gets the error and the flag list.
+
 ### Fixed (from five user-test personas driving the shipped binary)
 
 - **One owner identity, everywhere (R-38).** `@handles` are case-insensitive on

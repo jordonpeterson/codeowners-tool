@@ -351,6 +351,13 @@ a bare line deletion.
 > intent inexpressible. The fleet is the unit under test — no single repo's
 > outcome may change any other repo's outcome.
 
+**`helpsurface_test.go`**
+
+> A blind operator, given only --help, could not learn the two things they
+> must type to do anything at all: the op grammar and the policy schema.
+> Both were derivable only by submitting something wrong and reading the
+> refusal — learnable through failure, unreadable before the first attempt.
+
 **`lint_guards_test.go`**
 
 > The two repository guards `audit --lint` shares with `sync`, found by
@@ -1237,6 +1244,45 @@ repos with a mistyped `--out` directory that is 100 real edits reported as
 
 The record on stdout is the durable trace and goes first, unconditionally; a
 sink that cannot be written is a warning on stderr and nothing more.
+
+### `TestHelp_EveryVerbStatesItsPurpose`
+
+Every verb opened straight into an alphabetically sorted flag dump. Not one
+said what it did; the top-level prose described only audit and lint.
+
+### `TestHelp_HelpVerbRoutesToTheVerb`
+
+`help sync` silently printed top-level usage — the wrong answer rather than
+an error.
+
+### `TestHelp_OpGrammarIsDiscoverable`
+
+set_owners and rename_owner appeared ZERO times across every help surface;
+add_owner appeared once, as an example. The verb list was reachable only
+from `unknown op "x" (want ...)`.
+
+### `TestHelp_PointsSomewhereForTheRuleIDsItCites`
+
+Rule IDs (R-6, S-7, R-20 …) are cited throughout the flag descriptions and
+defined nowhere, and help named no document to resolve them in. The only
+URLs in the entire help output were the GitHub API base URL.
+
+### `TestHelp_PolicySchemaIsDiscoverable`
+
+`--policy FILE (R-20)` was the whole description. Nothing said the file
+needs "version", needs a non-empty "ops", or that an op is a string.
+
+### `TestHelp_ReferenceBlocksOnlyOnAnExplicitHelpRequest`
+
+Go calls fs.Usage on every flag error, not only on --help. A mistyped flag
+needs the error and the flag list, not the whole op grammar and policy
+schema underneath it.
+
+### `TestHelp_TopLevelCarriesExamples`
+
+Not one end-to-end invocation appeared anywhere in help. An examples block
+is what closes the op-grammar and snapshot-ordering gaps for a reader who
+is scanning rather than experimenting.
 
 ### `TestLintOffline_CaseOnlyMissIsSparedNotDeleted`
 
@@ -3410,6 +3456,18 @@ decidable with no repository open, which is the definition of the exit-3
 class, and `on_empty` in a policy has been validated at load time all along:
 two spellings of one setting disagreeing is the defect.
 
+### `TestSnapshotVerifyLoop_DoesNotPassSilentlyOverAnUncommittedSync`
+
+The trap end to end: the loop a CI author writes from the synopsis alone
+must not report success over an uncommitted sync.
+
+### `TestSnapshot_DisclosesUncommittedCodeownersEdit`
+
+snapshot reads the tree committed at --branch; sync writes the WORKING
+TREE. The obvious CI shape — snapshot, sync, snapshot, verify — therefore
+hashed two identical snapshots and passed green over a real edit. snapshot
+now says so rather than answering a question it cannot see.
+
 ### `TestSummary_CreateCreditsTheFlagOnAnOpRun`
 
 SPEC R-24/R-34a: the `--op` spelling still credits the flag, and under
@@ -3635,6 +3693,19 @@ the single most likely command to be run by someone reading over a shoulder.
 Every verb, not just audit: a token in the environment must survive any usage
 render anywhere in the CLI. This is the regression guard for the day a second
 command grows a credential flag.
+
+### `TestVerify_NewOwnedPathIsStillAChange`
+
+The other direction has to keep working: a new file that lands under an
+existing rule really did gain owners, and the gate must still see it.
+
+### `TestVerify_NewUnownedPathIsNotAChange`
+
+A path present in only one snapshot, unowned in both, is not an ownership
+change. Compare gated equality on `bok && aok` — presence in the tree —
+so adding an ordinary unowned source file between two snapshots failed the
+rollout gate at exit 2, printing the self-contradictory
+"(unowned) → (unowned)" as its evidence.
 
 ### `TestAuditJSONCleanIsPureJSON`
 
@@ -6256,6 +6327,15 @@ SPEC S-9: GitHub's official example — a zero-owner rule un-owns a subtree.
 > be checked in CI from two ownership snapshots WITHOUT trusting the tool
 > that produced the change.
 
+### `TestR18_AbsentIsUnowned_NotAChange`
+
+...but presence in the tree is not itself ownership. A path absent from one
+snapshot and unowned in the other is unowned on both sides, and reporting it
+failed the rollout gate at exit 2 over an ordinary new source file, citing
+the self-contradictory "(unowned) → (unowned)". Owners alone decide, so the
+gate no longer forces operators to keep snapshot artifacts out of the repo
+or to scope around routine development.
+
 ### `TestR18_NoScope_AssertNoChange`
 
 SPEC R-18 + INV-2: with no scope given, verify asserts NOTHING changed.
@@ -6271,7 +6351,8 @@ this is INV-2 checked from raw data.
 
 ### `TestR18_TreeChangesSurface`
 
-A path added or removed from the tree is reported, not silently ignored.
+A path added or removed from the tree is reported, not silently ignored —
+when it carries owners on either side.
 
 ### `TestR18_UnownedVsZeroOwnersDistinct`
 
@@ -6280,4 +6361,4 @@ DIFFERENT states; transitioning between them is a real ownership change.
 
 ---
 
-610 documented test cases across 13 packages.
+622 documented test cases across 13 packages.
