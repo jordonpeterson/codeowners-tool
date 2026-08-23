@@ -36,7 +36,7 @@ audit    [--checks a1,a3,a6] [--fail-on any|warning|error|never] [--format json|
          [--cache-dir D] [--cache-ttl DUR] [--repo DIR] [--branch REF] [--file PATH]
 lint     --github-repo owner/name [--token T | $GITHUB_TOKEN] [--api-url URL]
          [--remove-stale-paths] [--on-empty error|inherit|unowned] [--dry-run]
-         [--repo DIR] [--branch REF] [--file PATH] [--format text|json]
+         [--policy FILE] [--repo DIR] [--branch REF] [--file PATH] [--format text|json]
 snapshot [--repo DIR] [--branch REF] [--out snap.json]
 verify   --before before.json --after after.json [--scope PATTERN ...]
 version  print the build this binary was stamped with
@@ -272,15 +272,28 @@ codeowners-tool snapshot --branch feature --out after.json
 codeowners-tool verify --before before.json --after after.json --scope /services/api/
 ```
 
+## `snapshot` and `verify`
+
+`snapshot` resolves the CODEOWNERS **committed at `--branch`** (default `HEAD`) against
+that ref's tracked tree — an uncommitted edit is invisible to it, exactly as it is to
+GitHub. In the `ownership` map, `[]` means a rule matches the path and deliberately
+assigns no owners; `null` means no rule matches it at all.
+
+`verify` compares two snapshots and exits `0` when every ownership change falls inside
+a declared `--scope` (repeatable), `2` — printing each offending path — when any change
+falls outside them (with no `--scope`, any change at all violates), and `3` for a
+malformed snapshot. A path that enters or leaves the tracked tree counts as a change
+(R-18), so don't commit the snapshot files themselves between the two snapshots.
+
 ## Operations
 
 Scope is a directory, file path, or glob — same syntax as CODEOWNERS patterns.
 
 | Op | Meaning |
 |---|---|
-| `add_owner(scope, owner)` | Owner becomes a **co-owner**; every pre-existing owner of every path in scope is retained. |
+| `add_owner(scope, owner)` | Owner — or a bracketed list `[a, b]` (R-33) — becomes a **co-owner**; every pre-existing owner of every path in scope is retained. |
 | `set_owners(scope, [owners])` | Exact owner set for every path in scope, displacing prior owners. `[]` is legal: it deliberately un-owns the scope. |
-| `remove_owner(scope, owner)` | Owner stops owning every path in scope. If a rule's owner set would empty, an `--on-empty` policy is **required**. |
+| `remove_owner(scope, owner)` | Owner — or a bracketed list (R-33) — stops owning every path in scope. If a rule's owner set would empty, an `--on-empty` policy is **required**. |
 | `rename_owner(old, new)` | Global identifier substitution — the only op safe as pure text replacement (it can't change any rule's match set). |
 
 The scope of `add_owner`, `set_owners` and `remove_owner` may carry an `except`
@@ -405,7 +418,7 @@ Under `inherit`/`unowned` the resulting reassignment is shown in the plan's owne
 
 ## Audit checks
 
-Read-only **except `audit --lint`** ([below](#audit---lint)). Plain `audit` never writes —
+Read-only **except `audit --lint`** ([below](#lint)). Plain `audit` never writes —
 where a fix is expressible it emits op strings for a human to review and run through
 `plan`/`apply`. Even under `--lint` the bytes reach disk only through `apply`, which
 remains the system's single writer path.
@@ -470,8 +483,8 @@ rejected, because a subset of a whole-file repair is ambiguous rather than small
 
 | Flag | Meaning |
 |---|---|
-| `--github-repo owner/name` | **Required.** Probed, so a token that cannot see the repo stops the run. |
-| `--token` / `$GITHUB_TOKEN` | **Required.** Owner existence is not decidable offline. |
+| `--github-repo owner/name` | **Required**, bar the offline mode below. Probed, so a token that cannot see the repo stops the run. |
+| `--token` / `$GITHUB_TOKEN` | **Required**, bar the offline mode below. Owner existence is not decidable offline. |
 | `--dry-run` | Compute and report; write nothing. Exit 4 if anything is pending. |
 | `--remove-stale-paths` | Stage 3. Deletes rules matching nothing tracked **and** nothing on disk. |
 | `--on-empty error\|inherit\|unowned` | R-6, required only when a removal would empty a rule. `inherit` deletes the line. |
@@ -481,6 +494,11 @@ rejected, because a subset of a whole-file repair is ambiguous rather than small
 `--cache-dir` and `--cache-ttl` are rejected (exit 3): a cached negative is served without
 revalidation, and here that answer deletes an owner rather than printing a finding.
 Lookups are still cached in memory per run.
+
+**Offline tree-only mode:** with `--remove-stale-paths` and *neither* a token nor
+`--github-repo`, the run does stage 3 alone — dead rules judged against the tree, invalid
+lines still reported at exit 4, no owner verified, repaired, or removed — and the skip is
+disclosed. One credential without the other still refuses at exit 5.
 
 | # | Stage | Opt-in | What it does |
 |---|---|---|---|
@@ -511,7 +529,7 @@ when the two agree.
 | 2 | Refused — `--on-empty=error`, size cap, or either repository guard |
 | 3 | Invalid input — missing `--on-empty`, a rejected flag, an empty tree under `--remove-stale-paths`, or hash drift between read and write |
 | 4 | Still needs a person — pending fixes under `--dry-run`, an unrepairable line, or a case-only typo |
-| 5 | Inconclusive, or no token/`--github-repo`. Nothing written |
+| 5 | Inconclusive, or missing credentials (bar the offline mode above). Nothing written |
 | 6 | Post-write validation failed; rolled back |
 
 `lint` never returns 1: a file needing no repair is its success, and "no-op" would make
@@ -521,6 +539,8 @@ every healthy repository in a fleet read as a failure under `set -e`.
 `exit_code`, `actions[]` (`kind`, `line`, `owner`, `pattern`, `reason`), `unverifiable[]`,
 `changes[]`, `ownership_rows[]`, `diff`, `warnings[]`. `needs_human` and `exit_code` come
 from the same function that sets the process status, so `jq -e .needs_human` is the gate.
+An offline run additionally carries `owner_checks_skipped: true` — the record says
+nothing about whether the owners exist.
 Unlike the `sync` record, `actions`, `changes` and `ownership_rows` are always present
 (possibly empty).
 

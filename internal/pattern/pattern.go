@@ -9,9 +9,14 @@
 // Copyright (c) 2020 Harry Marr — the actively maintained reference
 // implementation whose semantics are differentially tested against GitHub's
 // observed behavior. The vendored corpus in testdata/patterns.json comes from
-// the same project. Local divergences from the port, both deliberate:
+// the same project. Local divergences from the port, all deliberate:
 //   - Compile rejects patterns starting with `!` (GitHub: negation "doesn't
 //     work"; a mutation tool must never accept or emit one).
+//   - Compile rejects patterns starting with `\#` (S-2/S-6: GitHub honors no
+//     `\#` escape — a line starting with `#` is always a comment, so the rule
+//     would be dead there; same standard as `!`). Only the LEADING position is
+//     special-cased: a mid-pattern `#` needs no escape at all, so `\#` after
+//     the first character keeps the oracle's literal-`#` meaning.
 //   - Compile rejects empty patterns.
 package pattern
 
@@ -38,6 +43,9 @@ func Compile(patternStr string) (*Pattern, error) {
 	}
 	if patternStr[0] == '!' {
 		return nil, fmt.Errorf("negation (%q) is not supported in CODEOWNERS", patternStr)
+	}
+	if strings.HasPrefix(patternStr, `\#`) {
+		return nil, fmt.Errorf(`pattern %q needs a \# escape GitHub does not honor (S-2/S-6): a line starting with '#' is always a comment there`, patternStr)
 	}
 	p := &Pattern{raw: patternStr}
 	if !strings.ContainsAny(patternStr, "*?\\") && patternStr[0] == '/' {

@@ -78,6 +78,22 @@ func flagParseCode(err error) int {
 	return ExitInvalid
 }
 
+// rejectLeftoverArgs refuses positional arguments, which no verb here takes.
+//
+// Go's flag package stops parsing at the first non-flag token, so `audit
+// ../other-repo --checks a999` silently dropped BOTH the stray path and every
+// flag after it: the run audited the CWD with all defaults and exited 0, and
+// the invalid --checks the parser would have rejected loudly was never seen.
+// A tool this strict about flag values must not swallow whole arguments.
+// Argument-only and repo-independent, so it is exit 3 in every verb.
+func rejectLeftoverArgs(fs *flag.FlagSet) error {
+	if fs.NArg() == 0 {
+		return nil
+	}
+	return fmt.Errorf("unexpected argument %q: %s takes every input as a flag (--repo DIR, not a positional path), and the parser reads nothing after a positional argument — flags included",
+		fs.Arg(0), fs.Name())
+}
+
 // isFlagSet reports whether the operator actually PASSED a flag, as opposed to
 // inheriting its default. --cache-ttl has a non-zero default, so "did you ask
 // for this?" cannot be read off its value.
@@ -325,10 +341,10 @@ func containedRelPath(p string) error {
 // fleet verbs exist to prevent.
 //
 // The check lives here rather than in apply.Apply because apply.Apply has no
-// notion of a repository: it is handed one path and one plan, and legitimately
-// follows a link within the repo (a CODEOWNERS symlinked to docs/OWNERS is a
-// real layout). The CLI is the layer that knows --repo, so it is the layer that
-// can tell "inside" from "outside".
+// notion of a repository: it is handed one path and one plan, and follows
+// whatever link it is handed. The CLI is the layer that knows --repo, so it is
+// the layer that can tell "inside" from "outside" — and the layer that refuses
+// a link even when it stays inside (see refuseSymlinkedTarget).
 //
 // Both sides are resolved before comparison, for the same reason checkRepoRoot
 // resolves both: on macOS t.TempDir() hands out /var/folders/... while the real
@@ -417,6 +433,84 @@ func resolveExistingPrefix(dir string) string {
 	}
 }
 
+// refuseSymlinkedTarget refuses to write a CODEOWNERS that is a symlink, or
+// that sits BEHIND one — any component of the write path below the repository
+// root, wherever the link points.
+//
+// containedWritePath keeps the write INSIDE the clone; this closes the cases
+// it lets through. The final component: GitHub does not follow a symlinked
+// CODEOWNERS, so writing through one edits a file that governs nothing while
+// reporting success — the "applied, dead on arrival" outcome the write verbs
+// exist to prevent, only with the dead file hidden behind a live-looking path.
+// A PARENT component is the same outcome one level up: git commits a symlinked
+// directory as a link BLOB, not a tree, so with `.github -> real-gh` there is
+// no `.github/CODEOWNERS` in the tree GitHub reads, and Lstat'ing only the
+// final component (a real file, reached through the link) let sync, apply and
+// lint all write through it at exit 0. Refusal over a warning, matching the
+// tool's fail-closed posture — a warning under a fleet's `--format json >>
+// results` is a count nobody reads.
+//
+// Only the components of the write path below the repository root are
+// Lstat'ed, so a symlink anywhere else in the repository stays irrelevant, an
+// absent component (the --create case) has no link to refuse, and a --repo
+// reached through links above the root (macOS /var -> /private/var) stays
+// legitimate. The walk is bounded by the path's own depth.
+func refuseSymlinkedTarget(target string) error {
+	// Abs can only fail when the CWD is gone; degrade to the raw spelling —
+	// the walk then covers the final component, the pre-walk behavior.
+	abs, err := filepath.Abs(target)
+	if err != nil {
+		abs = filepath.Clean(target)
+	}
+	for _, comp := range writePathComponents(abs) {
+		fi, err := os.Lstat(comp)
+		if err != nil || fi.Mode()&os.ModeSymlink == 0 {
+			continue
+		}
+		dest, err := os.Readlink(comp)
+		if err != nil {
+			dest = "(unreadable link target)"
+		}
+		if comp != abs {
+			return &plan.RefusalError{Msg: fmt.Sprintf(
+				"refusing to write %s: %s is a symlink to %s, and git records a symlinked directory as a link, not a tree, so no CODEOWNERS exists behind it at the path GitHub reads — the write would edit a file that governs nothing while reporting applied; replace the link with a real directory — nothing was written",
+				filepath.ToSlash(target), filepath.ToSlash(comp), filepath.ToSlash(dest))}
+		}
+		return &plan.RefusalError{Msg: fmt.Sprintf(
+			"refusing to write %s: it is a symlink to %s, and GitHub does not follow a symlinked CODEOWNERS, so the write would edit a file that governs nothing while reporting applied; replace the link with a real file — nothing was written",
+			filepath.ToSlash(target), filepath.ToSlash(dest))}
+	}
+	return nil
+}
+
+// writePathComponents lists abs and every directory between it and the
+// enclosing repository's root, root EXCLUSIVE — those are exactly the
+// components a committed symlink can occupy, and the ones GitHub resolves
+// through the tracked tree.
+//
+// The root is found lexically — the nearest ancestor holding a .git entry —
+// rather than by asking git, because rev-parse resolves symlinks in its answer
+// while this walk must stay on the spelling the caller joined --repo and the
+// repo-relative path into; a lexical boundary is what keeps everything at or
+// above the root uninspected. Every caller has already passed checkRepoRoot,
+// so that ancestor IS the --repo the write is contained to. Found no root at
+// all, the walk degrades to the final component alone — the pre-walk behavior,
+// and the only thing decidable without a boundary.
+func writePathComponents(abs string) []string {
+	var comps []string
+	for dir := abs; ; {
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return []string{abs}
+		}
+		comps = append([]string{dir}, comps...)
+		if _, err := os.Stat(filepath.Join(parent, ".git")); err == nil {
+			return comps
+		}
+		dir = parent
+	}
+}
+
 type multiFlag []string
 
 func (m *multiFlag) String() string     { return strings.Join(*m, ",") }
@@ -438,6 +532,10 @@ func cmdPlan(args []string, stdout, stderr io.Writer) int {
 	if err := fs.Parse(args); err != nil {
 		return flagParseCode(err)
 	}
+	if err := rejectLeftoverArgs(fs); err != nil {
+		fmt.Fprintln(stderr, "error:", err)
+		return ExitInvalid
+	}
 	if len(opSpecs) == 0 {
 		fmt.Fprintln(stderr, "error: at least one --op is required")
 		return ExitInvalid
@@ -445,6 +543,15 @@ func cmdPlan(args []string, stdout, stderr io.Writer) int {
 	parsed, err := ops.ParseAll(opSpecs)
 	if err != nil {
 		return errExit(&plan.InvalidError{Msg: err.Error()}, stderr)
+	}
+	// The same repo-root guard `sync` enforces (checkRepoRoot), for the verb
+	// that produces the ARTIFACT: pointed below the root, discovery resolves
+	// against the ROOT's tree while codeowners_path joins onto the
+	// subdirectory, so the plan describes an edit at a path GitHub never reads
+	// — and a human approves it before any downstream refusal fires. Refused
+	// before --out exists: a refused run writes nothing.
+	if err := checkRepoRoot(*repo); err != nil {
+		return errExit(&plan.RefusalError{Msg: err.Error()}, stderr)
 	}
 	tree, coPath, _, err := locate(*repo, *branch, *filePath)
 	if err != nil {
@@ -491,6 +598,10 @@ func cmdApply(args []string, stdout, stderr io.Writer) int {
 	if err := fs.Parse(args); err != nil {
 		return flagParseCode(err)
 	}
+	if err := rejectLeftoverArgs(fs); err != nil {
+		fmt.Fprintln(stderr, "error:", err)
+		return ExitInvalid
+	}
 	if *planPath == "" {
 		fmt.Fprintln(stderr, "error: --plan is required")
 		return ExitInvalid
@@ -507,12 +618,25 @@ func cmdApply(args []string, stdout, stderr io.Writer) int {
 	if *repo != "" {
 		repoDir = *repo
 	}
+	// The same repo-root guard `sync` enforces (checkRepoRoot), re-checked at
+	// apply time for the same reason containment is: --repo can point this
+	// verb at a different clone than the one planned against, and pointed
+	// below the root the join below addresses a file at a path GitHub never
+	// reads while the file that governs stays untouched.
+	if err := checkRepoRoot(repoDir); err != nil {
+		return errExit(&plan.RefusalError{Msg: err.Error()}, stderr)
+	}
 	target := filepath.Join(repoDir, filepath.FromSlash(pf.CodeownersPath))
 	// The same containment `sync` enforces, enforced again here. A plan is an
 	// artifact: it is reviewed in one place and applied somewhere else entirely,
 	// possibly against a different clone via --repo, so the decision cannot be
 	// left behind in the verb that produced it.
 	if err := containedWritePath(repoDir, target); err != nil {
+		return errExit(err, stderr)
+	}
+	// And the symlink refusal those two do not cover: a link that stays inside
+	// the clone still lands the write on a file GitHub never reads.
+	if err := refuseSymlinkedTarget(target); err != nil {
 		return errExit(err, stderr)
 	}
 	if err := apply.Apply(&pf.Plan, target); err != nil {
@@ -531,6 +655,10 @@ func cmdSnapshot(args []string, stdout, stderr io.Writer) int {
 	out := fs.String("out", "", "write snapshot JSON here (default stdout); trusted operator path — overwritten, and not contained to --repo")
 	if err := fs.Parse(args); err != nil {
 		return flagParseCode(err)
+	}
+	if err := rejectLeftoverArgs(fs); err != nil {
+		fmt.Fprintln(stderr, "error:", err)
+		return ExitInvalid
 	}
 	tree, coPath, _, err := locate(*repo, *branch, *filePath)
 	if err != nil {
@@ -568,6 +696,10 @@ func cmdVerify(args []string, stdout, stderr io.Writer) int {
 	fs.Var(&scopes, "scope", "pattern where change is allowed (repeatable; none = assert no change)")
 	if err := fs.Parse(args); err != nil {
 		return flagParseCode(err)
+	}
+	if err := rejectLeftoverArgs(fs); err != nil {
+		fmt.Fprintln(stderr, "error:", err)
+		return ExitInvalid
 	}
 	if *beforePath == "" || *afterPath == "" {
 		fmt.Fprintln(stderr, "error: --before and --after are required")
@@ -626,6 +758,17 @@ func cmdAudit(args []string, stdout, stderr io.Writer) int {
 	dryRun := fs.Bool("dry-run", false, "with --lint, compute and report the fixes but write nothing (exit 4 if any are pending)")
 	if err := fs.Parse(args); err != nil {
 		return flagParseCode(err)
+	}
+	if err := rejectLeftoverArgs(fs); err != nil {
+		fmt.Fprintln(stderr, "error:", err)
+		return ExitInvalid
+	}
+	// The same validation sync, check and lint apply, and for the same reason:
+	// never a silent fallback to text. `--format jsn` fell back to prose here,
+	// and the CI step piping stdout to jq failed on precisely the healthy runs.
+	if *format != "text" && *format != "json" {
+		fmt.Fprintf(stderr, "error: unknown --format %q; want text or json\n", *format)
+		return ExitInvalid
 	}
 	// The three lint-only flags are rejected rather than ignored when --lint is
 	// absent. `audit --remove-stale-paths` silently reporting instead of
@@ -779,7 +922,12 @@ func cmdAudit(args []string, stdout, stderr io.Writer) int {
 			len(rep.Findings), *failOn)
 		return ExitOK
 	}
-	fmt.Fprintln(stdout, "audit clean")
+	// The verdict line is text-mode furniture. Under --format json, stdout is
+	// exactly one JSON document — printing it after the object broke `| jq` on
+	// precisely the run CI most wants to pipe: the healthy repo.
+	if *format != "json" {
+		fmt.Fprintln(stdout, "audit clean")
+	}
 	return ExitOK
 }
 

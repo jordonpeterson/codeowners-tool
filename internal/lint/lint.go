@@ -87,6 +87,19 @@ type Options struct {
 	// its owners are deleted out from under it, at exit 0 (found by adversarial
 	// review). Required whenever RemoveStalePaths is set.
 	WorkTree []string
+	// SkipOwnerChecks is the tree-only mode: stage 3 alone, no lookups, no
+	// owner repairs, no owner removals. It exists for the offline
+	// `lint --remove-stale-paths` path — whether a pattern matches zero files
+	// is a git-tree fact (audit's A-4/A-5), decidable with no API, while owner
+	// existence is not (R-12). Stage 2 is skipped outright, and stage 1's
+	// REPAIR is too: a split handle is an owner repair (it puts an unverified
+	// owner into force), so offline it is left exactly as written, like every
+	// other owner. Stage 1's REPORTING still runs — an invalid line GitHub is
+	// skipping is a file fact, and it is reported (NeedsHuman) with a reason
+	// that says whether a credentialed run could repair it. Requires
+	// RemoveStalePaths — without it there is no repair this mode is allowed to
+	// make. The Verifier may be nil when this is set; it is never called.
+	SkipOwnerChecks bool
 	// OnEmpty is R-6's policy for the case where removing a dead owner would
 	// leave a rule with no owners: "error", "inherit", or "unowned". "" is the
 	// ordinary default and is perfectly valid — it becomes a *plan.InvalidError
@@ -479,6 +492,14 @@ func Build(content []byte, tree []string, v Verifier, opts Options) (*Result, er
 	// initial commit or a tag on an empty tree all reach it). plan.Build
 	// refuses a zero-match scope under R-5 for the same reason; this is lint's
 	// analogue.
+	// SkipOwnerChecks without RemoveStalePaths has no work it is allowed to
+	// do: stages 1 and 2 repair and remove OWNERS, which is exactly what R-12
+	// forbids without lookups, and stage 3 was not opted into (R-11). Refused
+	// rather than returned clean — a "clean" from a run that checked nothing
+	// is the green check that means nothing.
+	if opts.SkipOwnerChecks && !opts.RemoveStalePaths {
+		return nil, &plan.InvalidError{Msg: "refusing SkipOwnerChecks without RemoveStalePaths: with owner checks skipped, deleting dead patterns is the only repair left, and it was not opted into (R-11/R-12) — there is nothing this run may do"}
+	}
 	if opts.RemoveStalePaths && len(opts.WorkTree) == 0 {
 		return nil, &plan.InvalidError{Msg: "refusing --remove-stale-paths: Options.WorkTree is empty, so staleness would be judged against the committed tree alone while the edit lands on the working-tree file — a directory created but not yet committed would read as dead and lose its owners; supply the checkout's file list (gittree.ListWorkTree)"}
 	}
@@ -497,12 +518,32 @@ func Build(content []byte, tree []string, v Verifier, opts Options) (*Result, er
 	// ---- Stage 1: repair owner spacing. -------------------------------------
 	// Before any lookup: `@ org/team` is one owner nobody has asked about yet,
 	// not two owners that do not exist.
+	//
+	// Under SkipOwnerChecks the REPAIR half is skipped — it puts a previously
+	// skipped line, and the owner on it, into force, which the run only gets
+	// to trust because stage 2 then verifies that owner. The REPORTING still
+	// happens: "GitHub is skipping this broken line" is a file fact, no API
+	// needed, and exiting 0 over it would be a green check over rot. A line
+	// the online run would repair is reported as needing that credentialed
+	// run, never as flatly unrepairable.
 	for i, ln := range f.Lines {
 		if ln.Kind != file.LineInvalid {
 			continue
 		}
 		old := ln.Raw
 		fixed, ok := RepairLine(old)
+		if opts.SkipOwnerChecks {
+			reason := fmt.Sprintf("%s: %s — left exactly as written; GitHub skips this line, so nothing here owns anything",
+				ln.Err.Kind, ln.Err.Message)
+			if ok {
+				reason = fmt.Sprintf("%s: %s — a split @handle a credentialed run repairs mechanically; left exactly as written here, because the repair puts the reassembled owner into force and offline nothing can verify that owner exists (R-12)",
+					ln.Err.Kind, ln.Err.Message)
+			}
+			res.Actions = append(res.Actions, Action{
+				Kind: ActionUnrepairable, Line: i + 1, Before: old, Reason: reason,
+			})
+			continue
+		}
 		if !ok {
 			// Reported, never touched. A line the tool does not understand is
 			// a rule somebody wrote and believes is in force; guessing at it or
@@ -550,24 +591,31 @@ func Build(content []byte, tree []string, v Verifier, opts Options) (*Result, er
 	}
 	dead := map[string]string{} // owner -> why it is dead
 	var reasons []string
-	for _, o := range owners {
-		// R-13: an email owner resolves via a verified address the API cannot
-		// see. Unverifiable is not inconclusive — it is permanent, so treating
-		// it as R-12 would wedge lint forever on any file that has one.
-		if file.IsEmailOwner(o) {
-			res.Unverifiable = append(res.Unverifiable, o)
-			continue
-		}
-		gone, reason, err := ownerIsGone(v, o)
-		if err != nil {
-			reasons = appendUnique(reasons, fmt.Sprintf("%s: %s", o, errReason(err)))
-			continue
-		}
-		if gone {
-			// Keyed by the folded spelling for the same reason the lookup is:
-			// two capitalisations of one dead team must both go, and a file
-			// that names it both ways must not keep one of them.
-			dead[ops.FoldOwner(o)] = reason
+	// Under SkipOwnerChecks no owner is looked up at all, so `dead` stays
+	// empty and every owner — email owners included, which is why the R-13
+	// reporting sits inside the gate — is left exactly as written. This is
+	// R-12 kept intact rather than relaxed: offline, "does this owner exist"
+	// has no answer, and an unanswered question authorizes nothing.
+	if !opts.SkipOwnerChecks {
+		for _, o := range owners {
+			// R-13: an email owner resolves via a verified address the API cannot
+			// see. Unverifiable is not inconclusive — it is permanent, so treating
+			// it as R-12 would wedge lint forever on any file that has one.
+			if file.IsEmailOwner(o) {
+				res.Unverifiable = append(res.Unverifiable, o)
+				continue
+			}
+			gone, reason, err := ownerIsGone(v, o)
+			if err != nil {
+				reasons = appendUnique(reasons, fmt.Sprintf("%s: %s", o, errReason(err)))
+				continue
+			}
+			if gone {
+				// Keyed by the folded spelling for the same reason the lookup is:
+				// two capitalisations of one dead team must both go, and a file
+				// that names it both ways must not keep one of them.
+				dead[ops.FoldOwner(o)] = reason
+			}
 		}
 	}
 	// R-12, applied to the whole run rather than to one owner. Partial
@@ -705,9 +753,12 @@ func Build(content []byte, tree []string, v Verifier, opts Options) (*Result, er
 		}
 
 		for _, o := range removed {
+			// The folded key, matching how the map is written: `dead[o]` on a
+			// dead owner spelled @Org/Team was a lookup of a key that is not
+			// there, and the action shipped with an empty Reason.
 			res.Actions = append(res.Actions, Action{
 				Kind: ActionRemoveOwner, Line: i + 1, Owner: o, Pattern: r.PatternText,
-				Before: old, Reason: dead[o],
+				Before: old, Reason: dead[ops.FoldOwner(o)],
 			})
 		}
 		if deletedLine {
@@ -787,6 +838,11 @@ func Build(content []byte, tree []string, v Verifier, opts Options) (*Result, er
 		// line is invalid — so a flat "every owner exists" would assert a check
 		// that never ran on precisely the lines a human still has to fix.
 		msg := "nothing to lint: no repairable owner spacing, and every owner named by a valid rule exists"
+		if opts.SkipOwnerChecks {
+			// The scoped claim for the tree-only mode. The owner sentence above
+			// would assert checks that never ran (R-12).
+			msg = "nothing to remove: every rule's pattern matches at least one tracked or on-disk file — owner checks were skipped, so this run says nothing about whether the owners exist"
+		}
 		if n := res.NeedsHuman(); n > 0 {
 			// Two unrelated categories, and one sentence written for only one
 			// of them said the other was invalid, unchecked and skipped by

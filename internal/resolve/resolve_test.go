@@ -63,6 +63,21 @@ func TestA8_InvalidLinesDoNotResolve(t *testing.T) {
 	}
 }
 
+// A pre-existing `\#…` line takes the same path as `!` negation: the pattern
+// no longer compiles (S-2/S-6 — GitHub reads such a line as a comment), so the
+// line is INVALID, skipped in resolution, and surfaced through the same A-8
+// invalid-line reporting — never a rule this tool edits or counts on.
+func TestA8_EscapedLeadingHashLineIsInvalidAndSkipped(t *testing.T) {
+	f := mustParse(t, "* @global\n\\#tag.md @dead\n")
+	if got := len(f.InvalidLines()); got != 1 {
+		t.Fatalf("invalid lines = %d, want 1 (the \\# line)", got)
+	}
+	res := resolve.All(f, []string{"#tag.md"})
+	if got := res["#tag.md"].Owners; !reflect.DeepEqual(got, []string{"@global"}) {
+		t.Errorf("owners = %v, want [@global] (the \\# line must be skipped)", got)
+	}
+}
+
 // SPEC INV-3: a pattern matching no tracked file resolves nothing; resolution
 // answers are only ever about real paths in the tree.
 func TestINV3_ResolutionIsOverTree(t *testing.T) {

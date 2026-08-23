@@ -124,6 +124,33 @@ func TestS2_NegationRejected(t *testing.T) {
 	}
 }
 
+// SPEC S-2/S-6: GitHub honors no `\#` escape of a leading hash — a line
+// starting with '#' is always a comment there, so a `\#…` rule is dead on
+// GitHub. Same standard as `!`: a mutation tool must never accept or emit one.
+func TestS2_EscapedLeadingHashRejected(t *testing.T) {
+	if _, err := pattern.Compile(`\#tag.md`); err == nil {
+		t.Error(`pattern \#tag.md must be rejected: GitHub reads the written line as a comment`)
+	}
+}
+
+// Only the LEADING position is special-cased: a mid-pattern '#' needs no
+// escape at all, and a mid-pattern `\#` keeps the reference implementation's
+// literal-'#' meaning.
+func TestS2_MidPatternHashAccepted(t *testing.T) {
+	for _, c := range []struct{ pat, path string }{
+		{"a#b.md", "a#b.md"},
+		{`a\#b.md`, "a#b.md"},
+	} {
+		p, err := pattern.Compile(c.pat)
+		if err != nil {
+			t.Fatalf("Compile(%q): %v", c.pat, err)
+		}
+		if !p.Match(c.path) {
+			t.Errorf("pattern %q must match %q literally", c.pat, c.path)
+		}
+	}
+}
+
 // Empty and comment-like inputs are the parser's problem, not the matcher's;
 // compiling them is an error so bugs surface loudly.
 func TestCompile_RejectsEmpty(t *testing.T) {

@@ -372,6 +372,20 @@ a bare line deletion.
 > `plan` is deliberately exempt from both: it emits an artifact and writes no
 > CODEOWNERS, so proving against another ref is exactly its job.
 
+**`lint_offline_test.go`**
+
+> The offline tree-only mode of `lint --remove-stale-paths` (UAT finding,
+> TestOfflineStaleRuleRemovalReportable).
+>
+> R-12 makes owner existence — an API fact — undecidable offline, so lint
+> without credentials refuses at exit 5. Whether a pattern matches zero
+> tracked files is a git-TREE fact (audit's A-4/A-5), so when
+> --remove-stale-paths names that repair as what the run is for, the run
+> proceeds offline: stage 3 alone, owner checks skipped and DISCLOSED, no
+> owner verified, repaired, or removed. Everything else about lint's contract
+> holds unchanged — exit 4 for pending or spared work, exit 0 for clean,
+> never 1; the A-5 sparing of case-only typos; apply as the single writer.
+
 **`lint_test.go`**
 
 > `audit --lint` is the first verb in this tool that EDITS a file on the basis
@@ -680,6 +694,19 @@ a bare line deletion.
 
 > ---------- R-36e: every command validates the whole file ----------
 
+**`prerelease_bugs_test.go`**
+
+> Regression guards from the pre-release review: each test began life as a
+> failing repro of a confirmed bug and now pins the fixed behavior. The doc
+> comments keep the original finding so the guarded failure mode stays legible.
+
+**`prerelease_fixes_test.go`**
+
+> Regression guards around the pre-release fixes: each test here pins an edge
+> the KnownBug test that motivated the fix does not — the same behavior on the
+> verbs the bug report only implied, and the neighboring cases the fix must
+> NOT have broken.
+
 **`rollout_test.go`**
 
 > The rollout scenarios.
@@ -930,6 +957,107 @@ SPEC R-17: exit 1 no-op, exit 3 invalid input.
 Review finding: a typo'd --scope must be a loud exit-3 error, not silently
 dropped (which turned every change into an inexplicable violation).
 
+### `TestFix_ApplyBelowRepoRootRefused`
+
+The repo-root guard reaches `apply` too: --repo can point the apply at a
+different clone than the plan's, and pointed below the root the joined
+codeowners_path names a file GitHub never reads (checkRepoRoot).
+
+### `TestFix_ApplyRefusesSymlinkedCodeowners`
+
+The symlink refusal reaches `apply` too: a plan is reviewed in one place and
+applied in another, so the link can appear between the two — the write must
+refuse, and the link's in-repo target must keep its bytes.
+
+### `TestFix_ApplyRefusesSymlinkedParentDir`
+
+The parent-directory refusal reaches `apply` too: the link can appear
+between planning and applying, exactly like the final-component case the
+existing guard pins.
+
+### `TestFix_AuditCleanLineStaysInTextMode`
+
+The pure-JSON fix must not have taken the human verdict with it: under the
+default text format a clean audit still says so on stdout.
+
+### `TestFix_AuditJSONWithFindingsIsPureJSON`
+
+`audit --format json` stdout is one JSON document in the findings case too,
+not only on the clean repo the KnownBug test pins.
+
+### `TestFix_CeilingRefusalNamesOnlyAppliedOps`
+
+R-25's refusal names only the ops that would have APPLIED: an op whose rule
+was already satisfied changed zero paths, so naming it sent the operator
+narrowing an op that was never behind the number.
+
+### `TestFix_DetachedHeadLabelIsBareSHA`
+
+headLabel's contract: on a detached HEAD the label is the bare abbreviated
+SHA — the honest answer, since there is no branch name to offer. Before the
+fix the echoed `--end-of-options` line meant the name never equalled "HEAD"
+and the detached path could not fire.
+
+### `TestFix_FileFlagSpellingsClassifyByCleanPath`
+
+The other uncleaned spellings of a governing location: `.github//CODEOWNERS`
+and `docs/../CODEOWNERS` name the S-8 files they clean to, so neither draws
+the "governs nothing" warning — while a path that genuinely is not an S-8
+location still does.
+
+### `TestFix_LintRefusesSymlinkedCodeowners`
+
+lint shares the same write path, and its symlink refusal fires before any
+API call — so it is decidable, and tested, offline.
+
+### `TestFix_LintRefusesSymlinkedParentDir`
+
+lint shares the helper, so the parent-directory case refuses there too —
+offline, before any API call, like its final-component sibling above.
+
+### `TestFix_NoRecordNoteCoversEverySyncExit3`
+
+Every sync exit-3 verdict asked for a sink discloses that no record was
+written — not only the two paths the first fix covered. A fleet aggregating
+--out records otherwise loses these repos silently, the exact hazard the
+note exists to disclose.
+
+### `TestFix_PositionalArgsRejectedOnEveryVerb`
+
+Positional args are rejected on EVERY verb, not only the audit invocation
+that surfaced the bug: the flag package stops at the first non-flag token on
+all of them alike, so any verb left unguarded still swallows whole
+arguments. Exit 3 — decidable from the arguments alone, like every other
+member of that class.
+
+### `TestFix_StaleCommentWarningLeadingBoundary`
+
+The stale-comment warning needs a LEADING token boundary too: a rename of
+@old-team must stay quiet about `someone@old-team`, where the match is the
+tail of an email, while a real mention — space-separated or glued to the
+comment glyph — still warns.
+
+### `TestFix_SymlinkElsewhereStaysIrrelevant`
+
+A symlink that is NOT the governing CODEOWNERS stays irrelevant: only the
+write path's components are Lstat'ed, so an ordinary repo full of links
+syncs as before.
+
+### `TestFix_SymlinkedDirOffWritePathStaysIrrelevant`
+
+A symlinked DIRECTORY that is not on the write path stays irrelevant, like a
+symlinked file elsewhere always has: the walk covers only the components
+between the repository root and the CODEOWNERS being written.
+
+### `TestFix_SyncRefusesSymlinkedParentDir`
+
+A symlinked PARENT directory is the same dead-on-arrival write one level up:
+git tracks `.github -> real-gh` as a link blob, so `.github/CODEOWNERS` does
+not exist in the tree GitHub reads — yet Lstat'ing only the final component
+(a real file, reached through the link) let sync write through it at exit 0.
+The refusal must fire, name WHICH component is the link, and leave the
+link's target untouched.
+
 ### `TestFleet_BrokenPolicyHaltsOnTheFirstRepo`
 
 SPEC R-20/R-22: a broken policy is exit 3 on the FIRST repo, before a single
@@ -1109,6 +1237,85 @@ repos with a mistyped `--out` directory that is 100 real edits reported as
 
 The record on stdout is the durable trace and goes first, unconditionally; a
 sink that cannot be written is a warning on stderr and nothing more.
+
+### `TestLintOffline_CaseOnlyMissIsSparedNotDeleted`
+
+SPEC A-5/S-6 offline: a rule that misses ONLY because of case is a typo, not
+a dead rule, and the offline mode spares it exactly as the online mode does
+— deleting it would silently un-own the files it was aimed at. Spared means
+reported, and the run exits 4: a typo still needs a person.
+
+### `TestLintOffline_DryRunReportsThePendingRemovalAndWritesNothing`
+
+SPEC A-4/R-11 offline: the dry run is the CI-shaped half of the fix — the
+pending dead-rule removal is reported at exit 4, the dead pattern is named,
+nothing is written, and the output says the owner checks were skipped so
+nobody reads the report as "the owners are fine too".
+
+### `TestLintOffline_InvalidLineFailsTheJSONGate`
+
+SPEC offline reporting (docs/LINTING.md's exit table): a line GitHub is
+silently skipping is reported at exit 4 / needs_human even offline —
+"syntactically broken" is a file fact, no API needed — so a CI gate on
+`jq -e .needs_human` cannot go green over broken lines.
+
+### `TestLintOffline_JSONRecordCarriesTheDisclosure`
+
+SPEC --format json offline: the record carries the disclosure as a field, so
+a script consuming a mixed fleet of online and offline records can tell
+which ones say nothing about owners — prose in a note line cannot be jq'd.
+
+### `TestLintOffline_MalformedGitHubRepoIsInvalidEvenWithoutAToken`
+
+SPEC exit 3: a malformed --github-repo is a misspelled argument the operator
+plainly meant to use, and it is diagnosed with or without a token — before
+the fix, a garbage value with no token slid into the offline mode with the
+flag silently ignored.
+
+### `TestLintOffline_OwnerRepairsAndRemovalsStayRefused`
+
+SPEC R-12 offline: the fail-closed contract for OWNERS is untouched. A split
+handle (stage 1's repair) and a dead-looking owner (stage 2's removal) both
+survive the offline run byte-for-byte while the dead PATTERN on another line
+is removed — the run does the tree work without touching a single owner. The
+broken line is REPORTED, not repaired: GitHub is skipping it, which is a
+file fact, so the run exits 4 and names the credentialed run that can fix it.
+
+### `TestLintOffline_PartialCredentialsRefuseNamingWhatIsMissing`
+
+SPEC R-12: the offline mode engages only when NEITHER credential was
+offered. A run that named a repo or held a token asked for the credentialed
+lint; silently narrowing it to dead patterns would report success over owner
+checks the operator believes ran. Refused at exit 5, naming exactly what is
+absent — never the credential that was supplied.
+
+### `TestLintOffline_PolicyRefusalNamesThePolicyFieldNotTheBannedFlag`
+
+SPEC R-36b: the offline refusal's escape hatch is worded for how THIS run
+was configured. --remove-stale-paths is exit-3-banned next to --policy, so
+under --policy the remedy is the policy field, not the flag — the old advice
+sent a policy-mode operator straight into a second refusal.
+
+### `TestLintOffline_PolicyRemoveStalePathsEnablesTreeOnlyMode`
+
+SPEC R-36a offline: `"remove_stale_paths": true` in the policy file's "lint"
+block opts in to the tree-only mode exactly as the flag does — the reviewed
+artifact IS the configuration, so the offline escape must not require a flag
+the same run bans (R-36b).
+
+### `TestLintOffline_WithoutRemoveStalePathsStillRefuses`
+
+SPEC R-12: offline WITHOUT --remove-stale-paths keeps the exit-5 refusal —
+there is no tree-only repair to run, and quietly doing nothing would report
+success over a file full of owners nobody checked. The refusal now names the
+one offline escape, so the operator who only wanted the dead rules gone is
+told the flag instead of being told to find a token.
+
+### `TestLintOffline_WriteRemovesTheDeadRuleAndIsIdempotent`
+
+SPEC R-0 offline: the write path works too, through the same apply machinery
+as every other write — and re-running over its own output is a no-op at exit
+0 (clean is lint's success, never exit 1), so the mode is schedulable.
 
 ### `TestLintVerb_CaseOnlyMissIsSparedNotDeleted`
 
@@ -3429,6 +3636,89 @@ Every verb, not just audit: a token in the environment must survive any usage
 render anywhere in the CLI. This is the regression guard for the day a second
 command grows a credential flag.
 
+### `TestAuditJSONCleanIsPureJSON`
+
+Pre-release finding, fixed: `audit --format json` on a clean repo prints the literal line
+"audit clean" after the JSON object, so the one case CI most wants to pipe
+to jq — the healthy repo — is the one case the output isn't parseable.
+Under `--format json`, stdout is data.
+
+### `TestAuditRejectsUnknownFormat`
+
+Pre-release finding, fixed: `audit` silently accepts an unknown `--format` and falls back to
+text. sync, check, and lint all reject unknown formats at exit 3 — "never a
+silent fallback to text" — and audit is documented with the same
+`--format json|text` contract.
+
+### `TestBranchMismatchErrorNamesHeadCleanly`
+
+Pre-release finding, fixed: the S-7 branch-mismatch refusal interpolates raw `git rev-parse
+--abbrev-ref --end-of-options HEAD` output, and rev-parse echoes the
+`--end-of-options` operator as an output line — so the one-line error (and
+the JSON record's error field) reads "HEAD is --end-of-options\nmain (…)".
+
+### `TestEscapedHashPatternRefused`
+
+Pre-release finding, fixed: a `\#`-escaped pattern is accepted and written, but S-6/S-2 says
+GitHub honors no `\#` escape — on GitHub the written line is dead, so the
+tool reports `proven: tree` for a rule that provably does not hold there.
+The unescaped spelling `add_owner(#tag.md, …)` is already refused; the
+escaped spelling must be refused too, and nothing written.
+
+### `TestFileFlagSpellingNoFalseGovernsNothing`
+
+Pre-release finding, fixed: `--file ./.github/CODEOWNERS` (or any uncleaned spelling of a
+governing location) triggers a false "governs nothing" warning. trackedAt
+cleans the spelling before matching the tracked file; the S-8 location
+check compares the raw string, so a live change is reported as dead in the
+warning, the --out record, and the --summary-out PR body.
+
+### `TestOfflineStaleRuleRemovalReportable`
+
+Pre-release finding (UAT), fixed: a tree-provably-dead rule cannot be repaired
+offline. `lint --dry-run --remove-stale-paths` refuses everything at exit 5
+citing R-12 ("owner existence is not decidable offline") — but whether a
+pattern matches zero tracked files is a git-tree fact the offline audit
+(A-4/A-5) itself proves, no API needed. With --remove-stale-paths as the
+requested repair, the dry run should report the pending dead-rule removal
+(exit 4) instead of demanding a token; today the only offline remedy is the
+hand edit the tool exists to prevent.
+
+### `TestPlanBelowRepoRootRefused`
+
+Pre-release finding, fixed: plan and apply skip the repo-root guard that sync enforces.
+sync refuses `--repo <subdir>` because the CODEOWNERS it would write lands
+at a path GitHub never reads (checkRepoRoot). plan happily plans against the
+subtree and apply writes the dead file, reporting success — the "applied,
+dead on arrival" outcome the guard exists to prevent. plan must refuse
+exactly as sync does.
+
+### `TestPositionalArgsRejected`
+
+Pre-release finding, fixed: positional arguments are silently discarded, and every flag
+after them with them. `audit ../other-repo --checks a999` (note the missing
+--repo) audits the CWD with all defaults and exits 0 — the invalid
+`--checks a999`, which the parser would reject loudly, is never seen. A
+tool this strict about flag values must not swallow whole arguments.
+
+### `TestSetOwnersDisclosesAuthoredDuplicate`
+
+Pre-release finding, fixed: set_owners on a scope whose pattern already exists earlier in
+the file authors a shadowed duplicate — the old line stays, dead under
+last-match-wins but still naming its owners to human readers — and the run
+that creates it says nothing. The R-7 duplicate warning fires only on the
+NEXT run that touches the file. The run creating the duplicate must
+disclose it.
+
+### `TestSymlinkedCodeownersNotSilentSuccess`
+
+Pre-release finding, fixed: a symlinked .github/CODEOWNERS inside the clone is written
+through and reported applied with no warning. The tool's own docs state
+GitHub does not follow a symlinked CODEOWNERS, so the run edited a file
+that governs nothing while reporting success. An out-of-repo symlink target
+is already refused (containedWritePath); the in-repo case must at minimum
+not be a silent success.
+
 ## internal/file
 
 **`file_test.go`**
@@ -3745,6 +4035,28 @@ an error condition for the caller, never a merge.
 
 > ---------- no-op, byte preservation, reporting ----------
 
+**`offline_test.go`**
+
+> The tree-only mode behind offline `lint --remove-stale-paths`
+> (Options.SkipOwnerChecks).
+>
+> R-12 makes owner existence — an API fact — undecidable offline, and the
+> whole run fails closed on it. But whether a pattern matches zero tracked
+> files is a git-TREE fact the offline audit (A-4/A-5) already proves, so a
+> run that asks ONLY for the stale-path repair may run with no Verifier at
+> all. The contract for that mode, pinned here:
+>
+>   - stage 3 runs exactly as it does online — same staleness judgment, same
+>     A-5 sparing of case-only misses;
+>   - the owner WORK of stages 1 and 2 is skipped, not degraded: no owner is
+>     looked up, repaired, or removed, and no invalid line is rewritten;
+>   - stage 1's REPORTING still runs: an invalid line GitHub is skipping is a
+>     file fact, no API needed, so it is reported (NeedsHuman → exit 4) — a
+>     line the online run would repair with a reason that names the
+>     credentialed run, any other with the same reason as online;
+>   - SkipOwnerChecks without RemoveStalePaths is invalid input, because with
+>     owner work forbidden there is nothing left the run may do (R-11/R-12).
+
 ### `TestBuild_ActionsCarryLineAndReason`
 
 SPEC R-16 (reporting): every action carries the 1-based line it happened on
@@ -3907,6 +4219,57 @@ destroy it in the one commit an operator is least likely to read closely: the
 automated one. The correct outcome is a file that still contains the broken
 line and a report that says so.
 
+### `TestOffline_CaseOnlyMissIsSparedAndNeedsAHuman`
+
+SPEC A-5/S-6 offline: a rule that matches nothing ONLY because of case is a
+typo, not a dead rule, and the offline mode spares it with exactly the
+online logic — deleting it would silently un-own the files it was aimed at.
+Spared means reported (NeedsHuman), so the caller still exits 4.
+
+### `TestOffline_DeadRuleIsRemovedWithANilVerifier`
+
+SPEC A-4/R-11 offline: a rule whose pattern matches nothing tracked and
+nothing on disk is deleted with a NIL Verifier. The nil is the proof that no
+lookup can possibly have been made — an implementation that touched the
+network here would panic, not pass.
+
+### `TestOffline_EmailOwnersAreNotReportedUnverifiable`
+
+SPEC R-13 offline: email owners are not looked up online either, but online
+they are REPORTED as unverifiable — a statement about a check that ran
+around them. Offline no owner check ran at all, so the report would imply
+the rest of the file's owners were verified. Nothing is reported.
+
+### `TestOffline_OwnersAreNeverLookedUpOrRemoved`
+
+SPEC R-12 offline: owners are never touched, even one a lookup WOULD have
+proven dead. Proven from the call log, not the output — an implementation
+that asked and ignored the answer is one refactor from believing it.
+
+### `TestOffline_SkipWithoutRemoveStaleIsInvalid`
+
+SPEC R-11/R-12: SkipOwnerChecks without RemoveStalePaths is invalid input,
+not a clean run. Stages 1 and 2 are owner work the mode forbids, and stage 3
+was not opted into — a "clean" from a run that checked nothing would be a
+green check that means nothing.
+
+### `TestOffline_SplitHandleIsReportedNotRepaired`
+
+SPEC R-12 offline: stage 1's REPAIR is an owner repair — it puts a
+previously skipped line, and the unverified owner on it, into force — so
+offline the line is left byte-for-byte. But it IS reported: GitHub skipping
+the line is a file fact, and a run that exits 0 over it goes green over rot.
+The reason is honest about which run can fix it — a credentialed one, which
+repairs it mechanically and verifies the reassembled owner.
+
+### `TestOffline_UnrepairableLineIsReportedSameAsOnline`
+
+SPEC offline reporting: a line no run can repair — `@keep /docs` is shaped
+exactly like two rules on one line — is reported offline with the SAME
+reason as online. GitHub skipping it is a file fact, and docs/LINTING.md
+promises exit 4 for it; an offline exit 0 would let a CI gate on
+.needs_human go green over a broken line.
+
 ### `TestOwners_CaseFoldedForLookupButNotRewritten`
 
 Owner identity is case-folded for the lookup, because GitHub's is.
@@ -3993,6 +4356,15 @@ it. It is reported in Result.Unverifiable and left exactly where it is.
 Proven from the call log, not from the output: an implementation that asks
 about `docs@example.com` and merely ignores the reply is one refactor away
 from believing it.
+
+### `TestRemoveDeadOwner_MixedCaseSpellingKeepsItsReason`
+
+SPEC R-38a in stage 2's record: a dead owner spelled @Org/Gone is the same
+owner as @org/gone, so the lookup and the `dead` map are both case-folded —
+but the Action.Reason was read back with the UNFOLDED spelling, an empty
+reason on exactly the removals whose spelling differs from the fold. The
+reason is what a reviewer approves the deletion on, so it must survive the
+file's own capitalisation.
 
 ### `TestRepairHandle_ConservesBytesAndProducesOnlyHandles`
 
@@ -4387,6 +4759,12 @@ paths like /apps/[param]/file.ts only match the literal bracket path).
 SPEC S-2 (differential): every case in the vendored hmarr/codeowners corpus
 must match GitHub's observed behavior exactly.
 
+### `TestS2_EscapedLeadingHashRejected`
+
+SPEC S-2/S-6: GitHub honors no `\#` escape of a leading hash — a line
+starting with '#' is always a comment there, so a `\#…` rule is dead on
+GitHub. Same standard as `!`: a mutation tool must never accept or emit one.
+
 ### `TestS2_GitHubDocExamples`
 
 SPEC S-2: examples taken verbatim from GitHub's "About code owners" docs.
@@ -4395,6 +4773,12 @@ SPEC S-2: examples taken verbatim from GitHub's "About code owners" docs.
 
 Literal special characters observed accepted by GitHub (hmarr issues
 #47 caret, #50 tilde, #52 colon): they match themselves.
+
+### `TestS2_MidPatternHashAccepted`
+
+Only the LEADING position is special-cased: a mid-pattern '#' needs no
+escape at all, and a mid-pattern `\#` keeps the reference implementation's
+literal-'#' meaning.
 
 ### `TestS2_NegationRejected`
 
@@ -4806,6 +5190,14 @@ the white-box divergence case lives in settle_internal_test.go.
 
 SPEC R-7: with duplicate patterns, edit the EFFECTIVE (last) one and
 report the shadowed duplicate — never silently fix it.
+
+### `TestR7_SetOwnersDisclosesAuthoredDuplicate`
+
+SPEC R-7, same-run case (pre-release finding): set_owners on a scope whose
+pattern already exists earlier inserts after the last intersecting rule,
+leaving the earlier byte-equal line permanently shadowed but still naming
+its old owners to readers. The run that AUTHORS the duplicate must disclose
+it — not only the next run that touches the file.
 
 ### `TestR8_ConflictingBatchRejected`
 
@@ -5316,6 +5708,23 @@ lack Terraform" is answerable only if each op reports itself, by id, in the
 order the policy lists them — a bare count cannot answer it, and a reordered
 list attributes the wrong outcome to the wrong op.
 
+### `TestZeroMatch_UnrecognizedOnExceptZeroMatchIsInvalid`
+
+Same defense for the sibling switch: an unrecognized on_except_zero_match on
+an op whose except bites nothing must be invalid input (exit 3) naming the
+value — not silently run as `require`, whose exit-2 refusal reads as a
+per-repo problem when the defect is in the policy and identical everywhere.
+
+### `TestZeroMatch_UnrecognizedOnZeroMatchIsInvalid`
+
+Regression guard from the pre-release review: an UNRECOGNIZED on_zero_match
+value on a zero-match scope must refuse (exit 3), naming the value. Policy
+parsing validates the enum, but the field is exported with a json tag, so a
+library caller — or a value the policy layer learns before the planner does
+— can carry anything. Before the fix no switch arm matched, the op
+synthesized nothing, and the run reported the repo converged with a proven
+tree: the silent no-op rollout this file exists to prevent.
+
 ### `TestBasenameSpellingsSelectTheSameFiles`
 
 The equivalence the test above rests on: nothing in the planner is allowed to
@@ -5805,6 +6214,13 @@ Observed before the fix, at exit 0 on a repo holding `my dir/x.txt` and
 > SPEC INV-3: resolution is computed over the actual tracked file tree, never
 > over the pattern set.
 
+### `TestA8_EscapedLeadingHashLineIsInvalidAndSkipped`
+
+A pre-existing `\#…` line takes the same path as `!` negation: the pattern
+no longer compiles (S-2/S-6 — GitHub reads such a line as a comment), so the
+line is INVALID, skipped in resolution, and surfaced through the same A-8
+invalid-line reporting — never a rule this tool edits or counts on.
+
 ### `TestA8_InvalidLinesDoNotResolve`
 
 Invalid lines are skipped during resolution (current GitHub semantics) —
@@ -5864,4 +6280,4 @@ DIFFERENT states; transitioning between them is a real ownership change.
 
 ---
 
-559 documented test cases across 13 packages.
+610 documented test cases across 13 packages.
