@@ -8,13 +8,13 @@ owns which file*. The two are connected by rules that surprise people: the **las
 matching line wins, and owner sets don't combine — appending `/x/ @team-2` **replaces**
 the owners of `/x/`, it doesn't add to them.
 
-So you say what you want — "`@team-2` should co-own `/services/api/`" — and this tool
-works out the lines. Then it checks its own work against every file in your repo, and
-**refuses to write anything it can't prove correct.**
+So you write down the ownership you want — "`@org/platform` should co-own
+`/services/api/`" — and this tool works out the lines. Then it checks its own work against
+every file in your repo, and **refuses to write anything it can't prove correct.**
 
-It also reads: `snapshot` tells you who owns what today, `audit` finds owners who've
-left the company, rules that match no files, and owners who can't actually approve.
-Works with github.com and GitHub Enterprise Server.
+It also reads: `snapshot` tells you who owns what today, and `audit` finds departed
+owners, dead rules, and owners who can't actually approve. Works with github.com and
+GitHub Enterprise Server.
 
 ## Install
 
@@ -26,66 +26,63 @@ Every other route — the `curl | sh` script and its build-provenance verificati
 download, `go install`, GHES notes, upgrading, uninstalling — is in
 **[docs/INSTALL.md](docs/INSTALL.md)**.
 
-Check it works:
+## The policy file
 
-```console
-$ codeowners-tool version
-```
+**A policy is a JSON file stating the ownership you want.** It is the form to reach for:
+it is reviewable as a diff, it is what the tool runs unchanged against one repo or a
+hundred, and everything that changes what gets written lives inside it rather than in a
+shell line nobody kept.
 
-## Start here
-
-| You want to… | Go to |
-|---|---|
-| See who owns what in this repo, right now | [The 60-second tour](#the-60-second-tour) |
-| Understand `add_owner` vs `set_owners` before touching anything | [Basic concepts](#basic-concepts) |
-| Follow worked end-to-end changes | [docs/GUIDE.md](docs/GUIDE.md) |
-| **Lint** or **repair** a CODEOWNERS file, locally or in CI | [docs/LINTING.md](docs/LINTING.md) |
-| Prove a merged PR changed only the owners it declared | [GUIDE.md#reviewing](docs/GUIDE.md#reviewing-the-change-before-it-lands) |
-| Roll one policy out over many repos | [docs/FLEET.md](docs/FLEET.md) |
-| Look up a flag, exit code, or JSON field | [docs/REFERENCE.md](docs/REFERENCE.md) |
-| Look up a term | [docs/CONCEPTS.md](docs/CONCEPTS.md) |
-| Know exactly what is guaranteed, and by which test | [docs/BEHAVIOR.md](docs/BEHAVIOR.md) |
-
-## The 60-second tour
-
-Every command is discoverable from the binary, and these are safe to run against
-anything — none of them writes:
-
-```sh
-codeowners-tool --help       # every command and its flags
-codeowners-tool snapshot     # who owns each tracked file, as JSON on stdout
-codeowners-tool audit        # what's broken or rotten in the current file
-```
-
-`snapshot` is the one to reach for first, because it answers the question CODEOWNERS
-itself doesn't:
-
-```console
-$ codeowners-tool snapshot | jq .ownership
+```json
 {
-  "README.md": ["@org/everyone"],
-  "services/api/main.go": ["@org/api-team"],
-  "services/web/app.ts": ["@org/everyone"]
+  "version": 1,
+  "name": "api co-ownership",
+  "ops": [
+    "add_owner(/services/api/, @org/platform)",
+    "add_owner(/docs/, @org/docs-team)"
+  ]
 }
 ```
 
-In that map `[]` means a rule matches the path and deliberately assigns no owners;
-`null` means no rule matches it at all. `snapshot` reads the CODEOWNERS **committed**
-at `--branch` (default `HEAD`) — the file GitHub sees — so commit before snapshotting.
-(Every command also has its own help: `codeowners-tool sync --help`.)
-
-To change ownership, state the intent and preview it — nothing writes until you drop
-`--dry-run`:
+**Validate it before it touches anything.** `check` reads no repository at all, so it is
+the cheapest way to catch a broken policy before repo #1:
 
 ```console
-$ codeowners-tool sync --op 'add_owner(README.md, @org/docs-team)' --dry-run
-applied: 1 op(s) applied, 0 skipped; 1 line change(s), 1 path(s) change owners
+$ codeowners-tool check --policy ownership.json
+ok: ownership.json — 2 op(s), no policy errors
+```
+
+**Preview, then write.** Nothing is written until you drop `--dry-run`:
+
+```console
+$ codeowners-tool sync --policy ownership.json --dry-run
+applied: 2 op(s) applied, 0 skipped; 2 line change(s), 2 path(s) change owners
   ops[0]  applied (proven: tree)
+  ops[1]  applied (proven: tree)
 ```
 
 `proven: tree` means the claim was checked against the repo's real files, not just
-reasoned about. Runs are idempotent, and every untouched byte survives: comments, blank
-lines, spacing, ordering. [docs/GUIDE.md](docs/GUIDE.md) walks this change end to end.
+reasoned about. Dropping `--dry-run` writes it, and the file becomes:
+
+```console
+$ cat .github/CODEOWNERS
+*            @org/everyone
+/docs/ @org/everyone @org/docs-team
+/services/api/   @org/api-team @org/platform
+```
+
+Notice what happened. `@org/everyone` was **carried onto the new `/docs/` line** — they
+owned it via `*`, and `add_owner` means co-own, so the new rule restates them or they'd be
+dropped. The lines went **where they had to go**, each directly after the rule it narrows.
+And `/services/api/` kept its original spacing. Runs are idempotent — a second `sync`
+reports `unchanged`, and every untouched byte survives: comments, blank lines, ordering.
+
+Beyond `ops`, a policy carries `create` (permission to write a CODEOWNERS where a repo has
+none), `on_empty`, `max_paths_changed`, `defaults`, and a `lint` block — every field in
+[REFERENCE.md#policy-file-fields](docs/REFERENCE.md#policy-file-fields).
+
+> **One-off changes.** `--op 'add_owner(/docs/, @org/docs-team)'` runs a single op with no
+> file. It is for exploring; anything you'd want reviewed, or run twice, belongs in a policy.
 
 ## Basic concepts
 
@@ -95,36 +92,30 @@ matches it, in which case that line wins outright and `@org/eng` is simply gone.
 tool works in terms of the files, and treats the lines as an implementation detail it
 derives for you.
 
-**You state an intent — an *op*.** Same syntax whether you pass it with `--op` or list it
-in a policy file. Scope is a directory, file path, or glob, using CODEOWNERS pattern
-syntax; a space in a path is escaped with a backslash (`docs/release\ notes.md`).
+**Each entry in `ops` is one intent.** Scope is a directory, file path, or glob, using
+CODEOWNERS pattern syntax; a space in a path is escaped with a backslash
+(`docs/release\ notes.md`).
 
 | Op | What it means |
 |---|---|
 | `add_owner(scope, owner)` | Owner (or `[owners]`) becomes a **co-owner**. Every pre-existing owner of every path in scope is kept. |
 | `set_owners(scope, [owners])` | This exact set owns every path in scope, displacing whoever owned it. `[]` is legal and deliberately un-owns the scope. |
-| `remove_owner(scope, owner)` | Owner (or `[owners]`) stops owning every path in scope. If that would empty a rule, you must say what happens — see [`--on-empty`](docs/REFERENCE.md#--on-empty--on_empty-r-6). |
+| `remove_owner(scope, owner)` | Owner (or `[owners]`) stops owning every path in scope. If that would empty a rule, you must say what happens — see [`on_empty`](docs/REFERENCE.md#--on-empty--on_empty-r-6). |
 | `rename_owner(old, new)` | Global identifier substitution — the only op that is safe as plain text replacement. |
 
 `add_owner` and `set_owners` are the two you'll use most, and picking the wrong one is
-the mistake the tool exists to prevent:
+the mistake the tool exists to prevent. Against `/services/api/ @org/api-team`:
 
-```console
-$ codeowners-tool sync --op 'add_owner(/services/api/, @org/team-1)'
-```
-> `/services/api/ @org/api-team` becomes `/services/api/ @org/api-team @org/team-1`.
-> **`@org/api-team` is still there.**
+| The op in your policy | The line afterwards |
+|---|---|
+| `add_owner(/services/api/, @org/team-1)` | `/services/api/   @org/api-team @org/team-1` |
+| `set_owners(/services/api/, [@org/team-1])` | `/services/api/   @org/team-1` |
 
-```console
-$ codeowners-tool sync --op 'set_owners(/services/api/, [@org/team-1])'
-```
-> `/services/api/ @org/api-team` becomes `/services/api/ @org/team-1`.
-> **`@org/api-team` no longer owns it** — which is what you asked for, explicitly.
-
-Editing the file by hand, both of those look like the same one-line edit. That's the
-trap: adding `/services/api/ @org/team-1` at the bottom of a file *silently* performs the
-second one. (An op can also carve out sub-paths with an `except` clause — see
-[REFERENCE.md#operations](docs/REFERENCE.md#operations).)
+**`@org/api-team` survives the first and is gone from the second** — which is what
+`set_owners` was asked for, explicitly. Editing the file by hand, both look like the same
+one-line edit. That's the trap: adding `/services/api/ @org/team-1` at the bottom of a
+file *silently* performs the second one. (An op can also carve out sub-paths with an
+`except` clause — see [REFERENCE.md#operations](docs/REFERENCE.md#operations).)
 
 **Two invariants hold on every write**, or the write doesn't happen:
 
@@ -139,47 +130,57 @@ shows what it looks like and what to do.
 > **Pattern note.** `README.md` is unanchored, so like gitignore it matches a
 > `README.md` at *any* depth. Write `/README.md` if you mean only the one at the root.
 
-## Audit and lint
+## Reading the current state
 
-`audit` reports, `lint` repairs; both leave the file alone until you say otherwise.
-Offline, `audit` checks the file against the git tree — dead patterns, case-only
-mismatches, shadowed rules, unowned paths. With a token it also checks the owners
-themselves: that they exist, are in the org, and have **explicit write access** (the
-check that catches the most real rot).
+`snapshot` and `audit` write nothing and are safe to run against anything. Write your
+policy against what they tell you, not against what the file looks like:
+
+```console
+$ codeowners-tool snapshot | jq .ownership
+{
+  "README.md": ["@org/everyone"],
+  "services/api/main.go": ["@org/api-team"],
+  "services/web/app.ts": ["@org/everyone"]
+}
+```
+
+`snapshot` answers the question CODEOWNERS itself doesn't. In that map `[]` means a rule
+matches the path and deliberately assigns no owners; `null` means no rule matches it at
+all. It reads the CODEOWNERS **committed** at `--branch` (default `HEAD`) — the file
+GitHub sees — so commit before snapshotting.
+
+`audit` reports what's broken or rotten; `lint` repairs a subset of it. Offline, `audit`
+checks against the git tree — dead patterns, case-only mismatches, shadowed rules,
+unowned paths. With a token it also checks the owners themselves: that they exist, are in
+the org, and have **explicit write access** (the check that catches the most real rot).
 
 **Exit 4 means findings, 0 means clean** — that's your CI gate. Exit 5 means a check
-couldn't reach a conclusion: the audit **fails closed**, and never proposes a removal
-it can't verify — an expired token quietly stripping owners is the worst thing this
-tool could do, so it can't. Flags, the full check table, and every error it can print:
-**[docs/LINTING.md](docs/LINTING.md)**.
+couldn't reach a conclusion: the audit **fails closed** and never proposes a removal it
+can't verify, because an expired token quietly stripping owners is the worst thing this
+tool could do. Full check table: **[docs/LINTING.md](docs/LINTING.md)**.
 
 ## Many repos
 
-Exit `2` means *this repo* needs a human. Exit `3` means *the policy* is broken and
-will fail identically everywhere, so the fleet stops instead of recording it a hundred
-times. `check --policy` validates a policy file without touching any repository —
-run it before repo #1. The resumable rollout script and the `jq` habits that stop a
-silent no-op looking like success: **[docs/FLEET.md](docs/FLEET.md)**.
+One policy file, N repos, each converging on its own. Exit `2` means *this repo* needs a
+human; exit `3` means *the policy* is broken and will fail identically everywhere, so the
+fleet stops instead of recording it a hundred times — which is why `check --policy` is
+worth running before repo #1. The resumable rollout script and the `jq` habits that stop
+a silent no-op looking like success: **[docs/FLEET.md](docs/FLEET.md)**.
 
-## Where everything else is
+## Documentation
 
-- **[docs/GUIDE.md](docs/GUIDE.md)** — worked examples: bootstrap a file, modify one,
-  review a change, understand a refusal.
-- **[docs/REFERENCE.md](docs/REFERENCE.md)** — commands and flags, policy file fields,
-  JSON output, exit codes, op semantics, the audit check table, GitHub semantics the
-  tool encodes, design decisions, prior art.
-- **[docs/LINTING.md](docs/LINTING.md)** — audit and repair: flags, exit codes, every
-  error and what to do about it.
-- **[docs/FLEET.md](docs/FLEET.md)** — rolling one policy across many repos.
-- **[docs/CONCEPTS.md](docs/CONCEPTS.md)** — glossary, and habits that save you.
-- **[docs/BEHAVIOR.md](docs/BEHAVIOR.md)** — generated from the test suite. Every
-  `R-`, `S-`, `INV-` and `A-` identifier in these docs is a numbered requirement
-  enforced by a named test, and this is where you look it up.
-- **[docs/INSTALL.md](docs/INSTALL.md)** — every install route, provenance
-  verification, GHES, upgrading, uninstalling.
-- **[CONTRIBUTING.md](CONTRIBUTING.md)** — a few unusual rules, each with a reason.
-- **[SECURITY.md](SECURITY.md)** — reporting vulnerabilities.
-- **[CHANGELOG.md](CHANGELOG.md)** — what changed, release by release.
+- **[GUIDE.md](docs/GUIDE.md)** — worked end-to-end changes: bootstrap a file, modify
+  one, review a change, understand a refusal.
+- **[REFERENCE.md](docs/REFERENCE.md)** — every flag, policy field, JSON field, exit
+  code, op semantic and audit check; plus GitHub semantics the tool encodes.
+- **[LINTING.md](docs/LINTING.md)** — audit and repair, and every error they can print.
+- **[FLEET.md](docs/FLEET.md)** — rolling one policy across many repos.
+- **[CONCEPTS.md](docs/CONCEPTS.md)** — glossary, and habits that save you.
+- **[BEHAVIOR.md](docs/BEHAVIOR.md)** — generated from the test suite. Every `R-`, `S-`,
+  `INV-` and `A-` identifier in these docs is a numbered requirement enforced by a named
+  test, and this is where you look it up.
+- **[INSTALL.md](docs/INSTALL.md)** — every install route, provenance verification, GHES.
+- **[CONTRIBUTING.md](CONTRIBUTING.md)** · **[SECURITY.md](SECURITY.md)** · **[CHANGELOG.md](CHANGELOG.md)**
 
 ## Tests as documentation
 
