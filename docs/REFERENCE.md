@@ -97,17 +97,23 @@ rules the tool follows.
 | `version` | top | yes | Format version. `1`. |
 | `ops` | top | yes | Op strings, or objects. A bare string is shorthand for `{"op": "..."}` with everything else defaulted. |
 | `name`, `description` | top | no | Surfaced in `--summary-out`, so PR reviewers know why. |
+| `create` | top | no | Boolean. Permission to write a CODEOWNERS where the repo has none — the policy's spelling of `--create`, which is exit 3 alongside `--policy` (R-34). Never overwrites, so it is safe to leave set for a fleet where only some repos have a file. |
 | `on_empty` | top | if any `remove_owner` | `error` \| `inherit` \| `unowned` |
 | `max_paths_changed` | top | no | R-25 ceiling, as a whole number of paths. Zero is legal and asserts the wave changes no ownership at all. |
+| `defaults` | top | no | Object supplying what an op does not state, so a 40-op baseline stays 40 strings (R-35). Accepts `on_zero_match` and `on_except_zero_match` only; a per-op value wins, and `check` echoes the resolved one. |
+| `lint` | top | no | Object holding `lint`'s preferences — `remove_stale_paths` (boolean) and `on_empty` — so the repair policy is reviewed in the same artifact (R-36). `sync` ignores it and `lint` ignores `ops`, but **every command validates the whole file**. |
 | `op` | per op | yes | Op string, same syntax as `--op`. |
 | `id` | per op | no | Short label used in JSON results and error messages. |
 | `on_zero_match` | per op | no | `require` (default) \| `skip` \| `declare` |
 | `on_except_zero_match` | per op | no | `require` (default) \| `allow` — only on ops whose scope carries an `except` clause; governs an except pattern that matches zero tracked files ([except.md](except.md), R-28) |
+| `except` | per op | no | Carve-out as a JSON array — `["/.github/CODEOWNERS"]` — equivalent to the `<scope> except <pat> …` string spelling, and exit 3 alongside it (R-37). Array elements need no delimiter escaping, so a space is written plainly: `"my dir/"`. |
 | `note` | per op | no | Reaches the PR reviewer via `--summary-out`. |
 
 Unknown fields are a hard error — a typo'd `on_zero_mtach` that silently fell back to the
-default would apply the wrong policy to every repo at once. JSON has no comments, so keys
-beginning with `_` (and the key `//`) are always ignored and can hold one.
+default would apply the wrong policy to every repo at once. That applies at every level:
+`defaults` and `lint` accept only the keys listed above, and the refusal names the set it
+does accept. JSON has no comments, so keys beginning with `_` (and the key `//`) are
+always ignored and can hold one.
 
 `on_zero_match` is rejected on `rename_owner` (its scope comes from current ownership, not
 a pattern) and `declare` is rejected on `remove_owner` (there is no rule to write).
