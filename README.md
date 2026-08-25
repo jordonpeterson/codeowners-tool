@@ -8,16 +8,11 @@ owns which file*. The two are connected by rules that surprise people: the **las
 matching line wins, and owner sets don't combine — appending `/x/ @team-2` **replaces**
 the owners of `/x/`, it doesn't add to them.
 
-So you say what you want — "`@team-2` should co-own `/services/api/`" — and this tool
-works out the lines. Then it checks its own work against every file in your repo, and
-**refuses to write anything it can't prove correct.**
-
-It also reads: `snapshot` tells you who owns what today, and `audit` finds owners who've
-left the company, rules that match no files, and owners who don't actually have
-permission to approve. Neither writes anything; `lint` is the command that repairs what
-`audit` finds — see **[docs/LINTING.md](docs/LINTING.md)**.
-
-Works with github.com and GitHub Enterprise Server.
+So you write down the ownership you want — "`@org/platform` should co-own
+`/services/api/`" — and this tool works out the lines, checks its work against every file
+in your repo, and **refuses to write anything it can't prove correct.** It also reads:
+`snapshot` for who owns what today, `audit` for what has rotted. Works with github.com and
+GitHub Enterprise Server.
 
 ## Install
 
@@ -25,504 +20,180 @@ Works with github.com and GitHub Enterprise Server.
 brew install jordonpeterson/tap/codeowners-tool
 ```
 
-Every other route — the `curl | sh` script and its build-provenance verification, direct
-download, `go install`, GHES notes, upgrading, uninstalling — is in
-**[docs/INSTALL.md](docs/INSTALL.md)**.
+Every other route — `curl | sh` with build-provenance verification, direct download,
+`go install`, GHES, upgrading, uninstalling — is in **[docs/INSTALL.md](docs/INSTALL.md)**.
 
-Check it works:
+## The policy file
+
+**A policy is a JSON file stating the ownership you want.** It is reviewable as a diff, it
+runs unchanged against one repo or a hundred, and everything that changes what gets written
+lives inside it rather than in a shell line nobody kept.
+
+```json
+{
+  "version": 1,
+  "name": "api co-ownership",
+  "ops": [
+    "add_owner(/services/api/, @org/platform)",
+    "add_owner(/docs/, @org/docs-team)"
+  ]
+}
+```
+
+**Validate, then preview.** `check` reads no repository at all — the cheapest way to catch
+a broken policy before repo #1 — and nothing is written until you drop `--dry-run`:
 
 ```console
-$ codeowners-tool version
+$ codeowners-tool check --policy ownership.json
+ok: ownership.json — 2 op(s), no policy errors
+$ codeowners-tool sync --policy ownership.json --dry-run
+applied: 2 op(s) applied, 0 skipped; 2 line change(s), 2 path(s) change owners
+  ops[0]  applied (proven: tree)
+  ops[1]  applied (proven: tree)
 ```
 
-## Start here
+`proven: tree` means the claim was checked against the repo's real files, not just
+reasoned about. Dropping `--dry-run` writes it, and the file becomes:
 
-| You want to… | Go to |
+```console
+$ cat .github/CODEOWNERS
+*            @org/everyone
+/docs/ @org/everyone @org/docs-team
+/services/api/   @org/api-team @org/platform
+```
+
+Notice what happened. `@org/everyone` was **carried onto the new `/docs/` line** — they
+owned it via `*`, and `add_owner` means co-own, so the new rule restates them or they'd be
+dropped. Each line went **directly after the rule it narrows**, and `/services/api/` kept
+its spacing. Runs are idempotent, and every untouched byte survives.
+
+Beyond `ops`, a policy carries `create` (permission to write a CODEOWNERS where a repo has
+none), `on_empty`, `max_paths_changed`, `defaults` and a `lint` block — every field in
+[POLICY-FILE.md](docs/POLICY-FILE.md#policy-file-fields).
+
+> **One-off changes.** `--op 'add_owner(/docs/, @org/docs-team)'` runs a single op with no file.
+> It is for exploring; anything you'd want reviewed, or run twice, belongs in a policy.
+
+## Basic concepts
+
+**Ownership is a property of files, not lines.** `*.go @org/eng` is not a fact; the fact is
+that `services/api/main.go` is owned by `@org/eng` — *unless* some later line also matches
+it, in which case that line wins outright and `@org/eng` is simply gone. This tool works in
+terms of files, and treats the lines as an implementation detail it derives for you.
+
+**Each entry in `ops` is one intent.** Scope is a directory, file path, or glob in
+CODEOWNERS pattern syntax; a space is escaped with a backslash (`docs/release\ notes.md`).
+Where an op takes an owner it also takes a bracketed **list** —
+`add_owner(/services/api/, [@org/platform, @org/sre])` — one line change rather than two, and
+for `remove_owner` [the only always-correct spelling](docs/OPERATIONS.md#naming-several-owners-in-one-op-r-33-r-39).
+
+| Op | What it means |
 |---|---|
-| See who owns what in this repo, right now | [Find out what you have](#find-out-what-you-have) |
-| Understand `add_owner` vs `set_owners` before touching anything | [Basic concepts](#basic-concepts) |
-| Follow one small end-to-end change | [A basic example](#a-basic-example) |
-| **Lint** a CODEOWNERS file, locally or in CI | [How to: lint](#how-to-lint-a-codeowners-file) |
-| **Repair** one — dead owners, split handles, stale rules | [docs/LINTING.md](docs/LINTING.md) |
-| **Write** a CODEOWNERS file for a repo that has none | [How to: write a new file](#how-to-write-a-new-codeowners-file) |
-| **Modify** a CODEOWNERS file that already exists | [How to: modify an existing file](#how-to-modify-an-existing-codeowners-file) |
-| Roll one policy out over many repos | [docs/FLEET.md](docs/FLEET.md) |
-| Look up a flag, exit code, or JSON field | [docs/REFERENCE.md](docs/REFERENCE.md) |
-| Know exactly what is guaranteed, and by which test | [docs/BEHAVIOR.md](docs/BEHAVIOR.md) |
+| `add_owner(scope, owner)` | Owner — or `[owners]`, or an `owners` array in the policy — becomes a **co-owner**. Every pre-existing owner of every path in scope is kept. |
+| `set_owners(scope, [owners])` | This exact set — the list, or an `owners` array — owns every path in scope, displacing whoever owned it. `[]` is legal and deliberately un-owns the scope. |
+| `remove_owner(scope, owner)` | Owner — or `[owners]`, or an `owners` array — stops owning every path in scope. If that would empty a rule, you must say what happens — see [`on_empty`](docs/POLICY-FILE.md#--on-empty--on_empty-r-6). |
+| `rename_owner(old, new)` | Global identifier substitution — the only op that is safe as plain text replacement. |
 
-## Find out what you have
+`add_owner` and `set_owners` are the two you'll use most, and picking the wrong one is the
+mistake this tool exists to prevent. Against `/services/api/ @org/api-team`:
 
-Every command is discoverable from the binary, and these are all safe to run against
-anything — none of them writes:
+| The op in your policy | The line afterwards |
+|---|---|
+| `add_owner(/services/api/, @org/team-1)` | `/services/api/   @org/api-team @org/team-1` |
+| `set_owners(/services/api/, [@org/team-1])` | `/services/api/   @org/team-1` |
 
-```sh
-codeowners-tool --help                 # every command and its flags
-codeowners-tool snapshot               # who owns each tracked file, as JSON on stdout
-codeowners-tool audit                  # what's broken or rotten in the current file
-codeowners-tool lint --dry-run …       # what a repair pass would change (writes nothing)
-codeowners-tool check --policy p.json  # is this policy well-formed? (reads no repo)
-```
+**`@org/api-team` survives the first and is gone from the second** — which is what
+`set_owners` was asked for, explicitly. By hand both look like the same one-line edit, and
+that's the trap: adding `/services/api/ @org/team-1` at the bottom of a file *silently*
+performs the second. (Ops can also carve out sub-paths with an
+[`except` clause](docs/OPERATIONS.md#except--carving-paths-out-of-a-scope-r-26r-32).)
 
-`snapshot` is the one to reach for first, because it answers the question CODEOWNERS
-itself doesn't:
+**Two invariants hold on every write**, or the write doesn't happen:
+
+- **INV-1** — every path *in scope* ends up owned exactly as the op says.
+- **INV-2** — every path *out of scope* ends up owned exactly as it was. This is the product.
+
+Anything it can't prove → it refuses and writes nothing. Refusing is a normal outcome for
+some repos, not a bug — [GUIDE.md](docs/GUIDE.md#when-it-refuses) shows what to do.
+
+> **Pattern note.** `README.md` is unanchored, so like gitignore it matches a `README.md`
+> at *any* depth. Write `/README.md` if you mean only the one at the root.
+
+## Reading the current state
+
+`snapshot` and `audit` write nothing and are safe against anything. Write your policy
+against what they tell you, not against what the file looks like:
 
 ```console
 $ codeowners-tool snapshot | jq .ownership
 {
-  ".github/CODEOWNERS": ["@org/everyone"],
-  "README.md": ["@org/everyone"],
-  "docs/guide.md": ["@org/everyone"],
   "services/api/main.go": ["@org/api-team"],
   "services/web/app.ts": ["@org/everyone"]
 }
 ```
 
-Nothing below writes anything either until you drop `--dry-run`.
+`snapshot` answers the question CODEOWNERS itself doesn't. `[]` means a rule matches and
+deliberately assigns no owners, `null` that no rule matches at all. It reads the file
+**committed** at `--branch` — what GitHub sees — so commit first.
 
-## Basic concepts
+`audit` reports what's broken or rotten and `lint` repairs a subset. Offline it checks the
+git tree: dead patterns, case-only mismatches, shadowed rules, unowned paths. With a token
+it also checks that owners exist, are in the org, and have **explicit write access** — the
+check that catches the most real rot.
 
-**Ownership is a property of files, not lines.** `*.go @org/eng` is not a fact; the fact
-is that `services/api/main.go` is owned by `@org/eng` — *unless* some later line also
-matches it, in which case that line wins outright and `@org/eng` is simply gone. This
-tool works in terms of the files, and treats the lines as an implementation detail it
-derives for you.
+**Exit 4 means findings, 0 means clean** — your CI gate. Exit 5 means a check was
+inconclusive: the audit **fails closed** and never proposes a removal it can't verify.
+Full check table: **[docs/LINTING.md](docs/LINTING.md)**.
 
-**You state an intent — an *op*.** Same syntax whether you pass it with `--op` or list it
-in a policy file. Scope is a directory, file path, or glob, using CODEOWNERS pattern
-syntax.
+## Applying one policy to another repo
 
-| Op | What it means |
-|---|---|
-| `add_owner(scope, owner)` | Owner becomes a **co-owner**. Every pre-existing owner of every path in scope is kept. |
-| `set_owners(scope, [owners])` | This exact set owns every path in scope, displacing whoever owned it. `[]` is legal and deliberately un-owns the scope. |
-| `remove_owner(scope, owner)` | Owner stops owning every path in scope. If that would empty a rule, you must say what happens — see [`--on-empty`](docs/REFERENCE.md#--on-empty--on_empty-r-6). |
-| `rename_owner(old, new)` | Global identifier substitution — the only op that is safe as plain text replacement. |
-
-`add_owner` and `set_owners` are the two you'll use most, and picking the wrong one is
-the mistake the tool exists to prevent:
-
-```console
-$ codeowners-tool sync --op 'add_owner(/services/api/, @org/team-1)'
-```
-> `/services/api/ @org/api-team` becomes `/services/api/ @org/api-team @org/team-1`.
-> **`@org/api-team` is still there.**
-
-```console
-$ codeowners-tool sync --op 'set_owners(/services/api/, [@org/team-1])'
-```
-> `/services/api/ @org/api-team` becomes `/services/api/ @org/team-1`.
-> **`@org/api-team` no longer owns it** — which is what you asked for, explicitly.
-
-Editing the file by hand, both of those look like the same one-line edit. That's the
-trap: adding `/services/api/ @org/team-1` at the bottom of a file *silently* performs the
-second one.
-
-**Two invariants hold on every write**, or the write doesn't happen:
-
-- **INV-1** — after the change, every path *in scope* is owned exactly as the op says.
-- **INV-2** — after the change, every path *out of scope* is owned exactly as it was
-  before. This is the product.
-
-The tool synthesizes line edits, then re-resolves every file git knows about and compares
-against an independently computed desired state. Anything it can't prove → it refuses and
-writes nothing. Runs are idempotent, and every untouched byte survives: comments, blank
-lines, spacing, ordering.
-
-## A basic example
-
-A small repo, with a `README.md` nobody owns in particular:
-
-```
-README.md
-docs/guide.md
-services/api/main.go
-services/web/app.ts
-```
-
-```console
-$ cat .github/CODEOWNERS
-*            @org/everyone
-/services/api/   @org/api-team
-```
-
-Docs team should co-own the README. Look before you leap:
-
-```console
-$ codeowners-tool sync --op 'add_owner(README.md, @org/docs-team)' --dry-run
-applied: 1 op(s) applied, 0 skipped; 1 line change(s), 1 path(s) change owners
-  ops[0]  applied (proven: tree)
-```
-
-`proven: tree` means the claim was checked against the repo's real files, not just
-reasoned about. Drop `--dry-run` to write it:
-
-```console
-$ codeowners-tool sync --op 'add_owner(README.md, @org/docs-team)'
-applied: 1 op(s) applied, 0 skipped; 1 line change(s), 1 path(s) change owners
-  ops[0]  applied (proven: tree)
-$ cat .github/CODEOWNERS
-*            @org/everyone
-README.md @org/everyone @org/docs-team
-/services/api/   @org/api-team
-```
-
-Three things happened that are worth noticing.
-
-`@org/everyone` was **carried onto the new line**. They owned `README.md` via `*`, and
-`add_owner` means co-own, so the new rule has to restate them or they'd be dropped.
-
-The line went **in the middle, not at the end**. Appending it would have placed it after
-`/services/api/`, which is harmless here — but the general habit isn't, and putting it
-directly after the rule it narrows is what keeps INV-2 true.
-
-`/services/api/` was **not touched at all**, including its original spacing.
-
-Run it again and nothing happens:
-
-```console
-$ codeowners-tool sync --op 'add_owner(README.md, @org/docs-team)'
-unchanged: 0 op(s) applied, 0 skipped; 0 line change(s), 0 path(s) change owners
-  ops[0]  unchanged (proven: tree)
-```
-
-> **Pattern note.** `README.md` is unanchored, so like gitignore it matches a `README.md`
-> at *any* depth. Write `/README.md` if you mean only the one at the root.
-
-## How to: lint a CODEOWNERS file
-
-`audit` is the linter and it is read-only — where a fix is expressible it prints an op
-string for a human to run, and never applies one itself. `lint`
-([below](#fixing-what-it-finds-lint)) is the command that applies them.
-
-```console
-$ codeowners-tool audit
-note: no token/--github-repo — running offline checks only (A-4..A-12)
-[A-4/warning] (line 3) pattern "/nonexistent/" matches zero tracked files (report-only: may be deliberate, R-11)
-[A-5/warning] (line 4) pattern "/Docs/" matches zero files ONLY because of case — CODEOWNERS is case-sensitive (S-6); "/docs/" would match
-$ echo $?
-4
-```
-
-**Exit 4 means findings, 0 means clean** — that's your CI gate, and `--fail-on` decides
-which findings count toward it. Exit 5 means the audit couldn't reach a conclusion (see
-below), which you also want to fail on.
-
-Offline it checks the file and the git tree: dead patterns, case-only mismatches, shadowed
-and duplicate rules, syntax errors, unowned paths, more than one CODEOWNERS file, and the
-3 MB cliff. Add a token and a repo and it also checks the owners themselves — that they
-exist, are in the org, and have **explicit write access** (org membership is not enough,
-and this is the check that catches the most real rot):
-
-```console
-$ GITHUB_TOKEN=... codeowners-tool audit --github-repo org/repo --format json
-```
-
-Two things to know before you wire it into CI.
-
-**`audit` reads the CODEOWNERS committed at `--branch`** (default `HEAD`), not the copy in
-your working directory — it is asking what GitHub would do, and GitHub only ever sees
-committed files. An uncommitted edit will not show up. (`sync`, `plan` and `apply` are the
-other way round: they read and write the working-tree file, and resolve ownership against
-the ref's tree.)
-
-**It fails closed.** A 404 from the API can mean deleted, renamed, invisible to your
-token, or rate-limited. Anything inconclusive is reported as `unknown`, exits 5, and
-**never proposes a removal** — an expired token quietly stripping owners is the worst
-thing this tool could do, so it can't. Pin the exit code you gate on accordingly:
-
-```yaml
-- run: codeowners-tool audit --github-repo ${{ github.repository }} --fail-on error
-  env:
-    GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-```
-
-`--fail-on` chooses which findings exit 4; every finding is printed either way. The
-default `any` is the strictest reading and the right one for a file you maintain by hand.
-Gate on `error` once you roll a baseline out with `on_zero_match: declare` — a declared
-rule matches zero files by construction, and A-4 reports every one of them as a
-report-only warning, so the default would fail CI in each repo the rollout touched.
-`never` reports without gating. Exit 5 is unaffected: a check that could not run is not a
-finding whose severity you can weigh.
-
-The full check table (A-1 … A-12, which ones the API is needed for, which propose fixes)
-is in [docs/REFERENCE.md](docs/REFERENCE.md#audit-checks). Run a subset with
-`--checks a1,a3,a6`.
-
-### Fixing what it finds: `lint`
-
-`lint` repairs what `audit` reports: handles whitespace has broken, owners that no longer
-exist, and — with `--remove-stale-paths` — rules matching no files. Exit 4 means the file
-still needs a person, so the dry run is your CI gate.
-
-```console
-$ GITHUB_TOKEN=... codeowners-tool lint --github-repo org/repo --dry-run
-```
-
-Drop `--dry-run` to write it. **[docs/LINTING.md](docs/LINTING.md)** has the flags, the
-exit codes, and what to do about every error it can print.
-
-There's a second kind of lint that has nothing to do with a repo. If you keep your ops in
-a policy file, `check` validates the file itself:
-
-```console
-$ codeowners-tool check --policy policy.json
-ok: policy.json — 3 op(s), no policy errors
-```
-
-```console
-$ codeowners-tool check --policy bad.json
-error: bad.json:1:21: ops[0]: op "add_owner(/services/api/)" is not valid: add_owner takes (scope, owner) or (scope, [owners]), got 1 args
-error: bad.json:1:91: ops[1]: unknown field "on_zero_mtach" (did you mean "on_zero_match"?); an op accepts "op", "id", "on_zero_match", "on_except_zero_match", "except", "note"
-this is a policy error — it will fail identically on every repo; fix the policy, do not retry
-$ echo $?
-3
-```
-
-`check` reads no repository and writes nothing. It exits `0` or `3` and never `1`, so
-under `set -e` a good policy always lets the script continue. It also echoes the
-`on_zero_match` each op resolved to, whenever the policy resolves one at all — `policy.json`
-above has no `defaults` block and no per-op value, so there is nothing to echo.
-
-## How to: write a new CODEOWNERS file
-
-For a repo with no CODEOWNERS at all, `create` writes one at `.github/CODEOWNERS`. It
-never overwrites an existing file, and it's off by default. A policy run states it as
-`"create": true` in the policy; `--create` is the flag for `--op` runs, and alongside
-`--policy` it is exit 3 — a flag must not decide what the reviewed artifact answers.
-
-It is permission to create a file, not an instruction to. When there is nothing to write —
-every op carrying `on_zero_match: "skip"` matched nothing — it creates no file and no
-`.github/` directory, and reports `skipped` at exit 0. Nothing here synthesizes ownership
-to make a repo look covered.
-
-A scope that matches nothing under the DEFAULT `require` is the other outcome, and not a
-quiet one: that repo is refused at exit 2 and gets no file, because a path you named and
-this repo does not have is usually a typo. Which of the two you want is what
-`on_zero_match` is for — see [docs/FLEET.md](docs/FLEET.md#your-100-repos-arent-identical).
-
-The smallest version is one op:
-
-```console
-$ codeowners-tool sync --op 'set_owners(*, [@org/everyone])' --create
-applied: 1 op(s) applied, 0 skipped; 1 line change(s), 4 path(s) change owners
-  ops[0]  applied (proven: tree)
-  created a new CODEOWNERS file
-```
-
-For a real file, put the ops in a policy so the whole shape is reviewable in one diff:
+`--repo` points at any local clone, and the policy path stays relative to where you are —
+so one reviewed artifact sits outside every repository it governs. The tool never clones;
+that stays in your script.
 
 ```json
-{
-  "version": 1,
-  "name": "bootstrap ownership",
-  "create": true,
-  "ops": [
-    "add_owner(*, @org/everyone)",
-    "add_owner(/services/api/, @org/api-team)",
-    "add_owner(/docs/, @org/docs-team)",
-    { "op": "add_owner(/.github/workflows/, @org/ci)", "on_zero_match": "declare" }
-  ]
-}
+{ "version": 1, "name": "org baseline",
+  "ops": [ { "op": "add_owner(/services/api/, @org/platform)", "on_zero_match": "skip" },
+           { "op": "add_owner(/services/web/, @org/web-team)", "on_zero_match": "skip" } ] }
 ```
 
 ```console
-$ codeowners-tool check --policy bootstrap.json
-ok: bootstrap.json — 4 op(s), no policy errors
-  ops[0]  on_zero_match: require (built-in)
-  ops[1]  on_zero_match: require (built-in)
-  ops[2]  on_zero_match: require (built-in)
-  ops[3]  on_zero_match: declare
-$ codeowners-tool sync --policy bootstrap.json
-applied: 4 op(s) applied, 0 skipped; 4 line change(s), 4 path(s) change owners
+$ codeowners-tool sync --repo clones/api-service --policy baseline.json
+applied: 1 op(s) applied, 1 skipped; 1 line change(s), 1 path(s) change owners
   ops[0]  applied (proven: tree)
+  ops[1]  skipped: scope "/services/web/" matches zero tracked files and on_zero_match=skip (R-21)
+$ codeowners-tool sync --repo clones/web-app --policy baseline.json
+applied: 1 op(s) applied, 1 skipped; 1 line change(s), 1 path(s) change owners
+  ops[0]  skipped: scope "/services/api/" matches zero tracked files and on_zero_match=skip (R-21)
   ops[1]  applied (proven: tree)
-  ops[2]  applied (proven: tree)
-  ops[3]  applied (proven: structural)
-  created a new CODEOWNERS file
-$ cat .github/CODEOWNERS
-* @org/everyone
-/docs/ @org/everyone @org/docs-team
-/services/api/ @org/everyone @org/api-team
-/.github/workflows/ @org/ci
 ```
 
-Two things that will bite you on the first try.
+Same bytes, two repos, each converging on what it actually has. `skip` means "*if* this
+repo has it"; the default `require` treats a scope matching nothing as a problem with this
+repo and exits `2` — what you want when every repo really should have the path. Exit `3`
+means *the policy* is broken everywhere, so a fleet stops rather than recording it a
+hundred times, which is why `check --policy` is worth running before repo #1. The rollout
+script and the `jq` habits that stop a silent no-op looking like success:
+**[docs/FLEET.md](docs/FLEET.md)**.
 
-**Use `add_owner` for the catch-all, not `set_owners`.** `add_owner` ops commute, so any
-number of them can share one run. `set_owners(*, …)` overlaps every other scope and does
-*not* commute with them, so the batch is refused rather than silently resolved by order:
+## Documentation
 
-```console
-$ codeowners-tool sync --policy bootstrap.json
-error: ops "set_owners(*, [@org/everyone])" and "add_owner(/services/api/, @org/api-team)" do not commute, and "*" provably governs every path "/services/api/" does — so the batch is order-dependent on every repository that has one (R-8); run "set_owners(*, [@org/everyone])" on its own first and the narrower op(s) in a second run — but preview that first run with --dry-run or `plan --out`: "set_owners(*, [@org/everyone])" REPLACES the owners of every path in scope, so anyone owning those paths today and not listed in it loses them
-this is a policy error — it will fail identically on every repo; fix the policy, do not retry
-$ echo $?
-3
-```
-
-Exit 3, not 2: an order-dependent batch is wrong on every repo, so a fleet stops instead
-of recording it a hundred times.
-
-**A rule for files that don't exist yet needs `on_zero_match: "declare"`.** The default is
-`require`: a scope matching nothing is treated as a problem with this repo, because it
-usually is a typo. `declare` says you meant it — the rule is written at the end of the
-file, ready for files added later. That op reports `proven: structural` rather than
-`proven: tree`: with no matching files there is nothing to check the rule against, so the
-tool proves only that no later rule can override it. See
-[what `declare` costs](docs/REFERENCE.md#what-declare-costs).
-
-## How to: modify an existing CODEOWNERS file
-
-Same command; the interesting part is what it protects you from. Starting from:
-
-```
-*            @org/everyone
-/services/api/   @org/api-team
-```
-
-Each of these is one run against that file, and the second column is the line it leaves
-behind. Notice that the original spacing survives every one of them.
-
-| Run | `/services/api/` afterwards |
-|---|---|
-| `sync --op 'add_owner(/services/api/, @org/platform)'` | `/services/api/   @org/api-team @org/platform` |
-| `sync --op 'set_owners(/services/api/, [@org/platform, @org/api-team])'` | `/services/api/   @org/platform @org/api-team` |
-| `sync --op 'rename_owner(@org/api-team, @org/platform-api)'` | `/services/api/   @org/platform-api` |
-
-The first is the common case and the one hand-editing gets wrong. The second is the same
-edit stated deliberately. The third is what a reorg needs — it substitutes the identifier
-everywhere it appears, and it's the only op that is safe as plain text replacement,
-because it can't change any rule's match set.
-
-**Removing an owner** is the one that stops and asks. If it would empty a rule's owner set
-there is deliberately no default:
-
-```console
-$ codeowners-tool sync --op 'remove_owner(/services/api/, @org/api-team)'
-error: removing @org/api-team empties the owner set of "/services/api/"; an explicit --on-empty policy (error|inherit|unowned) is required — there is deliberately no default (R-6) (governing file: .github/CODEOWNERS)
-refused: 0 op(s) applied, 0 skipped; 0 line change(s), 0 path(s) change owners
-  removing @org/api-team empties the owner set of "/services/api/"; an explicit --on-empty policy (error|inherit|unowned) is required — there is deliberately no default (R-6) (governing file: .github/CODEOWNERS)
-$ echo $?
-2
-```
-
-Say which you meant, and it proceeds — here `inherit` deletes the rule and lets the
-preceding broader one take over:
-
-```console
-$ codeowners-tool sync --op 'remove_owner(/services/api/, @org/api-team)' --on-empty inherit
-applied: 1 op(s) applied, 0 skipped; 1 line change(s), 1 path(s) change owners
-  ops[0]  applied (proven: tree)
-$ cat .github/CODEOWNERS
-*            @org/everyone
-```
-
-`unowned` would instead keep the pattern with zero owners — GitHub's sanctioned substitute
-for `!` negation — and `error` refuses outright. The recommendation is `error`.
-
-### Reviewing the change before it lands
-
-`sync` is plan-assert-apply-validate in one step. Split it in two when you want the
-artifact in the middle — a JSON plan with resolved ownership per path and the literal line
-diff:
-
-```console
-$ codeowners-tool plan --op 'add_owner(/services/web/, @org/web-team)' --out plan.json
-plan written to plan.json
-1 line change(s), 1 path(s) change owners, 58 → 101 bytes
-$ jq '.ownership_rows, .diff' plan.json
-[
-  {
-    "path": "services/web/app.ts",
-    "owners_before": ["@org/everyone"],
-    "owners_after": ["@org/everyone", "@org/web-team"]
-  }
-]
-"@ line 2\n+/services/web/ @org/everyone @org/web-team\n"
-$ codeowners-tool apply --plan plan.json
-applied: .github/CODEOWNERS (58 → 101 bytes)
-```
-
-Every change also carries the reason it took that shape, which is the part a reviewer
-actually wants:
-
-```
-"rule \"*\" also governs out-of-scope paths; inserted narrowing rule \"/services/web/\"
- immediately after it so out-of-scope resolution is untouched (R-2)"
-```
-
-And to prove after the fact that a merged change moved nothing it didn't declare:
-
-```sh
-codeowners-tool snapshot --branch main    --out before.json
-codeowners-tool snapshot --branch feature --out after.json
-codeowners-tool verify --before before.json --after after.json --scope /services/api/
-```
-
-### When it refuses
-
-Sometimes there is no line that does what you asked and nothing else. Given a repo with
-`infra/main.tf` and `infra/README.md`, and a CODEOWNERS of exactly:
-
-```
-infra/ @org/infra-legacy
-```
-
-the tool says so and writes nothing:
-
-```console
-$ codeowners-tool sync --op 'add_owner(**/*.tf, @org/infra)'
-error: refusing: rule "infra/" also governs paths outside scope "**/*.tf", and no sound narrowing pattern is derivable — amending would violate INV-2, appending would violate INV-1 (governing file: .github/CODEOWNERS)
-refused: 0 op(s) applied, 0 skipped; 0 line change(s), 0 path(s) change owners
-  refusing: rule "infra/" also governs paths outside scope "**/*.tf", and no sound narrowing pattern is derivable — amending would violate INV-2, appending would violate INV-1 (governing file: .github/CODEOWNERS)
-$ echo $?
-2
-```
-
-In English: `infra/` covers `infra/main.tf` *and* `infra/README.md`. Editing that line
-would change the README's owners, which you never asked for (INV-2). Adding a `**/*.tf`
-line before it would be overridden by it (INV-1). So it stops.
-
-This is a normal outcome for some repos, not a bug — the tool fails closed rather than
-guessing. The fix is usually to replace the over-broad rule the error names with narrower
-ones, then re-run.
-
-Exit `2` means *this repo* needs a human. Exit `3` means *the policy* is broken and will
-fail identically everywhere. That split is what makes a hundred-repo run survivable —
-see [docs/FLEET.md](docs/FLEET.md).
-
-## Where everything else is
-
-- **[docs/INSTALL.md](docs/INSTALL.md)** — every install route, provenance verification,
-  GHES, upgrading, uninstalling.
-- **[docs/REFERENCE.md](docs/REFERENCE.md)** — commands and flags, policy file fields,
-  JSON output, exit codes, op semantics, the audit check table, GitHub semantics the tool
-  encodes, design decisions, prior art.
-- **[docs/FLEET.md](docs/FLEET.md)** — rolling one policy across many repos: a resumable
-  script, `--format json`, and the `jq` habits that stop a silent no-op looking like
-  success.
-- **[docs/BEHAVIOR.md](docs/BEHAVIOR.md)** — generated from the test suite. Every `R-`,
-  `S-`, `INV-` and `A-` identifier in these docs is a numbered requirement enforced by a
-  named test, and this is where you look it up.
-- **[CONTRIBUTING.md](CONTRIBUTING.md)** — a few unusual rules, each with a reason.
+- **[GUIDE.md](docs/GUIDE.md)** — worked end-to-end changes: bootstrap a file, modify one,
+  review a change, understand a refusal.
+- **[REFERENCE.md](docs/REFERENCE.md)** — the lookup tables: flags, policy fields, op
+  semantics, JSON fields, exit codes, audit checks, guarantees.
+- **[LINTING.md](docs/LINTING.md)** — audit and repair, and every error they can print.
+- **[FLEET.md](docs/FLEET.md)** — rolling one policy across many repos.
+- **[CONCEPTS.md](docs/CONCEPTS.md)** — glossary, and habits that save you.
+- **[BEHAVIOR.md](docs/BEHAVIOR.md)** — generated from the tests; every `R-`, `S-`, `INV-` and `A-` id is looked up here.
+- **[TESTING.md](docs/TESTING.md)** — what the suite proves; **[INSTALL.md](docs/INSTALL.md)** — every install route, provenance, GHES.
+- **[CONTRIBUTING.md](CONTRIBUTING.md)** · **[SECURITY.md](SECURITY.md)** · **[CHANGELOG.md](CHANGELOG.md)**
 
 ## Tests as documentation
 
-The test suite is the specification. Every test carries a doc comment naming the
-requirement it enforces, and `make docs` regenerates
-[docs/BEHAVIOR.md](docs/BEHAVIOR.md) from those comments via `go/ast`, so the docs cannot
-drift from what is verified. On top of the unit and end-to-end tests: a vendored pattern
-corpus from [hmarr/codeowners](https://github.com/hmarr/codeowners), a 500k-case
-differential fuzz against that matcher unmodified as an oracle, and property tests that
-prove INV-1/INV-2 and idempotence by independent re-resolution.
-
-```sh
-make build     # ./bin/codeowners-tool
-make all       # vet, test, build, docs
-```
+The test suite is the specification and BEHAVIOR.md is generated from it — what that
+proves, and how: **[docs/TESTING.md](docs/TESTING.md)**.
 
 ## License
 
-MIT. The pattern matcher is ported from, and differentially tested against,
-[hmarr/codeowners](https://github.com/hmarr/codeowners) (MIT, © Harry Marr) — see
-[NOTICE](NOTICE).
+MIT — see **[LICENSE](LICENSE)**, and **[NOTICE](NOTICE)** for vendored-code attribution.

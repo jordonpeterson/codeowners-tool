@@ -1,5 +1,5 @@
 // Policy-field end-to-end tests: `create` in the policy (R-34) and the
-// `defaults` block (R-35), from docs/policy.md. Written ahead of the
+// `defaults` block (R-35). Written ahead of the
 // implementation per CONTRIBUTING.md.
 //
 // The vacuity trap in this area is unusually sharp. Today `create` and
@@ -725,7 +725,7 @@ func TestR35b_PerOpExceptValueWinsOverTheDefault(t *testing.T) {
 
 // SPEC R-35c: `on_empty` inside `defaults` is exit 3. It is one policy for
 // the run, not a per-op setting, and two spellings for one setting is the
-// ambiguity docs/policy.md exists to remove — accepting it in both places
+// ambiguity the policy format exists to remove — accepting it in both places
 // would leave "which one wins" as a precedence rule nobody wrote down.
 //
 // The fragment cannot be "on_empty" or "defaults": today's rejection of the

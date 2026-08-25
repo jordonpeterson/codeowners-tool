@@ -943,3 +943,45 @@ func TestINV6_PartialOverlapWithAPreexistingLaterRuleIsStillRefused(t *testing.T
 		t.Errorf("refusal must name the declared scope, got %q", err.Error())
 	}
 }
+
+// Regression guard from the pre-release review: an UNRECOGNIZED on_zero_match
+// value on a zero-match scope must refuse (exit 3), naming the value. Policy
+// parsing validates the enum, but the field is exported with a json tag, so a
+// library caller — or a value the policy layer learns before the planner does
+// — can carry anything. Before the fix no switch arm matched, the op
+// synthesized nothing, and the run reported the repo converged with a proven
+// tree: the silent no-op rollout this file exists to prevent.
+func TestZeroMatch_UnrecognizedOnZeroMatchIsInvalid(t *testing.T) {
+	tree := []string{"README.md"}
+	op := ops.Op{Kind: ops.AddOwner, Scope: "/ghost/", Owners: []string{"@b"},
+		Raw: "add_owner(/ghost/, @b)", OnZeroMatch: "frob", ID: "bad"}
+
+	_, err := plan.Build([]byte("* @a\n"), tree, []ops.Op{op}, plan.Options{})
+	var inv *plan.InvalidError
+	if !errors.As(err, &inv) {
+		t.Fatalf("unrecognized on_zero_match on a zero-match scope must be invalid input (exit 3), got %v", err)
+	}
+	if !strings.Contains(err.Error(), `"frob"`) {
+		t.Errorf("refusal must name the unrecognized value, got %q", err.Error())
+	}
+}
+
+// Same defense for the sibling switch: an unrecognized on_except_zero_match on
+// an op whose except bites nothing must be invalid input (exit 3) naming the
+// value — not silently run as `require`, whose exit-2 refusal reads as a
+// per-repo problem when the defect is in the policy and identical everywhere.
+func TestZeroMatch_UnrecognizedOnExceptZeroMatchIsInvalid(t *testing.T) {
+	tree := []string{"src/main.go", "README.md"}
+	op := ops.Op{Kind: ops.AddOwner, Scope: "/src/", Owners: []string{"@b"},
+		Raw: "add_owner(/src/, @b)", Except: []string{"/src/ghost/"},
+		OnExceptZeroMatch: "frob", ID: "bad"}
+
+	_, err := plan.Build([]byte("* @a\n"), tree, []ops.Op{op}, plan.Options{})
+	var inv *plan.InvalidError
+	if !errors.As(err, &inv) {
+		t.Fatalf("unrecognized on_except_zero_match must be invalid input (exit 3), got %v", err)
+	}
+	if !strings.Contains(err.Error(), `"frob"`) {
+		t.Errorf("refusal must name the unrecognized value, got %q", err.Error())
+	}
+}

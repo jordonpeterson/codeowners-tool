@@ -41,8 +41,18 @@ for bin in git jq awk; do
 done
 command -v "$TOOL" > /dev/null || { echo "co-own.sh: codeowners-tool not found (set CODEOWNERS_TOOL)" >&2; exit 3; }
 
-# Scope is compared against snapshot paths with slashes normalized away.
+# SCOPE reaches the tool (sync --op, verify --scope) exactly as typed: the op
+# and its proof must carry the operator's spelling — stripping the anchoring
+# slash from /docs/ would widen both to any-depth docs. S is the slash-stripped
+# spelling for mechanics only: the branch name, the dedicated-line match (awk
+# strips the line's slashes the same way), and jq path-prefix checks.
+# ANCHORED mirrors CODEOWNERS matching: any slash before a trailing one anchors
+# the pattern to the root; a bare single segment matches at any depth.
 S="${SCOPE#/}"; S="${S%/}"
+case "${SCOPE%/}" in
+  */*) ANCHORED=1 ;;
+  *)   ANCHORED=0 ;;
+esac
 CFILE=""
 
 TMP="$(mktemp -d)"
@@ -64,12 +74,23 @@ CFILE="$(jq -r '.codeowners_path // empty' "$TMP/before.json")"
 [ -n "$CFILE" ] || skip "no CODEOWNERS file"
 
 # state SNAPSHOT -> none|no-owner|shared|exclusive, over the in-scope paths.
+# In-scope follows the typed spelling: anchored scopes prefix-match from the
+# root, unanchored ones also match under any parent. Wildcards are not modeled
+# here — such a scope selects no paths and is skipped as "nothing in scope";
+# the tool's snapshot/verify stay the authority on any edit regardless.
+# Owners compare under the tool's identity (R-38): @handles fold case, an
+# email stays byte-exact. Snapshot preserves file spellings, so byte equality
+# here would call @Org/Platform a different owner than --owner @org/platform.
 state() {
-  jq -r --arg s "$S" --arg o "$OWNER" '
-    [.ownership | to_entries[] | select(.key == $s or (.key | startswith($s + "/")))
+  jq -r --arg s "$S" --arg o "$OWNER" --arg anchored "$ANCHORED" '
+    def fold: if startswith("@") then ascii_downcase else . end;
+    [.ownership | to_entries[]
+     | select(.key as $k | ($k == $s) or ($k | startswith($s + "/"))
+         or (($anchored == "0")
+             and (($k | endswith("/" + $s)) or ($k | contains("/" + $s + "/")))))
      | .value // []] as $sets
     | if ($sets | length) == 0 then "none"
-      elif [$sets[] | index($o)] | any(. == null) then "no-owner"
+      elif [$sets[] | map(fold) | index($o | fold)] | any(. == null) then "no-owner"
       elif [$sets[] | length >= 2] | all then "shared"
       else "exclusive" end' "$1"
 }
@@ -81,13 +102,15 @@ esac
 
 # Exclusivity must come from a dedicated "SCOPE OWNER" line; anything else
 # (a broad sole-owner rule, extra owners, an inline comment) has no move that
-# provably stays inside the scope, so it goes to a human instead.
+# provably stays inside the scope, so it goes to a human instead. The owner
+# match folds like state() does: @handles case-insensitively, emails byte-exact.
 if ! awk -v s="$S" -v o="$OWNER" '
+  function fold(x) { return x ~ /^@/ ? tolower(x) : x }
   { line = $0; sub(/\r$/, "", line)
     n = split(line, f, /[ \t]+/); i = 1
     if (n > 0 && f[1] == "") i = 2
     p = f[i]; sub(/^\/+/, "", p); sub(/\/+$/, "", p)
-    if (n - i + 1 == 2 && p == s && f[i+1] == o) { deleted = 1; next }
+    if (n - i + 1 == 2 && p == s && fold(f[i+1]) == fold(o)) { deleted = 1; next }
     print }
   END { exit deleted ? 0 : 1 }
 ' "$REPO/$CFILE" > "$TMP/without-line"; then
@@ -123,19 +146,23 @@ if [ "$(state "$TMP/fallback.json")" != shared ]; then
   # The broader rule drops or loses $OWNER, so deleting alone breaks "stays an
   # owner". Invert: keep the line, add the broader team(s) to it — one
   # add_owner with an owner list is one line change (R-33b).
-  FALLBACK="$(jq -r --arg s "$S" --arg o "$OWNER" '
-    [.ownership | to_entries[] | select(.key == $s or (.key | startswith($s + "/")))
+  FALLBACK="$(jq -r --arg s "$S" --arg o "$OWNER" --arg anchored "$ANCHORED" '
+    def fold: if startswith("@") then ascii_downcase else . end;
+    [.ownership | to_entries[]
+     | select(.key as $k | ($k == $s) or ($k | startswith($s + "/"))
+         or (($anchored == "0")
+             and (($k | endswith("/" + $s)) or ($k | contains("/" + $s + "/")))))
      | .value // []] | unique as $sets
     | if ($sets | length) != 1 then ""
-      else [$sets[0][] | select(. != $o)] | join(", ") end' "$TMP/fallback.json")"
+      else [$sets[0][] | select(fold != ($o | fold))] | join(", ") end' "$TMP/fallback.json")"
   [ -n "$FALLBACK" ] || restore_and_human "nothing co-ownable behind the line; a human decides who shares $SCOPE"
   git -C "$REPO" reset -q --hard "$BASE"
   RC=0
-  "$TOOL" sync --repo "$REPO" --op "add_owner($S, [$FALLBACK])" >&2 || RC=$?
+  "$TOOL" sync --repo "$REPO" --op "add_owner($SCOPE, [$FALLBACK])" >&2 || RC=$?
   case "$RC" in
     0) git -C "$REPO" commit -qam "probe: line amended" ;;
-    2) restore_and_human "tool refused to amend: add_owner($S, [$FALLBACK])" ;;
-    *) restore_and_human "tool exited $RC on add_owner($S, [$FALLBACK])" ;;
+    2) restore_and_human "tool refused to amend: add_owner($SCOPE, [$FALLBACK])" ;;
+    *) restore_and_human "tool exited $RC on add_owner($SCOPE, [$FALLBACK])" ;;
   esac
 fi
 
@@ -146,7 +173,7 @@ git -C "$REPO" commit -qm "chore: co-own $SCOPE ($OWNER no longer exclusive)"
 # every in-scope path is owned by $OWNER plus at least one other team.
 "$TOOL" snapshot --repo "$REPO" --out "$TMP/after.json" >&2 \
   || restore_and_human "snapshot failed after edit"
-"$TOOL" verify --before "$TMP/before.json" --after "$TMP/after.json" --scope "$S" >&2 \
+"$TOOL" verify --before "$TMP/before.json" --after "$TMP/after.json" --scope "$SCOPE" >&2 \
   || restore_and_human "ownership moved outside $SCOPE; edit discarded"
 [ "$(state "$TMP/after.json")" = shared ] \
   || restore_and_human "end state is not co-owned; edit discarded"

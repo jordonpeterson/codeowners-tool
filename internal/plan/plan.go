@@ -251,6 +251,15 @@ func Build(content []byte, tree []string, opList []ops.Op, opts Options) (*Plan,
 							"scope %q matches %d tracked file(s), but every one of them is excepted — the except clause empties the op in this repo (R-28)", op.Scope, raw)}
 					}
 					return nil, &InvalidError{Msg: fmt.Sprintf("scope %q matches zero tracked files (R-5: refusing to create a dead rule)", op.Scope)}
+				default:
+					// Policy parsing validates the field, but the struct is
+					// exported: a library caller (or a future value) can carry
+					// anything here, and falling through would synthesize
+					// nothing while reporting the repo converged — the silent
+					// no-op rollout this switch exists to prevent.
+					return nil, &InvalidError{Msg: fmt.Sprintf(
+						"unknown on_zero_match value %q on %s; legal values are %q, %q, or %q",
+						op.OnZeroMatch, op.Raw, ops.ZeroMatchRequire, ops.ZeroMatchSkip, ops.ZeroMatchDeclare)}
 				}
 			} else if len(zeroPats) > 0 {
 				// R-28's second question, reached only when the op WILL write.
@@ -268,7 +277,7 @@ func Build(content []byte, tree []string, opList []ops.Op, opts Options) (*Plan,
 						allowWarnings = append(allowWarnings, fmt.Sprintf(
 							"except pattern %q matches zero tracked files; on_except_zero_match=allow writes the grant with NO carve for it, so a matching file created later falls under the grant — a declare-class weakening of INV-1, marked proven=structural (R-28)", e))
 					}
-				default:
+				case ops.ExceptZeroMatchRequire, "":
 					// "" and "require" are one state, exactly as above. An
 					// except that bites nothing means the carve-out this
 					// policy promises does not exist here — in the motivating
@@ -278,6 +287,13 @@ func Build(content []byte, tree []string, opList []ops.Op, opts Options) (*Plan,
 					// /.github/CODEOWNERS.
 					return nil, &RefusalError{Msg: fmt.Sprintf(
 						"refusing: except pattern %q matches zero tracked files — the carve-out this policy promises does not exist in this repo, and writing the grant without it would reopen the hole the except exists to close (R-28); normalize this repo first, or set on_except_zero_match=allow to accept the weakening", zeroPats[0])}
+				default:
+					// Same defense as on_zero_match: an unrecognized value is
+					// bad input that fails identically everywhere (exit 3),
+					// not a per-repo refusal masquerading as require.
+					return nil, &InvalidError{Msg: fmt.Sprintf(
+						"unknown on_except_zero_match value %q on %s; legal values are %q or %q",
+						op.OnExceptZeroMatch, op.Raw, ops.ExceptZeroMatchRequire, ops.ExceptZeroMatchAllow)}
 				}
 			}
 		}
@@ -363,6 +379,26 @@ func Build(content []byte, tree []string, opList []ops.Op, opts Options) (*Plan,
 		for j := i + 1; j < len(opList); j++ {
 			if skipped[i] || skipped[j] || (!declared[i] && !declared[j]) {
 				continue
+			}
+			// R-22b. The hazard above is two rules stacked at EOF, which needs
+			// BOTH ops declared; this loop fires on `declared[i] ||
+			// declared[j]`, so it also caught a declare paired with an op that
+			// resolved against the real tree. Where that op's scope names one
+			// tracked FILE, the two languages are disjoint permanently — a
+			// declared op matched ZERO tracked paths, so it cannot match a
+			// tracked file, and no path can appear beneath a file. Refusing
+			// the pair made "grant the bot .github/ but not
+			// .github/CODEOWNERS" — batched with the wildcard declares every
+			// fleet baseline carries — require two separate rollouts, because
+			// removing an owner never commutes with declaring an add of it.
+			if declared[i] != declared[j] {
+				concrete := i
+				if declared[i] {
+					concrete = j
+				}
+				if scopeIsExactTrackedFile(opList[concrete].Scope, scopeSets[concrete]) {
+					continue
+				}
 			}
 			if patternsProvablyDisjoint(opList[i].Scope, opList[j].Scope) {
 				continue
@@ -825,6 +861,19 @@ func synthSet(f *file.File, tree []string, op ops.Op, scope map[string]bool, des
 			NewOwners: op.Owners, NewLine: f.LineText(at),
 			Reason: "inserted after the last rule whose match set intersects the scope, so no later rule recaptures any in-scope path (R-3)",
 		})
+		// R-7 disclosure for a duplicate THIS run authors: the insert lands
+		// after the last intersecting rule, so an earlier byte-equal pattern is
+		// left permanently shadowed while still naming its old owners to human
+		// readers. warnShadowedDuplicates above ran on the pre-op file and
+		// cannot see it — without this, the run creating the dead line is the
+		// one run that says nothing about it (pre-release finding).
+		for _, r := range f.Rules() {
+			if r.LineIndex != at && r.PatternText == op.Scope {
+				pl.addWarning(fmt.Sprintf(
+					"line %d: duplicate pattern %q is shadowed by line %d, which this run inserted — the earlier line is dead under last-match-wins (R-7); run `audit` to clean up duplicates",
+					r.LineIndex+1, op.Scope, at+1))
+			}
+		}
 	}
 
 	for p := range scope {

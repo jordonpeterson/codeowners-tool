@@ -66,7 +66,10 @@ func validOnEmpty(s string) bool {
 // records/$repo.json` and aggregating the directory afterwards sees the
 // affected repos DISAPPEAR rather than appear as refused, so the count of repos
 // needing attention goes down. Silence about that is what made it dangerous;
-// the behavior itself is correct.
+// the behavior itself is correct. Every exit-3 return in cmdSync goes through
+// this (via the exit3s choke point there): the hazard is the same whichever
+// pre-repo verdict fired, and covering only some of them lost the rest of the
+// repos silently — the exact failure the note exists to disclose.
 func noRecordNote(stderr io.Writer, format, outPath, summaryPath string, code int) int {
 	if format != "json" && outPath == "" && summaryPath == "" {
 		return code
@@ -202,6 +205,22 @@ func cmdSync(args []string, stdout, stderr io.Writer) int {
 	if err := fs.Parse(args); err != nil {
 		return flagParseCode(err)
 	}
+	// The one choke point for sync's exit-3 class: every verdict in it is
+	// reached before the repository is opened, so NONE of them produces a
+	// record — and when --format json, --out or --summary-out asked for one,
+	// that absence has to be said out loud (see noRecordNote). Routing every
+	// exit-3 return through this closure is what keeps a refusal added later
+	// from silently dropping a repo out of a fleet's aggregation — the exact
+	// hazard the note discloses; the first fix covered only two of the ten
+	// paths, and the other eight lost repos silently.
+	exit3s := func(err error) int {
+		return noRecordNote(stderr, *format, *out, *summaryOut, exit3(stderr, err))
+	}
+	// Argument-only, like every exit-3 verdict below: a stray positional arg
+	// means the parser read nothing after it, flags included.
+	if err := rejectLeftoverArgs(fs); err != nil {
+		return exit3s(err)
+	}
 	// Which flags were TYPED, as opposed to which hold a non-zero value. Every
 	// "not allowed with --policy" ban below is a ban on the flag being
 	// PRESENT: `--create=false` overrides a reviewed `"create": true` exactly
@@ -213,7 +232,7 @@ func cmdSync(args []string, stdout, stderr io.Writer) int {
 		// Never a silent fallback to text: the fleet script's `>> results.jsonl`
 		// would then collect human prose that `jq -s` cannot read, after the
 		// whole rollout has already written its CODEOWNERS files.
-		return exit3(stderr, fmt.Errorf("unknown --format %q; want text or json", *format))
+		return exit3s(fmt.Errorf("unknown --format %q; want text or json", *format))
 	}
 	// Validated here, not on whichever repo first has a removal empty an owner
 	// set. A flag value is decidable from the arguments alone, so it belongs to
@@ -223,10 +242,10 @@ func cmdSync(args []string, stdout, stderr io.Writer) int {
 	// reported exit 2 ("this repo needs a human") on the one repo that happened
 	// to trip it, naming a CODEOWNERS that had nothing to do with the mistake.
 	if *onEmpty != "" && !validOnEmpty(*onEmpty) {
-		return exit3(stderr, fmt.Errorf("unknown --on-empty %q; want error, inherit or unowned (R-6)", *onEmpty))
+		return exit3s(fmt.Errorf("unknown --on-empty %q; want error, inherit or unowned (R-6)", *onEmpty))
 	}
 	if *onEmpty != "" && len(policyPaths) > 0 {
-		return exit3(stderr, errors.New("--on-empty is not allowed with --policy: set \"on_empty\" in the policy file instead, or the artifact in git is not the policy that ran (R-20)"))
+		return exit3s(errors.New("--on-empty is not allowed with --policy: set \"on_empty\" in the policy file instead, or the artifact in git is not the policy that ran (R-20)"))
 	}
 	// A non-HEAD --branch may not write — checkBranchIsWritable enforces that
 	// for creates and edits alike, by comparing RESOLVED COMMITS rather than
@@ -239,17 +258,17 @@ func cmdSync(args []string, stdout, stderr io.Writer) int {
 	// and it is checked BEFORE the repository is opened, because with --create
 	// the write happens outside the repository the moment we get that far.
 	if err := containedRelPath(*filePath); err != nil {
-		return exit3(stderr, err)
+		return exit3s(err)
 	}
 	// The third spelling of the same mistake, and the one containment cannot
 	// see because it stays inside --repo: see refuseGitDirPath.
 	if err := refuseGitDirPath(*filePath); err != nil {
-		return exit3(stderr, err)
+		return exit3s(err)
 	}
 	// Argument-only, hence exit 3: a fleet run halts at repo 0 rather than
 	// recording the same refusal 100 times.
 	if err := gittree.ValidateRef(*branch); err != nil {
-		return exit3(stderr, err)
+		return exit3s(err)
 	}
 	// Whether the ceiling flag was TYPED, not merely whether its value looks
 	// set. -1 is the internal "no ceiling" sentinel, so guarding on `>= 0` let
@@ -263,10 +282,10 @@ func cmdSync(args []string, stdout, stderr io.Writer) int {
 	// rather than hidden behind this one.
 	pol, opList, err := opSource(opSpecs, policyPaths)
 	if err != nil {
-		return noRecordNote(stderr, *format, *out, *summaryOut, exit3(stderr, err))
+		return exit3s(err)
 	}
 	if maxPathsSet && *maxPaths < 0 {
-		return exit3(stderr, fmt.Errorf("--max-paths-changed %d must be zero or positive; omit the flag to set no ceiling (R-25)", *maxPaths))
+		return exit3s(fmt.Errorf("--max-paths-changed %d must be zero or positive; omit the flag to set no ceiling (R-25)", *maxPaths))
 	}
 	// The third member of that family (R-34b), and the one whose false default
 	// hid it: `--policy p.json --create` used to create the file at exit 0
@@ -277,7 +296,7 @@ func cmdSync(args []string, stdout, stderr io.Writer) int {
 	// problem in the same command line, and reporting the flag first would let
 	// "the broken policy halted the fleet" be proven by the flag instead.
 	if passed["create"] && len(policyPaths) > 0 {
-		return exit3(stderr, errors.New("--create is not allowed with --policy: set \"create\" in the policy file instead, or the artifact in git is not the policy that ran (R-20/R-34)"))
+		return exit3s(errors.New("--create is not allowed with --policy: set \"create\" in the policy file instead, or the artifact in git is not the policy that ran (R-20/R-34)"))
 	}
 	if maxPathsSet && len(policyPaths) > 0 {
 		// Mirrors --on-empty exactly, and for the same reason: the ceiling is a
@@ -286,17 +305,17 @@ func cmdSync(args []string, stdout, stderr io.Writer) int {
 		// A flag that could override the file would let one call site quietly
 		// loosen a reviewed policy, and any "lower of the two wins" scheme is a
 		// new precedence rule for operators to learn.
-		return exit3(stderr, errors.New("--max-paths-changed is not allowed with --policy: set \"max_paths_changed\" in the policy file instead, or the artifact in git is not the policy that ran (R-20/R-25)"))
+		return exit3s(errors.New("--max-paths-changed is not allowed with --policy: set \"max_paths_changed\" in the policy file instead, or the artifact in git is not the policy that ran (R-20/R-25)"))
 	}
 	if err := validateScopes(opList); err != nil {
-		return exit3(stderr, err)
+		return exit3s(err)
 	}
 	// The statically provable half of R-8, settled here with no repository
 	// open, so both verbs give the same verdict for the same policy on every
 	// repo. plan.Build keeps the other half — an overlap only a real tree
 	// reveals stays exit 2, per repo, and the fleet loop still steps over it.
 	if err := ops.StaticConflict(opList); err != nil {
-		return noRecordNote(stderr, *format, *out, *summaryOut, exit3(stderr, err))
+		return exit3s(err)
 	}
 
 	run := &syncRun{
@@ -388,7 +407,17 @@ func (r *syncRun) execute() (SyncRecord, int) {
 	// keeps that choice inside the clone. Refusal, not error: the repo was read
 	// fine and the tool is declining to write into it, and it is a fact about
 	// THIS clone, so exit 2 and the fleet loop steps to the next one.
-	if err := containedWritePath(r.repoArg, filepath.Join(r.repoArg, filepath.FromSlash(rel))); err != nil {
+	target := filepath.Join(r.repoArg, filepath.FromSlash(rel))
+	if err := containedWritePath(r.repoArg, target); err != nil {
+		rec.Status = StatusRefused
+		rec.Error = err.Error()
+		return rec, ExitRefused
+	}
+	// The refusal containment cannot make: a symlink whose target stays INSIDE
+	// the clone is still a CODEOWNERS GitHub does not follow, so writing
+	// through it is the same dead-on-arrival outcome with a live-looking path.
+	// See refuseSymlinkedTarget.
+	if err := refuseSymlinkedTarget(target); err != nil {
 		rec.Status = StatusRefused
 		rec.Error = err.Error()
 		return rec, ExitRefused
@@ -628,7 +657,12 @@ func headLabel(repoDir, head string) string {
 	if len(short) > 7 {
 		short = short[:7]
 	}
-	name, err := gitLine(repoDir, "rev-parse", "--abbrev-ref", "--end-of-options", "HEAD")
+	// No --end-of-options here: in --abbrev-ref (filter) mode rev-parse ECHOES
+	// the operator as an output line, so the S-7 refusal read "HEAD is
+	// --end-of-options\nmain (sha)" and the detached check below could never
+	// fire. "HEAD" is a literal this function supplies, never operator input,
+	// so there is nothing for the operator to smuggle past.
+	name, err := gitLine(repoDir, "rev-parse", "--abbrev-ref", "HEAD")
 	if err != nil || name == "" || name == "HEAD" {
 		return short
 	}
@@ -750,11 +784,22 @@ func (e *unreadableCodeownersError) Error() string {
 
 func (e *unreadableCodeownersError) Unwrap() error { return e.err }
 
+// relClean is the canonical spelling of a repo-relative path: slash-separated
+// and cleaned, so `./.github/CODEOWNERS`, `.github//CODEOWNERS` and
+// `docs/../CODEOWNERS` all spell the file they name. Every comparison against
+// a git-reported path goes through it — git lists clean slash paths, and
+// comparing an operator's raw --file spelling against one reported a live
+// change as "governs nothing" (S-8) in the warning, the --out record and the
+// --summary-out PR body.
+func relClean(rel string) string {
+	return filepath.ToSlash(filepath.Clean(filepath.FromSlash(rel)))
+}
+
 // trackedAt reports whether rel is one of the paths git lists for the ref.
 // Comparison is against the cleaned, slash-separated spelling because rel can
 // come from --file, where `./docs/CODEOWNERS` names the tracked `docs/CODEOWNERS`.
 func trackedAt(tree []string, rel string) bool {
-	want := filepath.ToSlash(filepath.Clean(filepath.FromSlash(rel)))
+	want := relClean(rel)
 	for _, p := range tree {
 		if p == want {
 			return true
@@ -855,7 +900,8 @@ func governingWarnings(tree []string, rel string, content []byte) []string {
 			rel, strings.Join(gittree.CodeownersLocations, ", ")))
 	}
 	if present := gittree.FindCodeownersPaths(tree); len(present) > 0 {
-		if rel != present[0] && isCodeownersLocation(rel) {
+		// relClean on the --file side only: present comes from git, already clean.
+		if relClean(rel) != present[0] && isCodeownersLocation(rel) {
 			out = append(out, fmt.Sprintf(
 				"this run writes %s, but GitHub resolves ownership from %s (S-8: .github/ > root > docs/, first found wins, never merged) — the rules written here govern nothing until that is the file being edited",
 				rel, present[0]))
@@ -876,10 +922,14 @@ func governingWarnings(tree []string, rel string, content []byte) []string {
 }
 
 // isCodeownersLocation reports whether a repo-relative path is one of the three
-// GitHub actually reads (S-8).
+// GitHub actually reads (S-8). Classified over the cleaned spelling, like
+// trackedAt: `./.github/CODEOWNERS` governs exactly what `.github/CODEOWNERS`
+// governs, and classifying the raw string drew the false "governs nothing"
+// warning for an alternate spelling of a governing file.
 func isCodeownersLocation(rel string) bool {
+	clean := relClean(rel)
 	for _, loc := range gittree.CodeownersLocations {
-		if rel == loc {
+		if clean == loc {
 			return true
 		}
 	}
@@ -976,6 +1026,17 @@ func commentLinesNaming(content, owner string) []commentMatch {
 			// in any case. Advancing by one byte rather than past the match is
 			// what lets a longer handle be rejected and a real one later on the
 			// same line still be found.
+			//
+			// Both ends need it. The LEADING boundary is what keeps `# email
+			// someone@old-team` quiet on a rename of @old-team: the match is
+			// the tail of a longer token, betrayed by the byte before it being
+			// an owner-token byte ('e') — or '@' itself, which ownerTokenByte
+			// deliberately excludes as a continuation byte but which glued to
+			// the front (`a@@old-team`) still means "embedded, not a mention".
+			// `#@old-team` stays a real mention: '#' is neither.
+			if at != 0 && (ownerTokenByte(text[at-1]) || text[at-1] == '@') {
+				continue
+			}
 			end := at + len(owner)
 			if end != len(text) && ownerTokenByte(text[end]) {
 				continue
@@ -1006,10 +1067,16 @@ func commentStart(line string) int {
 }
 
 // blockedOpLabels names the ops that would have applied, for R-25's refusal.
+//
+// Only status "applied" belongs: the caller reads the statuses BEFORE the
+// applied→unchanged rewrite, so at that point "unchanged" means "already
+// satisfied, changed zero paths" — an op that contributed nothing to the
+// number the ceiling refused on. Naming it sent the operator narrowing an op
+// that was never behind the count.
 func blockedOpLabels(results []plan.OpResult) string {
 	var labels []string
 	for i, o := range results {
-		if o.Status == "applied" || o.Status == "unchanged" && o.Reason == "" {
+		if o.Status == "applied" {
 			labels = append(labels, policy.OpLabel(o.ID, i))
 		}
 	}
@@ -1300,6 +1367,9 @@ func cmdCheck(args []string, stdout, stderr io.Writer) int {
 	// An unknown flag is a parse error, which is exit 3 below.
 	if err := fs.Parse(args); err != nil {
 		return flagParseCode(err)
+	}
+	if err := rejectLeftoverArgs(fs); err != nil {
+		return exit3(stderr, err)
 	}
 	if *format != "text" && *format != "json" {
 		return exit3(stderr, fmt.Errorf("unknown --format %q; want text or json", *format))

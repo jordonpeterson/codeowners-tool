@@ -1,4 +1,4 @@
-// Owner-identity end-to-end tests (docs/policy.md, R-38). Written ahead of
+// Owner-identity end-to-end tests (R-38). Written ahead of
 // the implementation per CONTRIBUTING.md.
 //
 // The vacuity trap in this area is unusually sharp: most of the broken cases
