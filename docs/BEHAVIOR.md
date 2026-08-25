@@ -4095,6 +4095,18 @@ Every verb, not just audit: a token in the environment must survive any usage
 render anywhere in the CLI. This is the regression guard for the day a second
 command grows a credential flag.
 
+### `TestAbsentRepoFlagStillDefaultsToCwd`
+
+Absent is not empty. Omitting --repo still means the working directory,
+which is the documented default and what every one-repo invocation relies on.
+
+### `TestApplyEmptyRepoDistinguishesPassedFromAbsent`
+
+apply's --repo defaults to "" meaning "use the plan's repo", so the rejection
+cannot be read off the VALUE — it has to ask whether the flag was passed.
+Both readings are pinned here: passing it empty is an error, omitting it is
+how the plan's own repo field gets used.
+
 ### `TestAuditJSONCleanIsPureJSON`
 
 Pre-release finding, fixed: `audit --format json` on a clean repo prints the literal line
@@ -4115,6 +4127,28 @@ Pre-release finding, fixed: the S-7 branch-mismatch refusal interpolates raw `gi
 --abbrev-ref --end-of-options HEAD` output, and rev-parse echoes the
 `--end-of-options` operator as an output line — so the one-line error (and
 the JSON record's error field) reads "HEAD is --end-of-options\nmain (…)".
+
+### `TestEmptyRepoFlagRejected`
+
+SPEC: `--repo ""` is rejected at argument-parsing time (exit 3), on every
+verb that takes the flag. `.` stays the default when the flag is ABSENT.
+
+An empty string is the one wrong value that used to get a default instead of
+an error, and it is the value a shell produces by accident:
+
+	REPO=$(lookup_repo "$name")     # returned nothing
+	codeowners-tool sync --repo "$REPO" --op '...'
+
+A typo'd path fails correctly. The empty string fell through to the flag's
+own default and targeted the working directory, so a fleet script standing
+in an unrelated checkout wrote to it at exit 0 — and the record carried
+"repo":"", so results.jsonl got a success row that did not say which
+repository had been changed.
+
+### `TestEmptyRepoWritesNothingToTheWorkingDirectory`
+
+The refusal happens before anything is written. The working directory this
+process is standing in must be untouched — that is the whole point.
 
 ### `TestEscapedHashPatternRefused`
 
@@ -6815,4 +6849,4 @@ DIFFERENT states; transitioning between them is a real ownership change.
 
 ---
 
-648 documented test cases across 13 packages.
+652 documented test cases across 13 packages.
