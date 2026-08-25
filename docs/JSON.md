@@ -29,6 +29,21 @@ when the result was checked against real files, `structural` when it wasn't — 
 `codeowners_path` is the file this run wrote — one of the three locations in S-8, and
 which one differs per repo — so a fleet loop can stage exactly it instead of `git add -A`.
 
+`owners_removed` names, per path, the owners this run takes access **away** from, and is
+present only when access is actually lost:
+
+```json
+"owners_removed": [
+  {"path": "scanners/scan.py", "owners": ["@acme/appsec", "@acme/security-leads"]}
+]
+```
+
+It is what separates co-owning five paths from displacing five paths' owners — `changes`
+is line-level, and an inserted rule has no previous line to carry a before-state.
+`--summary-out` renders the same facts grouped by owner, under **Owners losing access**,
+because the reviewer's question is which teams stop owning things, not how many paths
+moved. A run that only re-spells a handle reports no loss: owner identity is R-38a's.
+
 It is present **exactly when `status` is `applied`**: when this run changed the file, or
 under `--dry-run` would have. It is absent on `unchanged`, `skipped`, `refused` and
 `error`, because none of those wrote a byte and staging a path they named would either

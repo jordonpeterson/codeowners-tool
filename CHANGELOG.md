@@ -73,6 +73,19 @@ changes to which class a failure lands in are called out explicitly.
 - **docs/FLEET.md's resumable script no longer retires the repos it files for
   triage.** An exit-2 repo went into `needs-human` *and* `done.txt`, so the
   resume guard skipped it forever — including after a human fixed it. (#37)
+- **`sync` reports who LOSES access.** The record and `--summary-out` are what
+  docs/FLEET.md loops over, and for a displacing change they carried no
+  before-state at all: `changes` is line-level, an inserted rule has no previous
+  line, so `set_owners(*, [@acme/everyone])` over a repo with hand-curated
+  ownership reported `applied`, `5 path(s) change owners`, `warnings: null` —
+  and three teams had just lost a security directory. Nothing distinguished
+  co-owning five files from displacing five files' owners. The planner already
+  computed it; `owners_removed` now carries it per path, and `--summary-out`
+  gains an **Owners losing access** section grouped by owner, since the
+  reviewer's question is which teams stop owning things rather than how many
+  paths moved. Present only when access is actually lost, and a run that merely
+  re-spells a handle reports none: owner identity is R-38a's. Named the single
+  highest-value improvement by two independent user tests. (#32)
 - **`--summary-out`'s `proven` column stops doubling as the skip reason**, which
   put a full sentence where a reviewer scans for `tree` or `structural`. Reasons
   have their own column. (#41)

@@ -147,7 +147,25 @@ type SyncRecord struct {
 	DryRun   bool          `json:"dry_run,omitempty"`
 	Warnings []string      `json:"warnings,omitempty"`
 	Changes  []plan.Change `json:"changes,omitempty"`
-	Error    string        `json:"error,omitempty"`
+	// OwnersRemoved names, per path, the owners this run takes access AWAY
+	// from. `changes` is line-level and an `insert` has no previous line, so a
+	// displacing `set_owners` carried no before-state at all: the record said
+	// five paths CHANGED, never "three teams stop owning things". Nothing in
+	// the sync path distinguished co-owning five files from displacing five
+	// files' owners, and docs/FLEET.md is explicit that a rollout loops over
+	// sync, so at fleet scale the artifact that would catch it was the one you
+	// did not have. The planner already computes this; the key surfaces it.
+	//
+	// omitempty: present only when access is actually lost. A key on every
+	// record is a key a fleet stops reading.
+	OwnersRemoved []LostAccess `json:"owners_removed,omitempty"`
+	Error         string       `json:"error,omitempty"`
+}
+
+// LostAccess is one path and the owners that stop owning it.
+type LostAccess struct {
+	Path   string   `json:"path"`
+	Owners []string `json:"owners"`
 }
 
 // Sync statuses (R-24). "skipped" is distinct from "unchanged" so a policy
