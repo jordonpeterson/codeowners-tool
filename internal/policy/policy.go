@@ -635,7 +635,7 @@ func (v *validator) op(p *Policy, i int, e *jsonValue) opInfo {
 	// clause; an op naming a scope and no owners does not parse at all, so the
 	// array has to be there by the time ops.Parse sees the string.
 	if ownersM != nil {
-		spelled, ok := v.ownersArray(spec, ownersM, i, info.id)
+		spelled, ok := v.ownersArray(spec, specOff, ownersM, i, info.id)
 		if !ok {
 			return info
 		}
@@ -716,9 +716,11 @@ func (v *validator) op(p *Policy, i int, e *jsonValue) opInfo {
 // leave `verify` reporting a rollback-worthy invariant violation over what
 // `check` called a clean policy.
 //
-// The four refusals here are the ones the re-spelling cannot state for itself,
-// each about the array as a JSON value rather than about the owners it names.
-func (v *validator) ownersArray(spec string, m *member, i int, id string) (string, bool) {
+// The refusals written out here are the ones the re-spelling cannot state for
+// itself, each about the array as a JSON value rather than about the owners it
+// names. Where the OP STRING is what is wrong, the grammar's own diagnosis is
+// reported unchanged: an array riding on a typo must not rename that typo.
+func (v *validator) ownersArray(spec string, specOff int, m *member, i int, id string) (string, bool) {
 	val := m.val
 	if ops.SpelledKind(spec) == ops.RenameOwner {
 		// R-39c, the R-33f/R-27.4 reasoning one level up: falling through to
@@ -761,9 +763,25 @@ func (v *validator) ownersArray(spec string, m *member, i int, id string) (strin
 	}
 	spelled, ok := ops.WithOwners(spec, owners)
 	if !ok {
-		// Every element carries on its own, so what cannot carry the list is
-		// the op string: it names no scope for the owners to apply to.
-		v.at(val.off, i, id, `op %q cannot carry an "owners" array: an op names its scope and the array names its owners, so the op string has to state a scope (R-39a)`, spec)
+		// Every element carries on its own, so what cannot take the list is the
+		// op string. Two shapes reach here — text that is not an op at all
+		// (`add_owner(/x/`, ``) and an op whose argument list is empty
+		// (`add_owner()`) — and the grammar diagnoses both, in the same words
+		// the same typo gets when no array is present. Writing a sentence here
+		// instead is how `add_owner(/x/` came to be reported as an op that
+		// "has to state a scope", which is the one thing it does state: what it
+		// is missing is a closing paren, and an operator told otherwise goes
+		// looking at the scope (review finding). An `owners` array must never
+		// change what a syntax error is called.
+		if _, err := ops.Parse(spec); err != nil {
+			v.at(specOff, i, id, `op %q is not valid: %v`, spec, err)
+			return "", false
+		}
+		// Unreachable through the grammar as it stands: an op string Parse
+		// accepts states two arguments, and R-39b has already refused that
+		// pairing above. A verb with a one-argument form would land here, and
+		// waving the array through would attach it to nothing.
+		v.at(val.off, i, id, `op %q cannot carry an "owners" array (R-39a)`, spec)
 		return "", false
 	}
 	return spelled, true

@@ -3332,6 +3332,25 @@ name is the surprise this tool exists to avoid. Both subtests pass today
 and are here so a fix that folds owners on the way OUT — deduplicating the
 line while it is open — turns them red.
 
+### `TestR39a_AMalformedOpStringKeepsItsOwnDiagnosis`
+
+SPEC R-39a: an op string that is not an op keeps its OWN diagnosis when an
+`owners` array rides along. Adding the array must not turn a syntax error
+into a semantic one about a different thing.
+
+The defect (found by review of the first cut): `add_owner(/x/` — a missing
+closing paren — was reported as an op that "has to state a scope", which is
+the one thing it does state. The array-less spelling of the same typo says
+`malformed op "add_owner(/x/": want kind(args)`, which names the actual
+defect, and an operator told the scope is missing goes looking at the scope.
+
+The assertion is differential AND literal: each case runs the same op string
+with and without the array and demands the grammar's own words in both, and
+demands the misleading sentence appears in neither. A literal-only check
+would pass against an implementation that hard-coded these strings in the
+array path — a second copy of the grammar's messages, which is exactly what
+R-39a exists to prevent.
+
 ### `TestR39a_ArrayAndListSpellingsAreIndistinguishable`
 
 SPEC R-39a: the array spelling and the list spelling of one grant produce
@@ -6796,4 +6815,4 @@ DIFFERENT states; transitioning between them is a real ownership change.
 
 ---
 
-647 documented test cases across 13 packages.
+648 documented test cases across 13 packages.

@@ -956,3 +956,44 @@ func TestR39_ArrayPolicyIsValidatedAlongsideTheLintBlock(t *testing.T) {
 			`duplicate owner "@org/x" in one add_owner list`)
 	})
 }
+
+// SPEC R-39a: an op string that is not an op keeps its OWN diagnosis when an
+// `owners` array rides along. Adding the array must not turn a syntax error
+// into a semantic one about a different thing.
+//
+// The defect (found by review of the first cut): `add_owner(/x/` — a missing
+// closing paren — was reported as an op that "has to state a scope", which is
+// the one thing it does state. The array-less spelling of the same typo says
+// `malformed op "add_owner(/x/": want kind(args)`, which names the actual
+// defect, and an operator told the scope is missing goes looking at the scope.
+//
+// The assertion is differential AND literal: each case runs the same op string
+// with and without the array and demands the grammar's own words in both, and
+// demands the misleading sentence appears in neither. A literal-only check
+// would pass against an implementation that hard-coded these strings in the
+// array path — a second copy of the grammar's messages, which is exactly what
+// R-39a exists to prevent.
+func TestR39a_AMalformedOpStringKeepsItsOwnDiagnosis(t *testing.T) {
+	for _, tc := range []struct{ name, op, fragment string }{
+		{"missing the closing paren", `add_owner(/x/`, `malformed op "add_owner(/x/": want kind(args)`},
+		{"no argument list at all", `add_owner`, `malformed op "add_owner": want kind(args)`},
+		{"empty op string", ``, `malformed op "": want kind(args)`},
+		{"empty argument list", `add_owner()`, `add_owner takes (scope, owner) or (scope, [owners]), got 0 args`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// Without the array: the baseline this must not diverge from.
+			oaWantPolicyError(t, `{"version":1,"ops":[{"op":"`+tc.op+`"}]}`, tc.fragment)
+
+			src := `{"version":1,"ops":[{"op":"` + tc.op + `","owners":["@org/x"]}]}`
+			oaWantPolicyError(t, src, tc.fragment)
+
+			code, _, errOut := runCLI(t, "check", "--policy", oaPolicy(t, src))
+			if code != cli.ExitInvalid {
+				t.Fatalf("want exit 3, got %d\nstderr:\n%s", code, errOut)
+			}
+			if strings.Contains(errOut, "has to state a scope") {
+				t.Errorf("a malformed op string was reported as one that names no scope; the defect is the syntax, and the array is not what is wrong with it\ngot:\n%s", errOut)
+			}
+		})
+	}
+}
