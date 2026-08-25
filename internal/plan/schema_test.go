@@ -179,6 +179,7 @@ func fullPlan() plan.Plan {
 func TestR16_PlanTopLevelKeys(t *testing.T) {
 	wantKeys(t, "plan.Plan", topLevelKeys(t, fullPlan()), []string{
 		"ops",
+		"sha256_after",
 		"sha256_before",
 		"size_before",
 		"size_after",
@@ -236,6 +237,7 @@ func TestR16_FieldTypes(t *testing.T) {
 	}{
 		{"plan.Plan", fullPlan(), map[string]string{
 			"ops":            "array<string>",
+			"sha256_after":   "string",
 			"sha256_before":  "string",
 			"size_before":    "number",
 			"size_after":     "number",
@@ -293,7 +295,7 @@ func TestR16_OmitEmptyKeysDisappear(t *testing.T) {
 		{
 			name:    "plan.Plan",
 			value:   plan.Plan{},
-			want:    []string{"ops", "sha256_before", "size_before", "size_after", "changes", "ownership_rows", "diff", "after_content"},
+			want:    []string{"ops", "sha256_before", "sha256_after", "size_before", "size_after", "changes", "ownership_rows", "diff", "after_content"},
 			omitted: []string{"warnings", "op_results"},
 		},
 		{

@@ -1136,7 +1136,7 @@ func (r *syncRun) write(rel string, p *plan.Plan, creating bool) error {
 			return err
 		}
 	}
-	if err := apply.Apply(p, target); err != nil {
+	if _, err := apply.Apply(p, target); err != nil {
 		if creating {
 			// Never leave the empty seed behind: a zero-byte CODEOWNERS is a file
 			// that governs nothing while making every later run think one exists.

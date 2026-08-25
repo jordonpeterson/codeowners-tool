@@ -852,6 +852,38 @@ a bare line deletion.
 > token is never a value the flag package can render. These tests pin both halves:
 > the secret never appears in output, and $GITHUB_TOKEN is still honored.
 
+### `TestApply_RefusesPlanWithoutAfterHash`
+
+A plan with no sha256_after at all is refused rather than silently skipping
+the check. A missing integrity field must never be the easy way past it.
+
+### `TestApply_RefusesTamperedAfterContent`
+
+SPEC R-16: apply treats after_content as data to be CHECKED, not as an
+instruction to be obeyed. sha256_before covers the CODEOWNERS the plan was
+computed against — not the plan itself — so a plan corrupted, truncated, or
+hand-edited between review and apply used to be written without complaint.
+
+Observed before: `applied: .../CODEOWNERS (58 → 101 bytes)`, exit 0, and the
+file on disk was 18 bytes of `* @attacker/pwned`.
+
+### `TestApply_RefusesTruncatedAfterContent`
+
+Truncation is the accidental spelling of the same failure: a plan cut short
+in transit still parses as JSON and still carries a valid sha256_before.
+
+### `TestApply_ReportsMeasuredBytesNotThePlansClaim`
+
+SPEC: the success line reports the bytes the write actually moved, measured
+on disk. They used to be echoed from the plan's own size_before/size_after,
+so a tampered plan produced a confirmation message that was measurably false
+— 101 bytes reported for an 18-byte write.
+
+### `TestApply_UntamperedPlanStillApplies`
+
+An untampered plan still applies. The guard is worthless if it is not
+transparent on the path everybody actually uses.
+
 ### `TestCheck_BrokenPolicyExitsThree`
 
 SPEC R-22: `check` exits 3 on every member of the exit-3 class, and 3 only.
@@ -6815,4 +6847,4 @@ DIFFERENT states; transitioning between them is a real ownership change.
 
 ---
 
-648 documented test cases across 13 packages.
+653 documented test cases across 13 packages.

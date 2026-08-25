@@ -79,6 +79,17 @@ changes to which class a failure lands in are called out explicitly.
 
 ### Security
 
+- **`apply` verifies the plan, not just the file the plan was computed against.**
+  `sha256_before` covers the CODEOWNERS a plan was planned over; nothing covered
+  the plan, so a plan corrupted, truncated or hand-edited between review and
+  apply was written verbatim at exit 0 — and the success line's byte counts came
+  from the plan's own `size_before`/`size_after`, so the confirmation reported
+  101 bytes for an 18-byte write. Plans now carry `sha256_after` over
+  `after_content`, `apply` checks it, and a plan without the field is refused
+  rather than treated as a waived check. The bytes reported are measured on
+  disk. A plan is explicitly a reviewable artifact that travels between
+  generation and application, which is the window this closes. **Schema change:**
+  `sha256_after` is a new required key in the plan document.
 - **`install.sh` verifies build provenance, not just the checksum.** Releases
   already carried an attestation and nothing read it. `checksums.txt` ships on the
   same release from the same host, so it proves integrity in transit and nothing

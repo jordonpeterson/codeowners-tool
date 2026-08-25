@@ -639,10 +639,20 @@ func cmdApply(args []string, stdout, stderr io.Writer) int {
 	if err := refuseSymlinkedTarget(target); err != nil {
 		return errExit(err, stderr)
 	}
-	if err := apply.Apply(&pf.Plan, target); err != nil {
+	// A plan read off disk MUST carry its own integrity field. Treating a
+	// missing sha256_after as "no check requested" would make deleting one
+	// line of JSON the way past the check that exists to catch edited plans.
+	if pf.HashAfter == "" {
+		return errExit(&plan.InvalidError{Msg: fmt.Sprintf(
+			"%s has no sha256_after, so the plan's own contents cannot be verified; it was written by a version that predates the field — re-run plan", *planPath)}, stderr)
+	}
+	written, err := apply.Apply(&pf.Plan, target)
+	if err != nil {
 		return errExit(err, stderr)
 	}
-	fmt.Fprintf(stdout, "applied: %s (%d → %d bytes)\n", target, pf.SizeBefore, pf.SizeAfter)
+	// The plan's size_before/size_after are claims by the document being
+	// applied. These two numbers were measured on disk.
+	fmt.Fprintf(stdout, "applied: %s (%d → %d bytes)\n", target, written.Before, written.After)
 	return ExitOK
 }
 

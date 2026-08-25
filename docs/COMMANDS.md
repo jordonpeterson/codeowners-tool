@@ -91,10 +91,15 @@ codeowners-tool plan --op 'add_owner(/services/api/, @org/team-1)' --out plan.js
 codeowners-tool apply --plan plan.json
 ```
 
-A plan records `sha256_before`, `size_before`/`size_after`, `changes`, `ownership_rows`,
-`diff`, `after_content` and `op_results`. `sha256_before` is the drift gate (R-16):
-`apply` hashes the file it is about to write and refuses if it no longer matches, so a
-plan reviewed against one state cannot be applied to another.
+A plan records `sha256_before`, `sha256_after`, `size_before`/`size_after`, `changes`,
+`ownership_rows`, `diff`, `after_content` and `op_results`. Two hashes, two different
+jobs: `sha256_before` is the drift gate (R-16) — `apply` hashes the file it is about to
+write and refuses if it no longer matches, so a plan reviewed against one state cannot be
+applied to another. `sha256_after` pins `after_content` itself, so a plan corrupted,
+truncated or hand-edited between review and apply is refused rather than written. A plan
+carrying no `sha256_after` is refused too: a missing integrity field is not a waived
+check. The success line reports the bytes the write actually moved, measured on disk
+rather than read back out of the plan.
 
 A snapshot distinguishes the **two ways a path can have no owner**, and the difference is
 the point: `null` means no rule matched it — a gap nobody has addressed — while `[]` means
