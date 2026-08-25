@@ -60,6 +60,12 @@ matters to a fleet:
   happen to meet on a path this repo has — stays exit **2**, per repo, so the fleet loop
   records it and steps to the next clone.
 
+A `declare`d op is still checked per repo against the rest of its batch, because two
+declared rules both land at EOF and last-match-wins would settle their order silently.
+That check skips a pair whose other op scopes an anchored, wildcard-free path naming one
+tracked file (R-22b): a declared scope matches nothing tracked, and nothing can appear
+beneath a file, so the two can never meet.
+
 The static half is sound rather than complete: it reports only what `pattern.Contains`
 proves, because exit 3 halts a rollout and a false positive there is the expensive
 direction.

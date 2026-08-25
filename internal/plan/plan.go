@@ -380,6 +380,26 @@ func Build(content []byte, tree []string, opList []ops.Op, opts Options) (*Plan,
 			if skipped[i] || skipped[j] || (!declared[i] && !declared[j]) {
 				continue
 			}
+			// R-22b. The hazard above is two rules stacked at EOF, which needs
+			// BOTH ops declared; this loop fires on `declared[i] ||
+			// declared[j]`, so it also caught a declare paired with an op that
+			// resolved against the real tree. Where that op's scope names one
+			// tracked FILE, the two languages are disjoint permanently — a
+			// declared op matched ZERO tracked paths, so it cannot match a
+			// tracked file, and no path can appear beneath a file. Refusing
+			// the pair made "grant the bot .github/ but not
+			// .github/CODEOWNERS" — batched with the wildcard declares every
+			// fleet baseline carries — require two separate rollouts, because
+			// removing an owner never commutes with declaring an add of it.
+			if declared[i] != declared[j] {
+				concrete := i
+				if declared[i] {
+					concrete = j
+				}
+				if scopeIsExactTrackedFile(opList[concrete].Scope, scopeSets[concrete]) {
+					continue
+				}
+			}
 			if patternsProvablyDisjoint(opList[i].Scope, opList[j].Scope) {
 				continue
 			}
