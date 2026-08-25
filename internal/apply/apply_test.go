@@ -38,7 +38,7 @@ func TestApply_WritesPlannedContent(t *testing.T) {
 		t.Fatal(err)
 	}
 	p := makePlan(t, content, []string{"x/a.go"}, "add_owner(/x/, @b)")
-	if err := apply.Apply(p, path); err != nil {
+	if _, err := apply.Apply(p, path); err != nil {
 		t.Fatal(err)
 	}
 	got, _ := os.ReadFile(path)
@@ -62,7 +62,7 @@ func TestApply_RefusesDriftedFile(t *testing.T) {
 	if err := os.WriteFile(path, []byte("/x/ @a @someone-else\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	err := apply.Apply(p, path)
+	_, err := apply.Apply(p, path)
 	var inv *plan.InvalidError
 	if !errors.As(err, &inv) {
 		t.Fatalf("drifted file must be refused as invalid input, got %v", err)
@@ -84,9 +84,12 @@ func TestR10_RollbackOnNewInvalidLines(t *testing.T) {
 		t.Fatal(err)
 	}
 	p := makePlan(t, content, []string{"x/a.go"}, "add_owner(/x/, @b)")
-	// Sabotage the plan's after-content to simulate a writer defect.
-	p.AfterContent = "/x/ @a @b\n!broken @c\n"
-	err := apply.Apply(p, path)
+	// Sabotage the plan's after-content to simulate a writer defect. Set it
+	// through SetAfterContent so the plan stays self-consistent: an assignment
+	// that left sha256_after describing the OLD bytes would trip the plan
+	// integrity check first, and this test would stop being about R-10.
+	p.SetAfterContent([]byte("/x/ @a @b\n!broken @c\n"))
+	_, err := apply.Apply(p, path)
 	var ve *apply.ValidationError
 	if !errors.As(err, &ve) {
 		t.Fatalf("invalid write must be a ValidationError (exit 6), got %v", err)
@@ -107,7 +110,7 @@ func TestR10_PreexistingInvalidLinesDoNotBlock(t *testing.T) {
 		t.Fatal(err)
 	}
 	p := makePlan(t, content, []string{"x/a.go"}, "add_owner(/x/, @b)")
-	if err := apply.Apply(p, path); err != nil {
+	if _, err := apply.Apply(p, path); err != nil {
 		t.Fatalf("pre-existing invalid line must not block apply: %v", err)
 	}
 }
@@ -121,8 +124,10 @@ func TestApply_RefusesOversizedPlan(t *testing.T) {
 		t.Fatal(err)
 	}
 	p := makePlan(t, content, []string{"x/a.go"}, "add_owner(/x/, @b)")
-	p.AfterContent = p.AfterContent + string(make([]byte, 3_000_001))
-	err := apply.Apply(p, path)
+	// Self-consistent, for the same reason as above: this test is about the
+	// size cap apply re-checks independently, not about plan integrity.
+	p.SetAfterContent(append([]byte(p.AfterContent), make([]byte, 3_000_001)...))
+	_, err := apply.Apply(p, path)
 	var ref *plan.RefusalError
 	if !errors.As(err, &ref) {
 		t.Fatalf("oversized apply must be refused, got %v", err)
@@ -143,7 +148,7 @@ func TestApply_SymlinkPreserved(t *testing.T) {
 		t.Skipf("symlinks unavailable: %v", err)
 	}
 	p := makePlan(t, content, []string{"x/a.go"}, "add_owner(/x/, @b)")
-	if err := apply.Apply(p, link); err != nil {
+	if _, err := apply.Apply(p, link); err != nil {
 		t.Fatal(err)
 	}
 	if fi, err := os.Lstat(link); err != nil || fi.Mode()&os.ModeSymlink == 0 {
