@@ -105,11 +105,12 @@ func TestVerifyRefusesSnapshotsFromDifferentRepositories(t *testing.T) {
 //
 // D5's stated purpose is narrower than its effect: it exists so a nightly job
 // that created the file in pass 1 can converge in pass 2. It also silently
-// adopts a .gitignore'd CODEOWNERS, a template a provisioning script dropped
-// in, and a half-finished manual edit. governingWarnings() is the mechanism
-// for exactly this class ("Every condition below exits 0 and reports
-// 'applied' … invisible at fleet scale unless the run that touched the file
-// says so") and has no case for it.
+// adopts a template a provisioning script dropped in, a half-finished manual
+// edit, and — the subtest below — a CODEOWNERS the repo's own .gitignore says
+// can never be committed at all, which no amount of "commit it and re-run"
+// will fix. governingWarnings() is the mechanism for exactly this class
+// ("Every condition below exits 0 and reports 'applied' … invisible at fleet
+// scale unless the run that touched the file says so") and has no case for it.
 func TestSyncWarnsWhenGoverningCodeownersIsUntracked(t *testing.T) {
 	repo := initRepo(t, map[string]string{
 		"services/api/main.go": "",
@@ -143,6 +144,27 @@ func TestSyncWarnsWhenGoverningCodeownersIsUntracked(t *testing.T) {
 			"the INV-2 baseline this run proved against is one that has never existed\nstdout:\n%s\nstderr:\n%s",
 			code, stdout, stderr)
 	}
+
+	// The same fallback, on a file git has been told to never track.
+	t.Run("gitignored", func(t *testing.T) {
+		repo := initRepo(t, map[string]string{
+			".gitignore":           ".github/CODEOWNERS\n",
+			"services/api/main.go": "",
+		})
+		if err := os.MkdirAll(filepath.Join(repo, ".github"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(repo, ".github/CODEOWNERS"),
+			[]byte("* @org/every\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		code, stdout, stderr := runCLI(t, "sync", "--repo", repo, "--op", "add_owner(/services/api/, @org/platform)")
+		out := stdout + stderr
+		if code == cli.ExitOK && !strings.Contains(out, "ignor") && !strings.Contains(out, "untracked") {
+			t.Errorf("sync proved a change against a CODEOWNERS the repo's .gitignore forbids committing, exit 0\n"+
+				"no re-run can ever make this file the one GitHub reads\noutput:\n%s", out)
+		}
+	})
 }
 
 // FINDING: `snapshot` emits an ownership object with DUPLICATE keys when the

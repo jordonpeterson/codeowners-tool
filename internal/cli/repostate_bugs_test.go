@@ -50,7 +50,11 @@ func TestSubmoduleAtCodeownersLocationIsRefused(t *testing.T) {
 	sub := initRepo(t, map[string]string{"CODEOWNERS": "* @sub/owners\n"})
 	parent := initRepo(t, map[string]string{"services/api/main.go": "m\n"})
 
-	gitRun(t, parent, "-c", "protocol.file.allow=always", "submodule", "add", "-q", sub, ".github")
+	// A sandbox that forbids the file:// transport cannot build the fixture;
+	// that is an environment limit, not the finding.
+	if code, _, errOut := runGit(t, parent, "-c", "protocol.file.allow=always", "submodule", "add", "-q", sub, ".github"); code != 0 {
+		t.Skipf("cannot mount a local submodule here: %s", errOut)
+	}
 	gitRun(t, parent, "commit", "-qm", "mount shared .github")
 
 	// git's view: .github is a gitlink, so the parent tracks no CODEOWNERS.

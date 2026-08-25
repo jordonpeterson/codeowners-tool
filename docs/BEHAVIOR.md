@@ -277,6 +277,17 @@ a bare line deletion.
 > deleting the guard. The positive cases fail today with the R-8 refusal
 > quoted in TestR22b_ExactTrackedFileAgainstADeclareApplies.
 
+**`docexamples_test.go`**
+
+> The documented console blocks, executed. Each test below rebuilds the repo a
+> doc page describes, runs the command it prints, and compares against the
+> output the page claims — so a doc that has drifted from the tool fails here
+> rather than in a reader's terminal.
+>
+> Every test is a FAILING repro of a confirmed drift, written first per
+> CONTRIBUTING.md. Where the doc is the wrong half, the doc comment says so:
+> these pin the mismatch, not a preferred side.
+
 **`except_roundtrip_test.go`**
 
 > R-37's round trip, end to end: the `except` array is validated, applied and
@@ -4322,6 +4333,20 @@ cannot be read off the VALUE — it has to ask whether the flag was passed.
 Both readings are pinned here: passing it empty is an error, omitting it is
 how the plan's own repo field gets used.
 
+### `TestApplyPrintsTheDocumentedCodeownersPath`
+
+FINDING: docs/GUIDE.md documents `apply` as naming the CODEOWNERS
+repo-relative; it prints an absolute path.
+
+	documented: applied: .github/CODEOWNERS (58 → 101 bytes)
+	actual:     applied: /home/me/clones/api-service/.github/CODEOWNERS (58 → 101 bytes)
+
+The documented form is unreachable: apply joins the plan's `repo`, and
+COMMANDS.md states that field is recorded absolute. Every other number in
+the block still matches, so this is one path, and it is a real difference to
+anyone diffing rollout logs — the repo-relative name is stable across
+machines and the absolute one is not.
+
 ### `TestAuditJSONCleanIsPureJSON`
 
 Pre-release finding, fixed: `audit --format json` on a clean repo prints the literal line
@@ -4381,6 +4406,21 @@ Pre-release finding, fixed: the S-7 branch-mismatch refusal interpolates raw `gi
 --abbrev-ref --end-of-options HEAD` output, and rev-parse echoes the
 `--end-of-options` operator as an output line — so the one-line error (and
 the JSON record's error field) reads "HEAD is --end-of-options\nmain (…)".
+
+### `TestCommandsDocListsEveryFlagThatChangesBehavior`
+
+FINDING: docs/COMMANDS.md's synopses omit flags that change what the command
+does, and REFERENCE.md routes every flag lookup there — so the flags are
+documented nowhere.
+
+	plan     … [--repo DIR] [--branch REF] [--file PATH] [--out plan.json]
+	snapshot [--repo DIR] [--branch REF] [--out snap.json]
+
+`plan` also accepts `--max-size` (default 3,000,000 — the S-4 cliff) and
+`--warn-size` (2,500,000), both of which can turn a run into a refusal or a
+warning. `snapshot` also accepts `--file`, which decides which CODEOWNERS
+the ownership map is derived from — the one flag that can make `snapshot`
+answer about a file GitHub does not read.
 
 ### `TestCreateWithFileMustNotSupersedeTheGoverningCodeowners`
 
@@ -4470,6 +4510,41 @@ passes to git, never something the reader typed, and echoing it sends them
 hunting for a flag that does not exist. `plan` reports the same condition
 cleanly, so the three commands disagree about the same mistake.
 
+### `TestGuideBootstrapExample`
+
+FINDING: docs/GUIDE.md's bootstrap example drops the per-op lines from both
+blocks it prints — including the one line the prose then tells the reader to
+go and look for.
+
+	$ codeowners-tool check --policy bootstrap.json
+	ok: bootstrap.json — 4 op(s), no policy errors
+	$ codeowners-tool sync --policy bootstrap.json
+	applied: 4 op(s) applied, 0 skipped; 4 line change(s), 4 path(s) change owners
+	  created a new CODEOWNERS file
+
+`check` also echoes each op's resolved `on_zero_match` (this policy has a
+`declare`, so the echo fires), and `sync` also prints `ops[0..3]`, the last
+of them `applied (proven: structural)` — which GUIDE.md's own next paragraph
+says to look for. FLEET.md shows both echoes and reproduces exactly, so
+GUIDE is the outlier. The tool is right; the page is stale.
+
+### `TestLintRefusesCacheDirWithTheDocumentedReason`
+
+FINDING: docs/LINTING.md documents an error the `lint` verb cannot produce.
+
+Under "every error lint can print", the page lists:
+
+	**`--cache-dir is not available with --lint`** (exit 3). A cached "this
+	owner does not exist" is served without revalidation … here it deletes an
+	owner.
+
+`lint`'s flagset never defines `--cache-dir`, so the run dies in the flag
+package with `flag provided but not defined: -cache-dir` and a usage dump —
+no mention of caching, revalidation, or why the combination is refused. The
+documented message is reachable only through the older `audit --lint`
+spelling. The reasoning is worth keeping, so the fix is to make `lint`
+recognise the flag and refuse it with that sentence.
+
 ### `TestMissingFileTargetIsNotReportedAsNoCodeownersAnywhere`
 
 FINDING: `--file` naming a path that is not in the ref is refused with a
@@ -4501,6 +4576,26 @@ pattern matches zero tracked files is a git-tree fact the offline audit
 requested repair, the dry run should report the pending dead-rule removal
 (exit 4) instead of demanding a token; today the only offline remedy is the
 hand edit the tool exists to prevent.
+
+### `TestOperationsDocOwnerListExample`
+
+FINDING: docs/OPERATIONS.md's only worked example of naming several owners in
+one op prints the output of a DIFFERENT, one-op policy.
+
+The policy shown has two ops — the bracketed-list spelling and the `owners`
+array spelling, which the page is there to introduce — and the block under
+it reads:
+
+	$ codeowners-tool sync --policy ownership.json
+	applied: 1 op(s) applied, 0 skipped; 1 line change(s), 1 path(s) change owners
+	$ cat CODEOWNERS
+	/services/api/   @org/api-team @org/platform @org/sre
+
+The real run reports 2 ops / 2 line changes / 2 paths, prints a per-op line
+for each, and writes a `/docs/` rule the block does not show. A reader
+comparing the two concludes the `owners`-array op wrote nothing — the exact
+misreading the page exists to prevent. The tool is right here; the
+documentation is what needs fixing.
 
 ### `TestPlanApplyAndLintWarnWhenTheyWriteAFileGitHubWillNotRead`
 
@@ -4649,11 +4744,12 @@ has none, is never consulted.
 
 D5's stated purpose is narrower than its effect: it exists so a nightly job
 that created the file in pass 1 can converge in pass 2. It also silently
-adopts a .gitignore'd CODEOWNERS, a template a provisioning script dropped
-in, and a half-finished manual edit. governingWarnings() is the mechanism
-for exactly this class ("Every condition below exits 0 and reports
-'applied' … invisible at fleet scale unless the run that touched the file
-says so") and has no case for it.
+adopts a template a provisioning script dropped in, a half-finished manual
+edit, and — the subtest below — a CODEOWNERS the repo's own .gitignore says
+can never be committed at all, which no amount of "commit it and re-run"
+will fix. governingWarnings() is the mechanism for exactly this class
+("Every condition below exits 0 and reports 'applied' … invisible at fleet
+scale unless the run that touched the file says so") and has no case for it.
 
 ### `TestUnmergedCodeownersIsNotSilentlyRewritten`
 
@@ -7377,4 +7473,4 @@ DIFFERENT states; transitioning between them is a real ownership change.
 
 ---
 
-693 documented test cases across 13 packages.
+698 documented test cases across 13 packages.
