@@ -39,7 +39,7 @@ Ops that took this path report `"proven": "structural"` in the JSON and are call
 
 ## What `on_except_zero_match: allow` costs
 
-The same class of weakening, reachable from `except` ([POLICY-FILE.md](POLICY-FILE.md#except--carving-paths-out-of-a-scope-r-26r-32), R-28): an
+The same class of weakening, reachable from `except` ([OPERATIONS.md](OPERATIONS.md#except--carving-paths-out-of-a-scope-r-26r-32), R-28): an
 except pattern that matches nothing tracked means the carve-out the policy promises does
 not exist in this repo, so under `allow` the grant is written with **no carve line** — a
 matching file created later falls under the grant, and nothing in the repo today can

@@ -8,7 +8,8 @@
 | Look up | In |
 |---|---|
 | A command, a flag, an exit code | **[COMMANDS.md](COMMANDS.md)** |
-| A policy file field, an op, `except`, `on_empty`, the blast-radius ceiling | **[POLICY-FILE.md](POLICY-FILE.md)** |
+| A policy file field, `on_empty`, `create`, the blast-radius ceiling | **[POLICY-FILE.md](POLICY-FILE.md)** |
+| What an op means — owner lists, owner identity, `except` | **[OPERATIONS.md](OPERATIONS.md)** |
 | A JSON field from `sync`, `plan` or `snapshot` | **[JSON.md](JSON.md)** |
 | An audit check ID, a `lint` flag or stage | **[AUDIT.md](AUDIT.md)** |
 | What is proven, where it weakens, GitHub's semantics, why a decision went the way it did | **[GUARANTEES.md](GUARANTEES.md)** |
