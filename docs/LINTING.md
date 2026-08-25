@@ -34,7 +34,7 @@ $ echo $?
 ```
 
 Drop `--dry-run` to write it. Every flag is in
-[REFERENCE.md](REFERENCE.md#lint); the ones you will reach for:
+[AUDIT.md](AUDIT.md#lint); the ones you will reach for:
 
 | Flag | Why |
 |---|---|

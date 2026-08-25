@@ -79,7 +79,7 @@ reports `unchanged`, and every untouched byte survives: comments, blank lines, o
 
 Beyond `ops`, a policy carries `create` (permission to write a CODEOWNERS where a repo has
 none), `on_empty`, `max_paths_changed`, `defaults`, and a `lint` block — every field in
-[REFERENCE.md#policy-file-fields](docs/REFERENCE.md#policy-file-fields).
+[POLICY-FILE.md#policy-file-fields](docs/POLICY-FILE.md#policy-file-fields).
 
 > **One-off changes.** `--op 'add_owner(/docs/, @org/docs-team)'` runs a single op with no
 > file. It is for exploring; anything you'd want reviewed, or run twice, belongs in a policy.
@@ -100,7 +100,7 @@ CODEOWNERS pattern syntax; a space in a path is escaped with a backslash
 |---|---|
 | `add_owner(scope, owner)` | Owner (or `[owners]`) becomes a **co-owner**. Every pre-existing owner of every path in scope is kept. |
 | `set_owners(scope, [owners])` | This exact set owns every path in scope, displacing whoever owned it. `[]` is legal and deliberately un-owns the scope. |
-| `remove_owner(scope, owner)` | Owner (or `[owners]`) stops owning every path in scope. If that would empty a rule, you must say what happens — see [`on_empty`](docs/REFERENCE.md#--on-empty--on_empty-r-6). |
+| `remove_owner(scope, owner)` | Owner (or `[owners]`) stops owning every path in scope. If that would empty a rule, you must say what happens — see [`on_empty`](docs/POLICY-FILE.md#--on-empty--on_empty-r-6). |
 | `rename_owner(old, new)` | Global identifier substitution — the only op that is safe as plain text replacement. |
 
 `add_owner` and `set_owners` are the two you'll use most, and picking the wrong one is
@@ -115,7 +115,7 @@ the mistake the tool exists to prevent. Against `/services/api/ @org/api-team`:
 `set_owners` was asked for, explicitly. Editing the file by hand, both look like the same
 one-line edit. That's the trap: adding `/services/api/ @org/team-1` at the bottom of a
 file *silently* performs the second one. (An op can also carve out sub-paths with an
-`except` clause — see [REFERENCE.md#operations](docs/REFERENCE.md#operations).)
+`except` clause — see [POLICY-FILE.md#operations](docs/POLICY-FILE.md#operations).)
 
 **Two invariants hold on every write**, or the write doesn't happen:
 

@@ -1,4 +1,4 @@
-// Except-clause end-to-end tests (docs/except.md, R-26…R-32). Written ahead
+// Except-clause end-to-end tests (R-26…R-32). Written ahead
 // of the implementation per CONTRIBUTING.md; every negative case asserts a
 // message fragment as well as the exit code, because today the whole grammar
 // dies at checkScope's whitespace rule with exit 3 — the same code several of

@@ -60,7 +60,7 @@ same list:
 
 `declare` is how you get an identical baseline into every repo without editing it again
 each time someone adds a file — at the cost of a weaker guarantee, explained in
-[what `declare` costs](REFERENCE.md#what-declare-costs).
+[what `declare` costs](GUARANTEES.md#what-declare-costs).
 
 Check the policy before it reaches a single repo:
 
@@ -328,4 +328,4 @@ iterate over null` on the first repo that needed a human, which is the one you m
 to see. (A repo refused by the R-25 ceiling is the exception: it was planned, so it keeps
 `.ops`, every entry reported `unchanged`.)
 
-Full JSON shape: [REFERENCE.md](REFERENCE.md#json-output).
+Full JSON shape: [JSON.md](JSON.md).
