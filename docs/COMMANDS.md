@@ -101,6 +101,14 @@ carrying no `sha256_after` is refused too: a missing integrity field is not a wa
 check. The success line reports the bytes the write actually moved, measured on disk
 rather than read back out of the plan.
 
+A plan is also bound to the **repository and tree** it was computed in. `repo` is
+recorded absolute, so a plan applies from any working directory; passing `apply --repo` a
+different repository is refused rather than silently obeyed. `tree_sha256` fingerprints
+the tracked tree, and `apply` refuses when it has moved — the `ownership_rows` a human
+reviewed are facts about one tree, so a colleague's merge under a reviewed scope would
+otherwise widen the blast radius after approval. To roll one intent across many
+repositories, use `sync --policy`; a plan is per-repository by construction.
+
 A snapshot distinguishes the **two ways a path can have no owner**, and the difference is
 the point: `null` means no rule matched it — a gap nobody has addressed — while `[]` means
 a rule matched and deliberately un-owns it (S-9), which is a decision someone made and
