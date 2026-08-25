@@ -242,6 +242,17 @@ changes to which class a failure lands in are called out explicitly.
 
 ### Changed
 
+- **The Homebrew tap polls every ten minutes instead of hourly.** The formula has
+  tracked every release since the tap started pulling its own bump, but a merge to
+  `main` could sit up to an hour before `brew upgrade` saw it. Ten minutes is as
+  close to push-triggered as a pull design gets: notifying the tap from this
+  repository needs a token with write on the tap, which is the standing cross-repo
+  credential whose silent absence left the formula four releases stale, and which
+  `TestSupplyChain_NoWorkflowHoldsACrossRepositoryCredential` now rejects. A poll
+  that finds the formula current exits after one API call, so the extra runs cost
+  effectively nothing. The change is in `jordonpeterson/homebrew-tap`; nothing here
+  gained a secret.
+
 - **`rename_owner` substitutes in place.** It removed the old identifier and appended the
   new one, which preserves the owner set — GitHub cares about nothing else — but permutes
   every line that lists the renamed team alongside anyone else. The op is documented as

@@ -22,6 +22,10 @@ brew install jordonpeterson/tap/codeowners-tool
 > weaker of the two guarantees below. Verify the attestation directly if that matters to
 > you.
 
+The formula tracks releases on its own: `jordonpeterson/homebrew-tap` polls every ten
+minutes, verifies the release's build provenance, and regenerates the formula, so a new
+release is `brew upgrade`-able within about ten minutes of landing on `main`.
+
 ## Install script
 
 macOS and Linux. Downloads the right prebuilt binary, verifies its checksum *and its build
