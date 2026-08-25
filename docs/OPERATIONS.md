@@ -82,6 +82,20 @@ already says `@org/sre` is `unchanged` at exit 0 with the file byte-identical �
 file's spelling wins**, because restyling a handle nobody asked to change would churn a
 diff on every repository in a fleet. Conversely a removal takes every spelling with it.
 
+### Two reachability models, on purpose
+
+`remove_owner` is **path-scoped**: its scope is derived from tracked paths, so a rule whose
+pattern matches nothing today — a `declare`d rule, or one for a directory that has since
+gone — has no path to derive from and the op cannot reach it. `rename_owner` is **textual**
+and substitutes in place, so it reaches that same rule.
+
+This matters in a reorg, where both ops appear in one wave: renaming a team touches its
+dormant rules, dissolving one does not. A run that leaves such a rule naming an owner it
+was asked to remove now says so, naming the line, rather than reporting `unchanged` with
+no warnings — otherwise a fleet grouped on `.status` reads that repo as already correct
+while the owner keeps a claim that takes effect the moment a matching path appears. Clear
+the line with `lint --remove-stale-paths`, or by hand.
+
 ### `except` — carving paths out of a scope (R-26…R-32)
 
 An op's effective scope is `{tracked paths matching scope}` minus

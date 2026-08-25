@@ -73,6 +73,22 @@ changes to which class a failure lands in are called out explicitly.
 - **docs/FLEET.md's resumable script no longer retires the repos it files for
   triage.** An exit-2 repo went into `needs-human` *and* `done.txt`, so the
   resume guard skipped it forever — including after a human fixed it. (#37)
+- **A `remove_owner` that could not reach a dormant rule says so.** A rule whose
+  pattern matches zero tracked files is invisible to the op — its scope is
+  derived from paths, and a pattern matching nothing has no path to derive from
+  — so `remove_owner(*, @org/legacy)` reported `unchanged` at exit 0 with
+  `warnings: null` against a file still reading `/vendor/ @org/legacy`. In a
+  fleet grouped on `.status` that repo read as ALREADY CORRECT, and a dissolved
+  team kept a live claim that activates the moment somebody creates `vendor/`.
+  One reporter found it only by grepping the fleet for the handle after the tool
+  had declared it clean. The run now warns, naming the line and the owner, gated
+  on pattern containment so a narrower op stays quiet about rules it never
+  claimed to touch. The R-5 refusal reached by naming the dormant pattern
+  directly no longer says "refusing to create a dead rule" either: `remove_owner`
+  creates nothing, and blaming creation sent operators to the wrong argument.
+  `docs/OPERATIONS.md` now states the reachability difference between
+  `remove_owner` (path-scoped) and `rename_owner` (textual), which nothing did.
+  (#31)
 - **`--summary-out`'s `proven` column stops doubling as the skip reason**, which
   put a full sentence where a reviewer scans for `tree` or `structural`. Reasons
   have their own column. (#41)

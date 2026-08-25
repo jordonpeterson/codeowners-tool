@@ -3577,6 +3577,37 @@ wave was this?" is the first question asked of a `needs-human` pile. A field
 present only on success would be missing from exactly the records anyone
 goes back to.
 
+### `TestRemoveOwner_NarrowerScopeDoesNotWarnAboutUnrelatedDormantRules`
+
+The warning is scoped by PATTERN containment, so a narrower op does not
+report a dormant rule it never claimed to touch. remove_owner(/src/, …)
+says nothing about /vendor/.
+
+### `TestRemoveOwner_NoWarningWhenNothingIsLeftBehind`
+
+No dormant rule, nothing to say. The warning must not fire on the ordinary
+converged run, or a fleet learns to ignore it.
+
+### `TestRemoveOwner_WarnsAboutARuleItCannotReach`
+
+SPEC R-5/R-11: a rule whose pattern matches zero tracked files is invisible
+to remove_owner, because the op's scope is derived from paths. That is
+defensible — the op need not edit dormant rules — but reporting `unchanged`
+with `warnings: null` is not: in a fleet grouped on `.status`, the repo reads
+as ALREADY CORRECT while a dissolved team keeps a live claim that activates
+the moment somebody creates the directory.
+
+The reporter found this only by running `grep -rn 'org/legacy'` over the
+fleet after the tool had declared it clean — a step no documented workflow
+includes.
+
+### `TestRemoveOwner_ZeroMatchRefusalDoesNotTalkAboutCreating`
+
+SPEC R-5: the zero-match refusal is worded for the op that hit it. Naming a
+dormant rule's own pattern as the scope of a remove_owner used to be refused
+with "refusing to create a dead rule" — but the operator is not creating
+anything, they are trying to remove an owner from a rule that already exists.
+
 ### `TestRollout_AuditGateAfterADeclareBaseline`
 
 SPEC R-11/A-4: `audit --fail-on` lets the CI gate ride on the findings that
@@ -7001,4 +7032,4 @@ DIFFERENT states; transitioning between them is a real ownership change.
 
 ---
 
-672 documented test cases across 13 packages.
+676 documented test cases across 13 packages.
