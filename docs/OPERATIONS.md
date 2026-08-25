@@ -9,20 +9,26 @@ Scope is a directory, file path, or glob — same syntax as CODEOWNERS patterns.
 
 | Op | Meaning |
 |---|---|
-| `add_owner(scope, owner)` | Owner — or a bracketed list `[a, b]` (R-33) — becomes a **co-owner**; every pre-existing owner of every path in scope is retained. |
+| `add_owner(scope, owner)` | Owner — or a bracketed list `[a, b]` (R-33), or an `owners` array (R-39) — becomes a **co-owner**; every pre-existing owner of every path in scope is retained. |
 | `set_owners(scope, [owners])` | Exact owner set for every path in scope, displacing prior owners. `[]` is legal: it deliberately un-owns the scope. |
-| `remove_owner(scope, owner)` | Owner — or a bracketed list (R-33) — stops owning every path in scope. If a rule's owner set would empty, an `--on-empty` policy is **required**. |
+| `remove_owner(scope, owner)` | Owner — or a bracketed list (R-33), or an `owners` array (R-39) — stops owning every path in scope. If a rule's owner set would empty, an `--on-empty` policy is **required**. |
 | `rename_owner(old, new)` | Global identifier substitution — the only op safe as pure text replacement (it can't change any rule's match set). |
 
-### Naming several owners in one op (R-33)
+### Naming several owners in one op (R-33, R-39)
 
-`add_owner` and `remove_owner` take a bracketed list wherever they take a single owner.
-`set_owners` always took one:
+`add_owner` and `remove_owner` take a bracketed list wherever they take a single owner;
+`set_owners` always took one. There are two spellings, and they are the same op:
 
 ```json
 { "version": 1,
-  "ops": ["add_owner(/services/api/, [@org/platform, @org/sre])"] }
+  "ops": [ "add_owner(/services/api/, [@org/platform, @org/sre])",
+           { "op": "add_owner(/docs/)", "owners": ["@org/platform", "@org/sre"] } ] }
 ```
+
+The `owners` array (R-39) is for a generator that would rather emit JSON than build an op
+string. It goes on an op naming **only** its scope, and is re-spelled as the bracketed list
+before anything else sees it — so one grammar validates both, both are reported as the
+list, and a refusal about an array quotes the list form it became.
 
 ```console
 $ codeowners-tool sync --policy ownership.json
@@ -35,11 +41,12 @@ $ cat CODEOWNERS
 plan never shows an intermediate state that is not on disk at any point. Order inside the
 list fixes append order in the written line; it does not change resolved ownership.
 
-Four things are exit 3, caught by `check` with no repository open: a duplicate owner
-inside one list, an empty list on `add_owner`/`remove_owner` (`set_owners(scope, [])` stays
-legal and still means "nobody owns this"), a list on `rename_owner` (it renames one owner
-to one owner), and — per [R-38](#owner-identity-r-38) — two spellings of the same handle in
-one list.
+These are exit 3, caught by `check` with no repository open: a duplicate owner in one list,
+an empty list on `add_owner`/`remove_owner` (`set_owners` keeps it, still meaning "nobody
+owns this"), a list or an `owners` array on `rename_owner` (it renames one owner to one
+owner), owners in the op string **and** in an array at once (R-39b — one intent, one
+place), and — per [R-38](#owner-identity-r-38) — two spellings of the same handle in one
+list.
 
 #### Why the list is not just shorter
 

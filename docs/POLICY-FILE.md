@@ -20,6 +20,7 @@ flags in [COMMANDS.md](COMMANDS.md).
 | `id` | per op | no | Short label used in JSON results and error messages. |
 | `on_zero_match` | per op | no | `require` (default) \| `skip` \| `declare` |
 | `on_except_zero_match` | per op | no | `require` (default) \| `allow` — only on ops whose scope carries an `except` clause; governs an except pattern that matches zero tracked files ([OPERATIONS.md](OPERATIONS.md#except--carving-paths-out-of-a-scope-r-26r-32), R-28) |
+| `owners` | per op | no | The op's owners as a JSON array — `["@org/a", "@org/b"]` — on an op string naming only its scope, equivalent to the `(scope, [owners])` spelling and exit 3 alongside it (R-39). Not on `rename_owner`. |
 | `except` | per op | no | Carve-out as a JSON array — `["/.github/CODEOWNERS"]` — equivalent to the `<scope> except <pat> …` string spelling, and exit 3 alongside it (R-37). Array elements need no delimiter escaping, so a space is written plainly: `"my dir/"`. |
 | `note` | per op | no | Reaches the PR reviewer via `--summary-out`. |
 
