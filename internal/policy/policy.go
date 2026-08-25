@@ -38,7 +38,7 @@ const MaxPolicyBytes = 1 << 20
 // generator put the policy's description on op 17 and nothing would notice.
 var (
 	topFields = []string{"version", "name", "description", "create", "on_empty", "max_paths_changed", "defaults", "lint", "ops"}
-	opFields  = []string{"op", "id", "on_zero_match", "on_except_zero_match", "except", "note"}
+	opFields  = []string{"op", "id", "on_zero_match", "on_except_zero_match", "except", "owners", "note"}
 	// `defaults` carries the two genuinely PER-OP settings and nothing else
 	// (R-35c). on_empty is one policy for the run and stays top-level: two
 	// spellings of one setting is a precedence rule nobody wrote down.
@@ -564,7 +564,7 @@ func (v *validator) op(p *Policy, i int, e *jsonValue) opInfo {
 	info := opInfo{index: i, off: e.off, idOff: e.off}
 
 	spec, specOff := "", e.off
-	var zeroM, exceptM, exceptArrM *member
+	var zeroM, exceptM, exceptArrM, ownersM *member
 	note := ""
 
 	switch e.kind {
@@ -597,6 +597,8 @@ func (v *validator) op(p *Policy, i int, e *jsonValue) opInfo {
 				exceptM = m
 			case "except":
 				exceptArrM = m
+			case "owners":
+				ownersM = m
 			case "note":
 				note = v.optString(m, "note", i, info.id)
 			default:
@@ -628,11 +630,31 @@ func (v *validator) op(p *Policy, i int, e *jsonValue) opInfo {
 		exceptZero, exceptZeroOK = v.exceptZeroMatch(exceptM, i, info.id)
 	}
 
+	// R-39: the `owners` array is folded into the op string BEFORE parsing.
+	// `except` can be folded after, because an op string parses without its
+	// clause; an op naming a scope and no owners does not parse at all, so the
+	// array has to be there by the time ops.Parse sees the string.
+	if ownersM != nil {
+		spelled, ok := v.ownersArray(spec, ownersM, i, info.id)
+		if !ok {
+			return info
+		}
+		spec = spelled
+	}
+
 	parsed, err := ops.Parse(spec)
 	if err != nil {
 		// Letting ops.Parse's own text out would lose the file, the line, and the
 		// op index: the operator gets `unknown op "add_ownr"` with no idea which
 		// of 40 ops in which of 100 repos.
+		if ownersM != nil {
+			// The op string quoted here is the one the array was folded into,
+			// which is not the text in the file. Saying so is the difference
+			// between an operator finding the defect and hunting for a list
+			// they never wrote.
+			v.at(specOff, i, info.id, `op %q is not valid: %v (R-39a: an "owners" array is validated exactly as the (scope, [owners]) spelling it is equivalent to, shown here)`, spec, err)
+			return info
+		}
 		v.at(specOff, i, info.id, `op %q is not valid: %v`, spec, err)
 		return info
 	}
@@ -678,6 +700,100 @@ func (v *validator) op(p *Policy, i int, e *jsonValue) opInfo {
 		p.Notes[OpLabel(info.id, i)] = note
 	}
 	return info
+}
+
+// ownersArray decodes R-39's `owners` array by re-spelling the op string with
+// the bracketed list it is equivalent to, and hands that string back for
+// ops.Parse to validate.
+//
+// Re-spelling rather than decoding straight into Op.Owners is the point, and it
+// is the same argument R-37a made for `except`: every refusal the list grammar
+// already makes — a duplicate owner, a case-variant of one already named, an
+// invalid token, an empty list on a verb that cannot mean anything by it —
+// applies to the array for free and in the same words. A second copy of those
+// checks beside the array is how the two spellings drift: the array would keep
+// accepting `["@org/a", "@org/a"]` a year after the list stopped, write it, and
+// leave `verify` reporting a rollback-worthy invariant violation over what
+// `check` called a clean policy.
+//
+// The four refusals here are the ones the re-spelling cannot state for itself,
+// each about the array as a JSON value rather than about the owners it names.
+func (v *validator) ownersArray(spec string, m *member, i int, id string) (string, bool) {
+	val := m.val
+	if ops.SpelledKind(spec) == ops.RenameOwner {
+		// R-39c, the R-33f/R-27.4 reasoning one level up: falling through to
+		// "rename_owner takes no list" would name a construct the author did
+		// not write, and send them hunting a typo in their op string instead
+		// of learning the verb takes no array.
+		v.at(val.off, i, id, `rename_owner takes no "owners" array: it renames one owner to one owner, so there is no set for the array to state (R-39c)`)
+		return "", false
+	}
+	if ops.NamesOwners(spec) {
+		v.at(val.off, i, id, `this op names owners in its op string AND in an "owners" array; one intent, one place (R-39b) — keep either the `+"`(scope, [owners])`"+` spelling or the array, not both`)
+		return "", false
+	}
+	if val.kind != kArray {
+		v.at(val.off, i, id, `field "owners" must be an array of owner tokens like ["@org/team"], got %s (R-39a)`, val.describe())
+		return "", false
+	}
+	// An empty array is deliberately NOT refused here, unlike R-37d's empty
+	// `except`: emptiness states an intent for one verb and a defect for the
+	// others. `set_owners(scope, [])` is how "nobody owns this" is spelled,
+	// while an empty add or remove states nothing at all — a distinction the
+	// list grammar already draws (R-33d), and drawing it a second time here is
+	// how the two would come to disagree.
+	owners := make([]string, 0, len(val.elems))
+	for n, el := range val.elems {
+		if el.kind != kString {
+			v.at(el.off, i, id, `field "owners" element %d must be a string holding one owner, like "@org/team", got %s (R-39a)`, n, el.describe())
+			return "", false
+		}
+		if el.str == "" {
+			v.at(el.off, i, id, `field "owners" element %d is empty; every owner names an identity, and "" names none (R-39a)`, n)
+			return "", false
+		}
+		if bad := uncarryableOwnerChars(el.str); bad != "" {
+			v.at(el.off, i, id, `field "owners" element %d cannot be carried by an op string: %q contains %s, and an op is one string — a comma separates its arguments, brackets bound the owner list, and whitespace separates one owner from the next — so this text would be read as more than one owner rather than as one identity (R-39d). Only an email owner can reach this; a GitHub @handle cannot contain any of them`,
+				n, el.str, bad)
+			return "", false
+		}
+		owners = append(owners, el.str)
+	}
+	spelled, ok := ops.WithOwners(spec, owners)
+	if !ok {
+		// Every element carries on its own, so what cannot carry the list is
+		// the op string: it names no scope for the owners to apply to.
+		v.at(val.off, i, id, `op %q cannot carry an "owners" array: an op names its scope and the array names its owners, so the op string has to state a scope (R-39a)`, spec)
+		return "", false
+	}
+	return spelled, true
+}
+
+// uncarryableOwnerChars names the structural characters an owner token holds,
+// for the refusal above. Only an email owner can reach it: handleRe admits
+// none of these, while emailRe is `[^@\s]+@[^@\s]+\.[^@\s]+` and admits a
+// comma, a bracket and everything else that is not whitespace or a second @.
+//
+// It returns "" when the token is carryable, so the caller reads it as a test.
+func uncarryableOwnerChars(owner string) string {
+	var names []string
+	if strings.Contains(owner, ",") {
+		names = append(names, "a comma")
+	}
+	if strings.ContainsAny(owner, "[]") {
+		names = append(names, "a bracket")
+	}
+	if strings.ContainsAny(owner, " \t") {
+		names = append(names, "whitespace")
+	}
+	switch len(names) {
+	case 0:
+		return ""
+	case 1:
+		return names[0]
+	default:
+		return strings.Join(names[:len(names)-1], ", ") + " and " + names[len(names)-1]
+	}
 }
 
 // exceptArray decodes R-37's `except` array onto an op that has already

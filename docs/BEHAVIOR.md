@@ -505,6 +505,74 @@ a bare line deletion.
 > operator back the illegal advice with nothing failing. Pinning the flag-mode
 > bytes is what turns that drift into a red test.
 
+**`ownerarray_test.go`**
+
+> End-to-end tests for R-39: `owners` as a JSON array on a policy op.
+>
+> R-33 gave every owner-naming verb a bracketed list inside the op STRING.
+> R-37 gave `except` a JSON array beside the op string. R-39 closes the
+> asymmetry those two left: a generator emitting a policy can hand `except`
+> to the JSON encoder but has to string-build `[@a, @b]` for owners, quoting
+> and comma-joining by hand in the one field where a mistake grants the wrong
+> team. The array is the same fact as the list, so it is validated, applied
+> and REPORTED as the `(scope, [owners])` spelling it is equivalent to.
+>
+> 	{"op": "add_owner(/x/)", "owners": ["@a", "@b"]}
+> 	{"op": "add_owner(/x/, [@a, @b])"}
+>
+> Written ahead of the implementation per CONTRIBUTING.md. Vacuity has four
+> sources here, and every assertion below is shaped against them:
+>
+>   - Today `"owners"` on an op is an UNKNOWN FIELD, which is exit 3 — the
+>     same code most negative cases expect. Every negative case therefore
+>     also asserts a message fragment today's unknown-field error does not
+>     contain: either the requirement id "R-39", or the string spelling's own
+>     diagnosis of the same defect.
+>   - `policy.Error` renders the FILE first, so a fixture named owners.json
+>     would make "the message mentions owners" true by accident. Every policy
+>     here is written by oaPolicy, which names it p.json.
+>   - `t.TempDir()` embeds the test's own name in the path, and the path is in
+>     the message. No test below is named with a fragment any assertion looks
+>     for — in particular the requirement id is spelled "R-39" in assertions
+>     and "R39" in test names.
+>   - The word "owners" appears inside `set_owners` and inside `field
+>     "owners"` alike, so a bare "owners" fragment proves nothing. Assertions
+>     quote the field (`"owners"`) or cite the requirement.
+>
+> Where the array has a defect the string spelling already diagnoses — a
+> duplicate owner, an invalid token, an empty list on add_owner — the fragment
+> asserted is the STRING spelling's own message. R-39a says the two spellings
+> are equivalent in every respect, so an array that fails differently from the
+> list it is equivalent to is a defect, not a wording choice.
+>
+> Because the array is re-spelled as the bracketed list before anything else
+> sees it, an array and the LIST it is equivalent to produce byte-identical op
+> strings — so unlike R-37 these tests can compare the WHOLE per-op record,
+> `op` field included, rather than redacting it. That equality is the
+> requirement: it is what makes `results.jsonl` from an array-spelled wave
+> greppable by the same tooling as a hand-written one. The one exception is
+> the BARE single-owner spelling, which R-33a already declares to be the same
+> op as `[@a]`; that test compares outcomes rather than spelling, and says so.
+>
+> Mutating tests assert EXACT file bytes. Under last-match-wins (S-1) a
+> strings.Contains check over file content is satisfied by a file whose line
+> ORDER hands the scope to the wrong owners — and every claim here about a
+> grant, a carve or a displacement is a claim about that order.
+>
+> Three subtests are pins that pass today and are labeled as such: the
+> scope-only op string with no array is still an arity error, `set_owners`
+> still requires its brackets in the string spelling, and the string list is
+> unchanged. They freeze behavior R-39 promises not to disturb; everything
+> else fails until the feature lands.
+
+> ---------- R-39a: the array IS the bracketed list ----------
+
+> ---------- R-39a: the array is validated as the list it becomes ----------
+
+> ---------- R-39: the array under every other setting ----------
+
+> ---------- Pins: what R-39 promises NOT to change ----------
+
 **`ownerdup_test.go`**
 
 > R-33c end to end: an owner named twice in one list is a fact about the op
@@ -2283,6 +2351,173 @@ and /x/gen/** are one pattern spelled twice, and a string-equality check
 waves the pair through (R-27.3, and the adversarial-review finding behind
 TestR27_StaticExceptDefectsAreExit3).
 
+### `TestR39_ArrayIsComparedUnderTheOwnerIdentity`
+
+SPEC R-39/R-38: the array is compared under the one owner identity (R-38a),
+not by bytes. @handles fold on GitHub, so an array naming `@org/api-team`
+against a file spelling it `@org/API-Team` names an owner that is already
+there — and an implementation that decoded the array into its own comparison
+would report "applied" over a semantic no-op on every repository that
+capitalised a handle, which is the fleet-wide false diff R-38 exists to
+prevent.
+
+All three verbs are asserted, because the identity has to hold on the way in
+(add sees the owner as present), on the way through (set is satisfied) and on
+the way out (remove takes every spelling). The file's own spelling is
+preserved throughout: folding governs MATCHING, never output (R-38b), and a
+run that rewrote `@org/API-Team` to the array's spelling would put a diff in
+front of a reviewer that nobody asked for.
+
+### `TestR39_ArrayPolicyIsValidatedAlongsideTheLintBlock`
+
+SPEC R-39/R-36e: an array-spelled policy is validated whole, including the
+sections the running command does not act on. `sync` ignores the `lint`
+block and `lint` ignores `ops`, but a malformed half of either would
+otherwise ride through a whole fleet unseen — and a policy carrying both an
+`owners` array and a `lint` block is the shape a repository-wide baseline
+actually has.
+
+### `TestR39_ArrayShapeErrorsAreExit3`
+
+SPEC R-39: the array's SHAPE is checked before its contents. A generator
+that emits a bare string where an array belongs — the most common encoder
+mistake, and one JSON itself will not catch — must not have it read as a
+one-owner array by a decoder being helpful.
+
+The fragment is the requirement id and not `field "owners"`: today's
+unknown-field message is literally `unknown field "owners"`, so an assertion
+on the field name passes against a binary that never implemented the array.
+
+### `TestR39_BlastRadiusCountsPathsNotOwners`
+
+SPEC R-39/R-25: the blast-radius ceiling counts PATHS whose owners change,
+not owners named, so an array of five owners over one path is one path. The
+ceiling is the reviewed artifact's statement about how big this wave is; an
+implementation that counted owners would refuse every multi-owner policy
+under a sane ceiling.
+
+### `TestR39_CreateWritesTheFirstFileNamingEveryOwner`
+
+SPEC R-39/R-34: `create` writes a repository's first CODEOWNERS from an
+array-spelled policy, at the highest-precedence location (S-8), naming every
+owner on one line. A fleet wave that creates files is exactly where a
+per-owner append bug would produce N one-owner lines and let last-match-wins
+hand the scope to whichever owner sorted last.
+
+### `TestR39_DefaultsBlockReachesAnArraySpelledOp`
+
+SPEC R-39/R-35: a `defaults` block reaches an array-spelled op exactly as it
+reaches a string-spelled one. The block supplies what an op does not state,
+and an implementation that resolved defaults against the op string before
+the array was folded in would leave array-spelled ops running under R-5's
+require while `check` echoed the default — the resolved echo and the run
+disagreeing, which is the one thing R-35b exists to prevent.
+
+### `TestR39_DryRunPreviewsTheArrayWithoutWriting`
+
+SPEC R-39/R-19: `--dry-run` previews an array-spelled policy and writes
+nothing. The record must still name every owner: the preview is what an
+operator reads before letting the wave run, and one that under-reported the
+grant would be worse than no preview at all.
+
+### `TestR39_MixedSpellingsAndVerbsInOneWave`
+
+SPEC R-39: a real wave mixes spellings and verbs in one policy, and the
+result must not depend on which op was written which way. Four ops, two
+spellings, three verbs, one run — the shape of an actual migration, where a
+generator emits arrays for the ops it computes and a human hand-writes the
+one-off.
+
+Exact bytes over the whole file, because the interesting failure here is not
+a missing owner but a line ORDER that resolves a path to the wrong one.
+
+### `TestR39_OnEmptyDisposesAnArrayRemoval`
+
+SPEC R-39/R-6: an array-spelled removal reaches `on_empty` like any other.
+The three dispositions are asserted together because they are one decision
+with three answers, and because `inherit` and `unowned` produce files that
+differ by one line whose absence changes what GitHub does with the path.
+
+### `TestR39_OneOwnerMayAppearInSeveralOps`
+
+SPEC R-39/R-33c: the duplicate rule is per LIST, not per policy. Two ops may
+name the same owner — that is an ordinary wave granting one team several
+scopes — and only a repeat inside one array is the generator bug R-33c
+refuses. An implementation that hoisted the check to the policy would refuse
+the most common multi-op policy there is.
+
+### `TestR39_OwnersAndExceptArraysOnOneOp`
+
+SPEC R-39/R-37: the two JSON-shaped features on ONE op. `owners` and
+`except` together are where a hand-written decoder drops one of them, and
+where the order they are folded into the op string matters: owners becomes
+the second argument, except a clause on the first, and an implementation
+that spliced them in the wrong order produces an op string that parses as a
+DIFFERENT op.
+
+Exact bytes assert both halves — the broad grant carries both owners, and
+the carve line restates the excepted path's current owners and sits AFTER
+the line it corrects, so last-match-wins (S-1) resolves the excepted path to
+the owners it had rather than to the grantees.
+
+### `TestR39_OwnersIsAPerOpFieldAndNowhereElse`
+
+SPEC R-39/R-35c: `owners` is a per-OP field and belongs nowhere else. A
+`defaults` block supplying owners would be a fleet-wide grant stated once,
+far from the ops it silently joins — the ambiguity R-35c exists to remove,
+one field worse. The top level is refused for the same reason.
+
+Both refusals are the unknown-field message, which names the set the level
+does accept, so the fragment asserted is that set rather than R-39: this is
+a claim that the field did NOT spread, and the evidence is the accept-list
+staying as it was.
+
+### `TestR39_PinsBehaviorTheArrayDoesNotDisturb`
+
+SPEC R-39: the string spellings R-33 shipped are untouched. These three
+subtests PASS TODAY and are pins, not specifications of new behavior: a
+feature that made a scope-only op string legal on its own, or relaxed
+`set_owners`' brackets as a side effect, would change what an existing
+policy means without anyone editing it.
+
+The first two are the errors an operator sees when they forget the array
+entirely — they must stay the arity message, which names the two legal
+spellings, rather than becoming a message about a field the policy does not
+mention.
+
+### `TestR39_R8CommutationSeesEveryOwnerInTheArray`
+
+SPEC R-39/R-8: commutation is decided over every owner the ARRAY names. An
+implementation that folded the array in after ops.StaticConflict ran would
+compare two ops that name no owners at all, find every pair commuting, and
+admit an order-dependent batch — at exit 0, into a hundred repositories,
+which is precisely what R-8 exists to prevent.
+
+The commuting pair is asserted alongside the refusal: an implementation that
+refused every array-carrying batch to be safe would satisfy the first half
+and break every real policy.
+
+### `TestR39_SummaryNamesEveryOwnerFromTheArray`
+
+SPEC R-39/R-24: the PR body a reviewer reads names every owner the array
+grants. `--summary-out` is the one artifact a human sees before merging a
+hundred near-identical PRs; an array-spelled op rendered as
+`add_owner(/docs/)` would put a grant naming nobody in front of the only
+person positioned to catch it.
+
+### `TestR39_ZeroMatchDisposesTheOpNotTheOwners`
+
+SPEC R-39/R-21: the array changes WHO an op names, never WHETHER it runs. A
+zero-match scope is still disposed of by on_zero_match: require refuses this
+repo naming the SCOPE (the owners are not why it refused), skip is a clean
+no-op that writes nothing at all, and declare writes ONE line carrying every
+owner in the array — the R-33b shape on the path where no tracked file
+exists to fold against.
+
+The declare case is where an implementation that appended owners one at a
+time shows itself: two lines, or one line rewritten twice, in a repository
+where nothing tracked matches and structure is the whole proof (INV-6).
+
 ### `TestR22b_CheckCannotDecideDeclaredPairs`
 
 SPEC R-22b: `check` reads no repository, so it cannot reach any of this.
@@ -3096,6 +3331,129 @@ Repair is `lint`'s verb; a sync that quietly edits what the policy did not
 name is the surprise this tool exists to avoid. Both subtests pass today
 and are here so a fix that folds owners on the way OUT — deduplicating the
 line while it is open — turns them red.
+
+### `TestR39a_ArrayAndListSpellingsAreIndistinguishable`
+
+SPEC R-39a: the array spelling and the list spelling of one grant produce
+the same file, byte for byte, and the same record — the echoed `op` string
+included, because the array is re-spelled as the list before anything else
+sees it. That echo is not cosmetic: `results.jsonl` from a hundred repos is
+grepped and aggregated by op string, and an array-spelled wave whose records
+said `add_owner(/services/api/)` would report a grant naming nobody.
+
+### `TestR39a_ArrayIsIdempotentAndAddsOnlyWhatIsMissing`
+
+SPEC R-39a: the array is idempotent and adds only what is missing, exactly as
+the list is. The second run of a converged policy must be byte-identical —
+the property a fleet depends on to tell "already done" from "changed", and
+the one an implementation that appends the whole array unconditionally
+breaks on run two.
+
+### `TestR39a_ArrayOrderFixesAppendOrderNotResolution`
+
+SPEC R-39a/R-33e: array order fixes the APPEND order in the written line and
+nothing else. The bytes differ between two orders — that is what "order is
+preserved" means, and a writer that sorted would violate it — while the
+resolution is identical, because owners are a set to GitHub.
+
+The oracle for the second half is `snapshot`, not the file: a test that
+asserted only bytes would pass against an implementation that wrote the
+owners in a line the resolver never reaches.
+
+### `TestR39a_ArrayReachesEveryOwnerNamingVerb`
+
+SPEC R-39a: the array reaches every verb that names owners, not just
+add_owner. A feature that carved only for add_owner would push generators
+straight back to string-building for the two verbs where a mistake is
+destructive — `set_owners` displaces, `remove_owner` revokes.
+
+Each case asserts the whole outcome, not just that something changed:
+set_owners must drop @org/api-team (that is the difference from add_owner),
+and remove_owner must leave the line with the survivors and not delete it.
+
+### `TestR39a_EmptyArrayFollowsTheVerb`
+
+SPEC R-39a/R-33d: an empty array follows the VERB, exactly as an empty list
+does. `set_owners(scope, [])` is how "nobody owns this" is spelled and stays
+legal; an empty add or remove states no intent at all and is exit 3.
+
+This is the one place the owners array must NOT copy R-37d's blanket refusal
+of an empty `except` array: emptiness means something here. A generator that
+computes an owner set and finds it empty is making a statement when the verb
+is set_owners and has a bug when it is not.
+
+### `TestR39a_SingleElementArrayEqualsTheBareForm`
+
+SPEC R-39a/R-33a: a one-element array is the bare single-owner form, byte for
+byte in the FILE. R-33a made that promise for `[@a]` inside the op string; a
+generator that emits an array of length one for a one-owner intent — which
+every generator does, because the length is data — must not produce a
+different file from a human typing `@a`.
+
+The echoed op string is the one thing that legitimately differs: the array is
+always re-spelled as a list, so it reports itself as `add_owner(/docs/,
+[@org/x])` where the hand-written op says `add_owner(/docs/, @org/x)`. R-33a
+is precisely the statement that those two are the same op, so the assertion
+here is over the bytes, the changes and the op's outcome — never over the
+spelling. Asserting spelling equality would force a one-element special case
+into the re-speller, which is a rule that buys nothing and one more place for
+the two spellings to diverge.
+
+### `TestR39a_TheArrayInheritsEveryListRefusal`
+
+SPEC R-39a: every refusal the bracketed list makes is the array's refusal
+too, in the STRING spelling's own words. A second copy of these checks
+beside the array is how the two would drift — the array would still accept a
+duplicate owner a year after the list stopped, and `verify` would report a
+rollback-worthy invariant violation over a policy `check` called clean.
+
+The duplicate cases are the ones that need both spellings asserted: an
+owner named twice is a fact about the TEXT, so it is exit 3 on every
+repository rather than a per-repo refusal, and case-variant handles are one
+owner under R-38a because GitHub folds them.
+
+### `TestR39b_OwnersInBothPlacesIsExit3`
+
+SPEC R-39b: one intent, one place. An op naming owners in its op string AND
+in an `owners` array is exit 3 before any repo is read — a policy whose two
+halves might disagree must never reach a decision about which one wins.
+Silently preferring either one grants a team somebody reviewed out, or drops
+one they reviewed in, in a diff where both spellings are visible and neither
+is marked dead.
+
+Both string spellings are covered: the bare owner and the bracketed list.
+An implementation that detected the conflict by "does the op string parse"
+catches the first and misses neither — but one that looked for a `[` catches
+only the second.
+
+The fragment is the requirement id: today this policy dies with `unknown
+field "owners"`, which contains the word owners and the word field, so any
+obvious semantic fragment passes vacuously against a binary that does not
+implement the array at all.
+
+### `TestR39c_RenameOwnerTakesNoOwnersArray`
+
+SPEC R-39c: `rename_owner` takes no `owners` array, in the same way and for
+the same reason it takes no list (R-33f) and no `except` (R-27.4): it names
+one owner and one replacement, both required, neither a set. Falling through
+to a message about arity or about a list nobody wrote sends the operator
+hunting a typo instead of learning the verb takes no array.
+
+### `TestR39d_ElementTheOpStringCannotCarryIsExit3`
+
+SPEC R-39d: an element is one owner token, and the array is not a delimited
+string — so an element carrying a character the op string uses as structure
+is refused in the operator's terms rather than silently read as two owners.
+
+Only an email owner can reach this: `handleRe` admits none of these
+characters, while `emailRe` is `[^@\s]+@[^@\s]+\.[^@\s]+` and admits a comma
+and a bracket. `a,b@x.com` spliced into an op string re-splits into the two
+owners `a` and `b@x.com`, and `a]b@x.com` closes the list early — one input
+landing on two identities, in the field where that is a grant to a stranger.
+
+The control matters as much as the refusals: an ordinary email owner is
+legal in the array (R-13), and an implementation that refused every email to
+be safe would break the one owner form GitHub allows for individuals.
 
 ### `TestRecord_OpRunOmitsThePolicyKey`
 
@@ -4723,6 +5081,15 @@ it claimed to be. Only an org owner sees secret teams.
 > Package ops_test defines the intent language: operations are expressed
 > over resolved ownership, never over lines (§1 of the spec).
 
+### `TestNamesOwners_IsAboutArityNotBrackets`
+
+SPEC R-39b: NamesOwners is the question "does this op string already state
+its owners", asked before the op parses. Arity is the test, not a search for
+a bracket: `add_owner(/x/, @a)` states owners exactly as much as the list
+spelling does, and an implementation looking for `[` would let that op carry
+an `owners` array too — one intent in two places, with nothing to say which
+half wins when the next generator run changes only one of them.
+
 ### `TestParse_AddOwner`
 
 (no doc comment)
@@ -4797,6 +5164,13 @@ line "a b @x" re-parses as pattern "a" owned by "b" — a different, valid
 rule that silently breaks both invariants (review finding). CODEOWNERS
 spells such patterns with escaped spaces, and so must ops.
 
+### `TestSpelledKind_ReadsTheVerbBeforeTheOpParses`
+
+SPEC R-39c: SpelledKind reads the verb off text that may not parse yet, which
+is the only thing available when deciding whether an op may carry an `owners`
+array at all — a scope-only op string does not parse until the array has been
+folded into it.
+
 ### `TestWithExcept_RoundTripsOrRefuses`
 
 SPEC R-37a/R-37e: WithExcept writes the one string the array spelling is
@@ -4809,6 +5183,26 @@ clause as another argument (the arity error that followed named an owner
 list nobody wrote), and a trailing backslash escapes the space in front of
 the next pattern, silently merging two carve-outs into one pattern that
 matches nothing.
+
+### `TestWithOwners_RoundTripsOrRefuses`
+
+SPEC R-39a: WithOwners writes the one string an `owners` array is validated,
+applied and reported as — so what it returns has to re-parse to the same
+intent, and it has to REFUSE what an op string cannot carry rather than
+return something that parses as a different op.
+
+The refusals are the ones only an email owner can reach: `handleRe` admits
+none of these characters, while `emailRe` is `[^@\s]+@[^@\s]+\.[^@\s]+` and
+admits a comma and a bracket. `a,b@x.com` spliced in re-splits into the two
+owners `a` and `b@x.com` — one input landing on two identities, in the field
+where that is a grant to a stranger.
+
+The scope argument is re-emitted as Parse itself reads it, which normalizes
+space around it (`add_owner( /x/ )`). That is deliberate and safe: the
+re-spelled op is what the operator is shown and what they can re-run, and
+both strings parse to the same scope. Escaped whitespace INSIDE the scope is
+a different matter and is preserved exactly — `/x\ y/` names a path with a
+space in it, and losing that escape names a different path.
 
 ## internal/pattern
 
@@ -6402,4 +6796,4 @@ DIFFERENT states; transitioning between them is a real ownership change.
 
 ---
 
-618 documented test cases across 13 packages.
+647 documented test cases across 13 packages.
