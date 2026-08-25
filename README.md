@@ -87,9 +87,15 @@ Where an op takes an owner it also takes a bracketed **list** —
 `add_owner(/services/api/, [@org/platform, @org/sre])` — one line change rather than two, and
 for `remove_owner` [the only always-correct spelling](docs/OPERATIONS.md#naming-several-owners-in-one-op-r-33).
 
-There are four — `add_owner`, `set_owners`, `remove_owner`, `rename_owner`
-([what each means](docs/OPERATIONS.md#operations)) — and picking wrong between the first
-two is the mistake this tool exists to prevent. Against `/services/api/ @org/api-team`:
+| Op | What it means |
+|---|---|
+| `add_owner(scope, owner)` | Owner (or `[owners]`) becomes a **co-owner**. Every pre-existing owner of every path in scope is kept. |
+| `set_owners(scope, [owners])` | This exact set owns every path in scope, displacing whoever owned it. `[]` is legal and deliberately un-owns the scope. |
+| `remove_owner(scope, owner)` | Owner (or `[owners]`) stops owning every path in scope. If that would empty a rule, you must say what happens — see [`on_empty`](docs/POLICY-FILE.md#--on-empty--on_empty-r-6). |
+| `rename_owner(old, new)` | Global identifier substitution — the only op that is safe as plain text replacement. |
+
+`add_owner` and `set_owners` are the two you'll use most, and picking the wrong one is the
+mistake this tool exists to prevent. Against `/services/api/ @org/api-team`:
 
 | The op in your policy | The line afterwards |
 |---|---|
@@ -180,20 +186,14 @@ script and the `jq` habits that stop a silent no-op looking like success:
 - **[FLEET.md](docs/FLEET.md)** — rolling one policy across many repos.
 - **[CONCEPTS.md](docs/CONCEPTS.md)** — glossary, and habits that save you.
 - **[BEHAVIOR.md](docs/BEHAVIOR.md)** — generated from the tests; every `R-`, `S-`, `INV-` and `A-` id is looked up here.
-- **[INSTALL.md](docs/INSTALL.md)** — every install route, provenance verification, GHES.
+- **[TESTING.md](docs/TESTING.md)** — what the suite proves; **[INSTALL.md](docs/INSTALL.md)** — every install route, provenance, GHES.
 - **[CONTRIBUTING.md](CONTRIBUTING.md)** · **[SECURITY.md](SECURITY.md)** · **[CHANGELOG.md](CHANGELOG.md)**
 
 ## Tests as documentation
 
-The test suite is the specification: every test carries a doc comment naming the
-requirement it enforces, and `make docs` regenerates [BEHAVIOR.md](docs/BEHAVIOR.md) from
-those comments, so the docs cannot drift from what is verified. On top of unit and
-end-to-end tests: a 500k-case differential fuzz against the
-[hmarr/codeowners](https://github.com/hmarr/codeowners) matcher as an oracle, and property
-tests proving INV-1/INV-2 and idempotence by independent re-resolution.
+The test suite is the specification and BEHAVIOR.md is generated from it — what that
+proves, and how: **[docs/TESTING.md](docs/TESTING.md)**.
 
 ## License
 
-MIT. The pattern matcher is ported from, and differentially tested against,
-[hmarr/codeowners](https://github.com/hmarr/codeowners) (MIT, © Harry Marr) — see
-[NOTICE](NOTICE).
+MIT — see **[LICENSE](LICENSE)**, and **[NOTICE](NOTICE)** for vendored-code attribution.
