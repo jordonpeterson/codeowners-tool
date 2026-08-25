@@ -4113,6 +4113,22 @@ It used to exit 2 with "INVARIANT VIOLATED: 1 path(s) changed outside the
 declared scope", because two snapshots taken from different refs differ in
 their trees on every real pull request.
 
+### `TestVerify_DeclaredScopeViolationKeepsTheLoudName`
+
+With scopes declared, a change outside them IS the invariant failing, and
+keeps the loud name — plus the reminder that --scope is repeatable, which is
+what the under-declared case actually needs.
+
+### `TestVerify_NoScopeFailureIsNotShouted`
+
+SPEC R-18: `verify` reserves its loudest string for the case it is about.
+With no --scope the command means "assert nothing changed" — a query whose
+negative answer is information, not an alarm. Three of five user tests
+flagged the old wording independently: a platform engineer re-read the
+README twice, a repo owner running the documented post-merge recipe called
+it "a scary word for a routine query", and a reorg manager got one from an
+unquoted `--scope *` the shell had expanded.
+
 ### `TestVerify_RemovedFileIsReportedNotFatal`
 
 A path leaving the tree is the mirror case: no after, so nothing INV-2
@@ -6875,4 +6891,4 @@ DIFFERENT states; transitioning between them is a real ownership change.
 
 ---
 
-656 documented test cases across 13 packages.
+658 documented test cases across 13 packages.

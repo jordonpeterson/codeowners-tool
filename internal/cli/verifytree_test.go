@@ -142,3 +142,73 @@ func TestVerify_RemovedFileIsReportedNotFatal(t *testing.T) {
 		t.Errorf("the removed path must be reported, got:\n%s", out)
 	}
 }
+
+// SPEC R-18: `verify` reserves its loudest string for the case it is about.
+// With no --scope the command means "assert nothing changed" — a query whose
+// negative answer is information, not an alarm. Three of five user tests
+// flagged the old wording independently: a platform engineer re-read the
+// README twice, a repo owner running the documented post-merge recipe called
+// it "a scary word for a routine query", and a reorg manager got one from an
+// unquoted `--scope *` the shell had expanded.
+func TestVerify_NoScopeFailureIsNotShouted(t *testing.T) {
+	dir := initRepo(t, map[string]string{
+		".github/CODEOWNERS": "* @org/all\n",
+		"a.go":               "x\n",
+	})
+	before := filepath.Join(t.TempDir(), "before.json")
+	if code, _, e := runCLI(t, "snapshot", "--repo", dir, "--out", before); code != 0 {
+		t.Fatalf("snapshot: %d %s", code, e)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".github", "CODEOWNERS"), []byte("* @org/other\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	commitAll(t, dir, "reassign")
+	after := filepath.Join(t.TempDir(), "after.json")
+	if code, _, e := runCLI(t, "snapshot", "--repo", dir, "--out", after); code != 0 {
+		t.Fatalf("snapshot: %d %s", code, e)
+	}
+
+	code, _, errOut := runCLI(t, "verify", "--before", before, "--after", after)
+	if code != cli.ExitRefused {
+		t.Fatalf("the exit-code contract is unchanged: got %d, want %d", code, cli.ExitRefused)
+	}
+	if strings.Contains(errOut, "INVARIANT VIOLATED") {
+		t.Errorf("no scope was declared, so no invariant was violated: %s", errOut)
+	}
+	if !strings.Contains(errOut, "--scope") {
+		t.Errorf("the message must point at the flag the operator probably wanted: %s", errOut)
+	}
+}
+
+// With scopes declared, a change outside them IS the invariant failing, and
+// keeps the loud name — plus the reminder that --scope is repeatable, which is
+// what the under-declared case actually needs.
+func TestVerify_DeclaredScopeViolationKeepsTheLoudName(t *testing.T) {
+	dir := initRepo(t, map[string]string{
+		".github/CODEOWNERS": "* @org/all\n",
+		"web/app.js":         "y\n",
+	})
+	before := filepath.Join(t.TempDir(), "before.json")
+	if code, _, e := runCLI(t, "snapshot", "--repo", dir, "--out", before); code != 0 {
+		t.Fatalf("snapshot: %d %s", code, e)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".github", "CODEOWNERS"), []byte("* @org/all\n/web/ @attacker\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	commitAll(t, dir, "reassign web")
+	after := filepath.Join(t.TempDir(), "after.json")
+	if code, _, e := runCLI(t, "snapshot", "--repo", dir, "--out", after); code != 0 {
+		t.Fatalf("snapshot: %d %s", code, e)
+	}
+
+	code, _, errOut := runCLI(t, "verify", "--before", before, "--after", after, "--scope", "/services/api/")
+	if code != cli.ExitRefused {
+		t.Fatalf("exit %d, want %d", code, cli.ExitRefused)
+	}
+	if !strings.Contains(errOut, "INVARIANT VIOLATED") {
+		t.Errorf("a declared scope really was exceeded; keep the loud name: %s", errOut)
+	}
+	if !strings.Contains(errOut, "repeatable") {
+		t.Errorf("the under-declared case is the common one; say --scope repeats: %s", errOut)
+	}
+}

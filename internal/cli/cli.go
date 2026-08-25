@@ -730,7 +730,19 @@ func cmdVerify(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stdout, "removed: %s  %s\n", c.Path, fmtOwners(c.Before))
 	}
 	if !res.OK() {
-		fmt.Fprintf(stderr, "INVARIANT VIOLATED: %d path(s) changed outside the declared scope\n", len(res.Violations))
+		// The loudest string in the tool is reserved for the case it is about:
+		// a run that DECLARED where change was allowed and found change
+		// elsewhere. With no --scope, verify is a query — "did anything
+		// change?" — and a negative answer is information, not an alarm. Three
+		// of five user tests flagged the old wording independently, one of them
+		// on the documented post-merge recipe ("a scary word for a routine
+		// query"). The exit code is unchanged in both cases; only the sentence
+		// moves.
+		if len(scopes) == 0 {
+			fmt.Fprintf(stderr, "%d path(s) changed, and no --scope was declared — with no scope, verify asserts that NOTHING changed (--scope is repeatable; pass one per intended scope)\n", len(res.Violations))
+		} else {
+			fmt.Fprintf(stderr, "INVARIANT VIOLATED: %d path(s) changed that no --scope declared (--scope is repeatable; pass one per intended scope)\n", len(res.Violations))
+		}
 		for _, v := range res.Violations {
 			fmt.Fprintf(stderr, "  %s  %s → %s\n", v.Path, fmtOwners(v.Before), fmtOwners(v.After))
 		}
