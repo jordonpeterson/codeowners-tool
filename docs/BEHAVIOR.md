@@ -4025,6 +4025,11 @@ path; none of them pins the path itself.
 SPEC R-19/R-20: a broken policy is exit 3 — it fails identically on every
 repo, so the fleet script halts instead of grinding through 100 clones.
 
+### `TestSync_CoOwningChangeReportsNoLostAccess`
+
+A co-owning change takes nothing away, so the section must stay absent — a
+key that is present on every run is one a fleet stops reading.
+
 ### `TestSync_ConvergesThenIsIdempotent`
 
 SPEC R-19: sync is convergent and idempotent. The first run applies and
@@ -4159,6 +4164,22 @@ The fleet script appends every run to results.jsonl; a refused repo that
 emits nothing (or emits prose) is a hole in the aggregation exactly where
 the operator needs to look.
 
+### `TestSync_ReportsOwnersLosingAccess`
+
+SPEC R-24: a sync record distinguishes CO-OWNING from DISPLACING.
+
+`sync --format json` / `--summary-out` is what docs/FLEET.md loops over, and
+for a displacing change it carried no before-state at all: the change record
+is line-level, and an `insert` has no previous line, so `old_owners` is
+absent and `warnings` is null. The PR body a reviewer saw said only
+"paths whose owners change: 5" — five paths CHANGED, not "three teams stop
+owning things".
+
+The information already existed: `plan --out` emits ownership_rows with
+owners_before → owners_after for the identical op. But FLEET.md is explicit
+that a rollout loops over `sync`, so at fleet scale the artifact that would
+catch this was the one you did not have. This is surfacing, not new analysis.
+
 ### `TestSync_StatusSkippedWhenNothingApplied`
 
 SPEC R-24: `skipped` is a DISTINCT status, used when at least one op
@@ -4166,12 +4187,27 @@ skipped and none applied. Without it a policy with one typo'd path prefix
 skips everywhere and reports 100 × `unchanged` — the operator groups on
 .status, reads "already correct", and ships a no-op rollout.
 
+### `TestSync_SummaryOutHasAnOwnersLosingAccessSection`
+
+The PR body is the one moment somebody is already reading. A displacing run
+gets its own section there, naming the teams rather than a count of paths.
+
 ### `TestSync_SummaryOutNamesPolicyAndStructuralOps`
 
 SPEC R-24/INV-6: --summary-out renders markdown for a PR body. It must name
 the policy (that is why `name` and `description` exist) and call out every
 op proven only structurally, so a reviewer finds the weakened INV-1 cases
 without reading the diff.
+
+### `TestSync_SummaryOutOmitsTheSectionWhenNothingIsLost`
+
+And stays out of the body when nothing was taken away.
+
+### `TestSync_UnowningAPathCountsAsLostAccess`
+
+A path going from owned to UNOWNED is the sharpest form of losing access,
+and must be reported as such rather than slipping through as "no owners
+removed because there is no owner to name".
 
 ### `TestSync_ZeroMatchUnderRequireExitsTwo`
 
@@ -7032,4 +7068,4 @@ DIFFERENT states; transitioning between them is a real ownership change.
 
 ---
 
-676 documented test cases across 13 packages.
+681 documented test cases across 13 packages.

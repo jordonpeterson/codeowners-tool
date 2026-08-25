@@ -160,7 +160,11 @@ func schemaFullRecord() cli.SyncRecord {
 		DryRun:         true,
 		Warnings:       []string{"file is 2.6 MB"},
 		Changes:        []plan.Change{schemaFullChange()},
-		Error:          "would violate INV-2 at /docs",
+		// Same reason as the fields above: omitempty means an unpopulated
+		// field is invisible to the key enumeration, so leaving this at nil
+		// would let the pin pass over an addition it exists to notice.
+		OwnersRemoved: []cli.LostAccess{{Path: "scanners/scan.py", Owners: []string{"@acme/appsec"}}},
+		Error:         "would violate INV-2 at /docs",
 	}
 }
 
@@ -241,6 +245,7 @@ func TestR24_SyncRecordTopLevelKeys(t *testing.T) {
 		"dry_run",
 		"warnings",
 		"changes",
+		"owners_removed",
 		"error",
 	})
 }
@@ -267,6 +272,7 @@ func TestR24_SyncRecordFieldTypes(t *testing.T) {
 		"dry_run":         "bool",
 		"warnings":        "array<string>",
 		"changes":         "array<object>",
+		"owners_removed":  "array<object>",
 		"error":           "string",
 	}
 	if !reflect.DeepEqual(got, want) {
