@@ -93,7 +93,14 @@ jobs:
         with:
           go-version-file: go.mod
 
+      # actionlint needs a newer Go than the one this project builds with, and
+      # setup-go pins GOTOOLCHAIN=local from v6 on — which turns that mismatch
+      # into a hard install failure. Only this step opts out: `go install` may
+      # fetch the toolchain the tool asks for, while every step that builds or
+      # tests the project stays on the version go.mod names.
       - name: Install actionlint
+        env:
+          GOTOOLCHAIN: auto
         run: |
           go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
