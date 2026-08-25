@@ -54,7 +54,7 @@ else (bad enum values, ops that can't carry the `on_zero_match` you gave them, a
 | Flag | Meaning |
 |---|---|
 | `--op` / `--policy` | Where the ops come from. Mutually exclusive; passing both or neither is exit 3. |
-| `--repo` | Local git repository. Default `.`. |
+| `--repo` | Local git repository. Default `.` when the flag is absent; an explicitly empty `--repo ""` is refused (exit 3), because that is what a shell produces from an unset variable. |
 | `--branch` | Ref whose tracked tree governs resolution (S-7). Default `HEAD`. |
 | `--file` | CODEOWNERS path override, repo-relative. |
 | `--on-empty` | Policy when `remove_owner` empties an owner set. Allowed only with `--op`; with `--policy`, set `on_empty` in the file instead. An unknown value is exit 3, checked before any repository is opened. |

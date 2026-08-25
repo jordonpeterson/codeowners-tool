@@ -94,6 +94,31 @@ func rejectLeftoverArgs(fs *flag.FlagSet) error {
 		fs.Arg(0), fs.Name())
 }
 
+// rejectEmptyRepo refuses `--repo ""`, the unset-variable bug every fleet
+// script eventually has:
+//
+//	REPO=$(lookup_repo "$name")     # returned nothing
+//	codeowners-tool sync --repo "$REPO" --op '...'
+//
+// A typo'd path fails correctly. The empty string was the one wrong value that
+// got a DEFAULT instead of an error — `.` — so the run targeted whatever
+// directory the script happened to be standing in and wrote to it at exit 0,
+// while the record carried "repo":"" and a fleet's results.jsonl gained a
+// success row that did not say which repository had changed.
+//
+// It asks whether the flag was PASSED rather than reading its value, because
+// `apply --repo` defaults to "" to mean "use the plan's own repo" — there the
+// value alone cannot tell an operator's empty string from an absent flag.
+//
+// Exit 3: an empty --repo is broken invocation, identical on every repository,
+// so a fleet should stop at repo 0 rather than report it a hundred times.
+func rejectEmptyRepo(fs *flag.FlagSet, value string) error {
+	if !isFlagSet(fs, "repo") || value != "" {
+		return nil
+	}
+	return fmt.Errorf(`--repo was given an empty value; pass a path, or omit the flag to use the working directory. An empty string is what a shell produces when the variable behind it is unset, so it is refused rather than defaulting`)
+}
+
 // isFlagSet reports whether the operator actually PASSED a flag, as opposed to
 // inheriting its default. --cache-ttl has a non-zero default, so "did you ask
 // for this?" cannot be read off its value.
@@ -536,6 +561,10 @@ func cmdPlan(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "error:", err)
 		return ExitInvalid
 	}
+	if err := rejectEmptyRepo(fs, *repo); err != nil {
+		fmt.Fprintln(stderr, "error:", err)
+		return ExitInvalid
+	}
 	if len(opSpecs) == 0 {
 		fmt.Fprintln(stderr, "error: at least one --op is required")
 		return ExitInvalid
@@ -602,6 +631,10 @@ func cmdApply(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "error:", err)
 		return ExitInvalid
 	}
+	if err := rejectEmptyRepo(fs, *repo); err != nil {
+		fmt.Fprintln(stderr, "error:", err)
+		return ExitInvalid
+	}
 	if *planPath == "" {
 		fmt.Fprintln(stderr, "error: --plan is required")
 		return ExitInvalid
@@ -657,6 +690,10 @@ func cmdSnapshot(args []string, stdout, stderr io.Writer) int {
 		return flagParseCode(err)
 	}
 	if err := rejectLeftoverArgs(fs); err != nil {
+		fmt.Fprintln(stderr, "error:", err)
+		return ExitInvalid
+	}
+	if err := rejectEmptyRepo(fs, *repo); err != nil {
 		fmt.Fprintln(stderr, "error:", err)
 		return ExitInvalid
 	}
@@ -781,6 +818,10 @@ func cmdAudit(args []string, stdout, stderr io.Writer) int {
 		return flagParseCode(err)
 	}
 	if err := rejectLeftoverArgs(fs); err != nil {
+		fmt.Fprintln(stderr, "error:", err)
+		return ExitInvalid
+	}
+	if err := rejectEmptyRepo(fs, *repo); err != nil {
 		fmt.Fprintln(stderr, "error:", err)
 		return ExitInvalid
 	}

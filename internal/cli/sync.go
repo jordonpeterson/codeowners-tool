@@ -221,6 +221,10 @@ func cmdSync(args []string, stdout, stderr io.Writer) int {
 	if err := rejectLeftoverArgs(fs); err != nil {
 		return exit3s(err)
 	}
+	if err := rejectEmptyRepo(fs, *repo); err != nil {
+		fmt.Fprintln(stderr, "error:", err)
+		return ExitInvalid
+	}
 	// Which flags were TYPED, as opposed to which hold a non-zero value. Every
 	// "not allowed with --policy" ban below is a ban on the flag being
 	// PRESENT: `--create=false` overrides a reviewed `"create": true` exactly
