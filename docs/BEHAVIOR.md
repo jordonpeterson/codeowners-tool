@@ -289,7 +289,7 @@ a bare line deletion.
 
 **`except_test.go`**
 
-> Except-clause end-to-end tests (docs/except.md, R-26…R-32). Written ahead
+> Except-clause end-to-end tests (R-26…R-32). Written ahead
 > of the implementation per CONTRIBUTING.md; every negative case asserts a
 > message fragment as well as the exit code, because today the whole grammar
 > dies at checkScope's whitespace rule with exit 3 — the same code several of
@@ -511,7 +511,7 @@ a bare line deletion.
 
 **`owneridentity_test.go`**
 
-> Owner-identity end-to-end tests (docs/policy.md, R-38). Written ahead of
+> Owner-identity end-to-end tests (R-38). Written ahead of
 > the implementation per CONTRIBUTING.md.
 >
 > The vacuity trap in this area is unusually sharp: most of the broken cases
@@ -543,7 +543,7 @@ a bare line deletion.
 
 **`ownerlist_test.go`**
 
-> Owner-list end-to-end tests (docs/policy.md, R-33). Written ahead of the
+> Owner-list end-to-end tests (R-33). Written ahead of the
 > implementation per CONTRIBUTING.md: today every one of these op strings
 > dies in ops.Parse with "add_owner takes a single owner, not a list" — exit
 > 3, the same code several of these tests expect — so every negative case
@@ -598,7 +598,7 @@ a bare line deletion.
 **`policyfields_test.go`**
 
 > Policy-field end-to-end tests: `create` in the policy (R-34) and the
-> `defaults` block (R-35), from docs/policy.md. Written ahead of the
+> `defaults` block (R-35). Written ahead of the
 > implementation per CONTRIBUTING.md.
 >
 > The vacuity trap in this area is unusually sharp. Today `create` and
@@ -639,9 +639,8 @@ a bare line deletion.
 **`policylint_test.go`**
 
 > Policy-as-source-of-truth end-to-end tests for the two requirements this
-> file owns: the `lint` block (R-36) and `except` as a JSON array (R-37),
-> specified in docs/policy.md. Written ahead of the implementation per
-> CONTRIBUTING.md.
+> file owns: the `lint` block (R-36) and `except` as a JSON array (R-37).
+> Written ahead of the implementation per CONTRIBUTING.md.
 >
 > Vacuity is the whole difficulty here, and it has three sources:
 >
@@ -1932,7 +1931,7 @@ Note the DELIBERATE difference between the two documents: plan.Plan renders
 this exact same []plan.OpResult under `op_results`, because Plan.Ops already
 owns `ops` there as the list of raw op strings (R-16) and must keep it. The
 sync record has no such collision, so it uses the shorter, documented name —
-`ops` is what the JSON output section of docs/REFERENCE.md shows and what
+`ops` is what docs/JSON.md shows and what
 fleet scripts select. This is not an inconsistency to be tidied up: renaming
 either one to match the other breaks a published contract. The test pins
 both names at once so a well-meant "fix" fails here instead of in a user's
@@ -2540,7 +2539,7 @@ under those directories later.
 
 SPEC R-35c: `on_empty` inside `defaults` is exit 3. It is one policy for
 the run, not a per-op setting, and two spellings for one setting is the
-ambiguity docs/policy.md exists to remove — accepting it in both places
+ambiguity the policy format exists to remove — accepting it in both places
 would leave "which one wins" as a precedence rule nobody wrote down.
 
 The fragment cannot be "on_empty" or "defaults": today's rejection of the

@@ -349,7 +349,7 @@ func TestR24_StatusAndCountsAreAlwaysPresent(t *testing.T) {
 // this exact same []plan.OpResult under `op_results`, because Plan.Ops already
 // owns `ops` there as the list of raw op strings (R-16) and must keep it. The
 // sync record has no such collision, so it uses the shorter, documented name —
-// `ops` is what the JSON output section of docs/REFERENCE.md shows and what
+// `ops` is what docs/JSON.md shows and what
 // fleet scripts select. This is not an inconsistency to be tidied up: renaming
 // either one to match the other breaks a published contract. The test pins
 // both names at once so a well-meant "fix" fails here instead of in a user's

@@ -1,4 +1,4 @@
-// Owner-list end-to-end tests (docs/policy.md, R-33). Written ahead of the
+// Owner-list end-to-end tests (R-33). Written ahead of the
 // implementation per CONTRIBUTING.md: today every one of these op strings
 // dies in ops.Parse with "add_owner takes a single owner, not a list" — exit
 // 3, the same code several of these tests expect — so every negative case
