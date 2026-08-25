@@ -491,6 +491,45 @@ func patternsProvablyDisjoint(a, b string) bool {
 	return !strings.HasPrefix(pa, pb) && !strings.HasPrefix(pb, pa)
 }
 
+// scopeIsExactTrackedFile reports whether scope is an anchored, wildcard-free
+// pattern naming exactly one TRACKED path — a language that cannot grow while
+// that path stays a file. It is the R-22b exemption from the declare-op guard:
+// a declared op matched zero tracked paths, so it cannot match this one, and
+// nothing can appear beneath a file.
+//
+// Every condition is load-bearing, and each was reached by a case that fails
+// without it:
+//
+//   - A wildcard can match a file added later. "/.github/CODEOWNER?" selects
+//     only .github/CODEOWNERS today, so the set-size test alone admits it —
+//     and a declared "**/CODEOWNERX" meets it tomorrow. Admitting a
+//     disjointness claim the tree satisfies and the pattern does not is the
+//     failure mode TestINV6_TrailingStarStarIsNotADirectoryPrefix exists to
+//     exclude: a wrong write, not a missed one.
+//   - An unanchored spelling matches its basename at any depth, so "justfile"
+//     is not a claim about one path at all.
+//   - A trailing slash names a directory, which gains files by design. This
+//     is the condition the first draft omitted, admitting "/src/" against a
+//     declared "**/*.tf" that a future src/main.tf satisfies — caught by
+//     TestR22_ZeroMatchBatchIsNotVacuouslyCommuting.
+//
+// The set-membership test rejects a directory spelled without its slash:
+// "/src" over a tree holding only src/main.go has a one-element scope set,
+// but that element is not the scope, so the language is a subtree after all.
+func scopeIsExactTrackedFile(scope string, set map[string]bool) bool {
+	if len(set) != 1 || strings.ContainsAny(scope, "*?[]\\") {
+		return false
+	}
+	if !strings.HasPrefix(scope, "/") || strings.HasSuffix(scope, "/") {
+		return false
+	}
+	want := strings.TrimPrefix(scope, "/")
+	for p := range set {
+		return p == want
+	}
+	return false
+}
+
 // commuteOnEveryOwnerSet decides R-8 for a pair of ops that meet on paths which
 // do not exist yet.
 //
