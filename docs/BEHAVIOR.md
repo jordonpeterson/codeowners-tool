@@ -707,6 +707,32 @@ a bare line deletion.
 > verbs the bug report only implied, and the neighboring cases the fix must
 > NOT have broken.
 
+**`revoke_fleet_test.go`**
+
+> Revoking one owner from the CODEOWNERS file itself, across a fleet whose
+> original teams the policy cannot name (R-6, R-31, R-39).
+>
+> The intent is one sentence — "@automated-approvers co-owns .github/, but
+> must not be a required reviewer of .github/CODEOWNERS" — and it is two
+> DISJOINT ops: a grant carrying an except, and a removal scoped to exactly
+> the carved path. Disjoint ops commute, so R-8 admits both in one policy
+> (R-31) and the fleet runs one reviewed artifact everywhere. The `except`
+> alone cannot express the intent: it means don't-touch, so where the grantee
+> already owns the carved path through a broader rule it stays there (R-26,
+> and the record says so). Revocation is the removal's job.
+>
+> What the policy CANNOT do is name the surviving owners. Across a hundred
+> repositories the team holding .github/ differs in each and is unknown to the
+> policy's author, which rules out `set_owners` — the survivors have to be
+> discovered per repo. Every expectation below therefore pins bytes the policy
+> never mentions, and the shapes differ only in who owns .github/ beforehand,
+> because that is the axis a real fleet varies on.
+>
+> One shape refuses on purpose. Where the removal would leave the carved path
+> matching NO rule, no line can express the outcome (S-2: CODEOWNERS has no
+> negation, and "unmatched" is not "owned by nobody" — S-9), so the repo is
+> named for a human instead of being given an invented owner.
+
 **`rollout_test.go`**
 
 > The rollout scenarios.
@@ -2272,6 +2298,36 @@ Duplicates are compared over the PATTERN LANGUAGE, not as strings: /x/gen/
 and /x/gen/** are one pattern spelled twice, and a string-equality check
 waves the pair through (R-27.3, and the adversarial-review finding behind
 TestR27_StaticExceptDefectsAreExit3).
+
+### `TestR39_FallthroughRuleIsNotTouched`
+
+SPEC R-39/INV-2: narrowing under `inherit` restates the owners of the rule
+the path falls through to — it must never edit or delete that rule, whose
+other paths are out of scope. The catch-all here owns the rest of the
+repository and must come through the run byte-identical.
+
+### `TestR39_InheritedCarveLineExplainsItself`
+
+SPEC R-39: the inserted line explains itself. A reviewer of the pull request
+meets an owner the policy never named, on a line that did not exist before,
+so the change must say where those owners came from — otherwise the only
+honest review of a 100-repo wave is to re-derive each file by hand.
+
+### `TestR39_RevokeAcrossFleetWithUnknownOriginalTeams`
+
+SPEC R-6/R-31/R-39: one policy revokes an owner from the carved CODEOWNERS
+path across every shape a fleet contains, naming only the owner it revokes.
+The surviving owners are discovered per repository — including where the
+revoked owner was the SOLE owner of the rule, which is R-39: `inherit`
+narrows when it cannot delete, rather than refusing an intent the file can
+express.
+
+### `TestR39_RevokeWaveIsIdempotent`
+
+SPEC R-19/R-39: the second wave over the same fleet changes nothing. A
+narrowing insert that restates inherited owners must be recognized as
+already-satisfied on the re-run, or every repo in the fleet grows one line
+per wave.
 
 ### `TestR33a_ListFoldsToTheSameFileAsTheOpsItReplaces`
 
@@ -4832,6 +4888,15 @@ Contains must not blow up or report true on patterns Compile rejects.
 
 ## internal/plan
 
+**`inherit_narrow_test.go`**
+
+> R-39: `--on-empty=inherit` where the rule that would be deleted also governs
+> out-of-scope paths. Deletion is unavailable (R-1 protects those paths), but
+> the narrowing rule the planner already inserts can restate what the in-scope
+> paths fall through to, which resolves identically. These are the white-box
+> cases the fleet e2e suite cannot reach: the cascade, and the two states no
+> single narrowing line can express.
+
 **`plan_test.go`**
 
 > Package plan_test encodes the spec's acceptance tests for Engine A.
@@ -5530,6 +5595,36 @@ decides — the two orderings produce different CODEOWNERS files and both are
 accepted today. The refusal must cite R-8; a refusal citing R-5 means
 `declare` was never implemented and this test is passing for the wrong
 reason.
+
+### `TestR39_DeletableRuleIsStillDeleted`
+
+SPEC R-39/R-6 (pin — passes before and after R-39): the branch that CAN
+delete still deletes. Where the rule lies entirely inside the op's scope, nothing out of scope depends on it, and the
+file loses a line rather than gaining one — narrowing must not become the
+answer everywhere and leave every fleet repo one line longer.
+
+### `TestR39_DivergentFallthroughRefuses`
+
+SPEC R-39: in-scope paths that would fall through to DIFFERENT owners cannot
+be stated by one narrowing rule, and the planner will not pick a winner. It
+refuses naming both sides, because which paths diverge is the thing the
+operator has to look at.
+
+### `TestR39_NarrowingStripsTheRemovedOwnerFromTheFallthrough`
+
+SPEC R-39: the restated owners are the fallthrough MINUS the owner being
+removed. The rule above lists @x too, so a verbatim restatement would hand
+the revoked owner straight back to the path the removal just cleared — the
+cascade `inherit` performs when it deletes (R-6), which narrowing must
+perform too. Paths outside the op's scope keep @x, because nothing asked
+for it to be removed there (INV-2).
+
+### `TestR39_NoFallthroughRuleRefuses`
+
+SPEC R-39: nothing to fall through to. Deleting the rule would leave the
+in-scope path matching NO rule, and "unmatched" is not the explicitly
+zero-owned `[]` of S-9 — no line expresses it, so the planner refuses and
+names the alternative rather than inventing an owner.
 
 ### `TestRenameOwner_Global`
 
@@ -6280,4 +6375,4 @@ DIFFERENT states; transitioning between them is a real ownership change.
 
 ---
 
-610 documented test cases across 13 packages.
+618 documented test cases across 13 packages.

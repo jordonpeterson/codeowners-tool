@@ -33,6 +33,11 @@ owns an excepted path, that ownership persists (and is reported, R-32). The
 revocation intent remains `remove_owner`; the standing guarantee belongs to
 `audit`.
 
+The two compose in one policy: a grant carrying an `except` and a `remove_owner`
+scoped to the carved path are disjoint, so R-8 admits them together (R-31) —
+[FLEET.md](FLEET.md#revoking-one-owner-from-repos-whose-teams-you-cant-name) is
+the fleet recipe.
+
 ## Grammar (R-26a)
 
 The scope argument of `add_owner`, `set_owners`, and `remove_owner` may carry an

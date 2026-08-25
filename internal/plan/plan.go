@@ -1009,6 +1009,7 @@ func removePass(f *file.File, tree []string, op ops.Op, scope map[string]bool, o
 			if !exact {
 				pl.addWarning(inexactNarrowingWarning(inter, op.Scope, r.PatternText))
 			}
+			reason := fmt.Sprintf("rule %q also governs out-of-scope paths; inserted narrowing rule %q after it (R-2); out-of-scope resolution untouched", r.PatternText, inter)
 			if len(newOwners) == 0 {
 				switch onEmpty {
 				case "":
@@ -1018,8 +1019,22 @@ func removePass(f *file.File, tree []string, op ops.Op, scope map[string]bool, o
 					return false, &RefusalError{Msg: fmt.Sprintf(
 						"refusing: removing %s would leave in-scope paths of %q with no owners (--on-empty=error)", ownerNames(removed), r.PatternText)}
 				case "inherit":
-					return false, &RefusalError{Msg: fmt.Sprintf(
-						"refusing: --on-empty=inherit cannot be expressed for %q, which also governs out-of-scope paths — inheritance would require deleting a rule other paths depend on (R-1)", r.PatternText)}
+					// R-39: deletion is not the only spelling of inheritance.
+					// The rule cannot be deleted — out-of-scope paths depend on
+					// it — but the narrowing rule this branch already inserts
+					// can state what the in-scope paths would fall through to,
+					// which resolves identically and touches nothing else.
+					// Refusing here instead left the intent inexpressible in
+					// exactly the fleet repos where the owner being revoked was
+					// the sole owner of the rule.
+					inherited, from, err := fallthroughOwners(f, l, op, groups[l], removed)
+					if err != nil {
+						return false, err
+					}
+					newOwners = inherited
+					reason = fmt.Sprintf(
+						"removing %s empties the in-scope paths of %q, which also governs out-of-scope paths and cannot be deleted; inserted narrowing rule %q restating the owners those paths fall through to (%s, from rule %q) per --on-empty=inherit (R-39)",
+						ownerNames(removed), r.PatternText, inter, ownerNames(inherited), from)
 				case "unowned":
 					// A zero-owner narrowing rule expresses it exactly (S-9).
 				default:
@@ -1031,12 +1046,78 @@ func removePass(f *file.File, tree []string, op ops.Op, scope map[string]bool, o
 				Action: "insert", Line: l + 2, Pattern: inter,
 				OldOwners: r.OwnersCopy(), NewOwners: newOwners,
 				NewLine: f.LineText(l + 1),
-				Reason:  fmt.Sprintf("rule %q also governs out-of-scope paths; inserted narrowing rule %q after it (R-2); out-of-scope resolution untouched", r.PatternText, inter),
+				Reason:  reason,
 			})
 
 		}
 	}
 	return true, nil
+}
+
+// fallthroughOwners answers the question --on-empty=inherit asks when the rule
+// it would delete cannot be deleted (R-39): what would these in-scope paths
+// resolve to if this rule did not govern them?
+//
+// The walk goes UP the file from the rule at line l, and steps over any earlier
+// matching rule the same removal would empty for these paths — under deletion-
+// inheritance that rule would cascade away too (R-6), so stopping at it would
+// restate an owner the operator asked to revoke.
+//
+// It refuses in the two states no single line can express: paths that would
+// fall through to nothing (unmatched is not the same state as the explicitly
+// zero-owned `[]` of S-9, and no line means the former), and paths that would
+// fall through to DIFFERENT owners, which one narrowing rule cannot say.
+func fallthroughOwners(f *file.File, l int, op ops.Op, paths, removed []string) ([]string, string, error) {
+	rules := f.Rules()
+	// groups[l] comes from a map range, so sort before letting any path reach a
+	// message or decide which one is reported first — a fixed file must not
+	// produce a different refusal run to run (the R-8 lesson).
+	sorted := append([]string{}, paths...)
+	sort.Strings(sorted)
+
+	var want []string
+	var from, wantPath string
+	for _, p := range sorted {
+		owners, src := inheritedFor(rules, l, p, op.Owners)
+		if owners == nil {
+			return nil, "", &RefusalError{Msg: fmt.Sprintf(
+				"refusing: removing %s leaves %q with no owners, and nothing to inherit — the path would match no rule, which no line can express (an explicit zero-owner rule is a different state, S-9); set --on-empty=unowned to state that deliberately, or give the path an owner first",
+				ownerNames(removed), p)}
+		}
+		if want == nil {
+			want, from, wantPath = owners, src, p
+			continue
+		}
+		if !resolve.OwnersEqual(owners, want) {
+			return nil, "", &RefusalError{Msg: fmt.Sprintf(
+				"refusing: --on-empty=inherit would give %q %s and %q %s — one narrowing rule cannot state both; split the removal into per-path scopes",
+				wantPath, fmtOwners(want), p, fmtOwners(owners))}
+		}
+	}
+	if want == nil {
+		// Unreachable while every group carries at least one path, and stated
+		// anyway: returning nil here would insert a zero-owner rule, which is a
+		// deliberate un-owning nobody asked for (S-9).
+		return nil, "", &RefusalError{Msg: fmt.Sprintf(
+			"refusing: --on-empty=inherit found no in-scope path to inherit for (removing %s)", ownerNames(removed))}
+	}
+	return want, from, nil
+}
+
+// inheritedFor returns the owners path p would resolve to from the rules ABOVE
+// line l, minus the owners being removed, plus the pattern they came from. A
+// nil owner slice means no earlier rule matches p at all.
+func inheritedFor(rules []*file.Rule, l int, p string, removing []string) ([]string, string) {
+	for i := len(rules) - 1; i >= 0; i-- {
+		r := rules[i]
+		if r.LineIndex >= l || !r.Pattern.Match(p) {
+			continue
+		}
+		if owners := minusAll(resolve.CanonicalOwners(r.Owners), removing); len(owners) > 0 {
+			return owners, r.PatternText
+		}
+	}
+	return nil, ""
 }
 
 func synthRename(f *file.File, op ops.Op, desired map[string][]string, pl *Plan) error {

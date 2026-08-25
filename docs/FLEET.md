@@ -276,6 +276,39 @@ change dozens of files whether the repo has 500 files or 50,000, so a repo where
 4,000 is telling you something. A `*` baseline is the wave that genuinely scales with repo
 size — give that one no ceiling, deliberately.
 
+## Revoking one owner from repos whose teams you can't name
+
+"@automated-approvers co-owns `.github/`, but must not review `.github/CODEOWNERS`" is two
+disjoint ops, so R-8 takes both in one policy (R-31) — and neither names the teams that
+own those repos today:
+
+```json
+{ "version": 1,
+  "on_empty": "inherit",
+  "ops": [
+    { "id": "grant",  "op": "add_owner(/.github/ except /.github/CODEOWNERS, @automated-approvers)" },
+    { "id": "revoke", "op": "remove_owner(/.github/CODEOWNERS, @automated-approvers)" }
+  ] }
+```
+
+The `except` alone would not do it: it means *don't touch*, so where the grantee already
+owns the carved path through a broader rule that ownership persists — the record's
+`excepted` line says so, and revoking is `remove_owner`'s job. The removal writes one
+narrower line restating whatever that repo's survivors are, discovered per repo. Where the
+automation was the rule's only owner, `inherit` narrows rather than deleting (R-39); the
+line still comes from the repo, not the policy.
+
+```sh
+jq -r 'select(.status=="applied") | "\(.repo)\t\(.changes[]|select(.action=="insert")|.new_owners|join(","))"' results.jsonl
+```
+
+That is the review you actually want before merging 100 PRs: the owners the tool
+discovered, per repo, on the line it added. Two refusals are worth expecting in the
+`needs-human` pile — a repo whose CODEOWNERS is not at `.github/CODEOWNERS` (the carve-out
+does not exist there, R-28: move the file first) and a repo where the carved path would
+fall through to no rule at all (nothing to inherit: give it an owner, or state `unowned`
+deliberately).
+
 ## What's left at the end
 
 Two piles.

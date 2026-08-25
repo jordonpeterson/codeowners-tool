@@ -415,12 +415,33 @@ Removing the sole owner of a rule needs an explicit policy — **there is no def
 the documented recommendation is `error`:
 
 - `error` — refuse (recommended: consistent with the tool's fail-closed posture)
-- `inherit` — delete the rule; the preceding broader rule takes over (removal **cascades**
-  if the fallthrough rule also lists the owner)
+- `inherit` — the preceding broader rule takes over (removal **cascades** if that rule
+  also lists the owner)
 - `unowned` — keep the pattern with zero owners (GitHub's sanctioned substitute for `!`
   negation)
 
 Under `inherit`/`unowned` the resulting reassignment is shown in the plan's ownership rows.
+
+**`inherit` deletes the rule where it can, and narrows where it cannot (R-39).** Deleting
+is only available when the emptied rule lies entirely inside the op's scope. When it also
+governs paths outside — removing one owner from `/.github/CODEOWNERS` where `/.github/`
+names that owner and nothing else — deletion would move ownership for paths nobody asked
+about (R-1), so the narrowing rule the planner inserts *restates what the in-scope paths
+fall through to* instead. Same resolution, one line, and the rule other paths depend on is
+untouched. The restated owners are discovered per repository, never named in the policy:
+
+```
+* @org/original                        →   * @org/original
+/.github/ @automated-approvers             /.github/ @automated-approvers
+                                           /.github/CODEOWNERS @org/original
+```
+
+Two shapes stay refusals, because no line expresses them: in-scope paths that would fall
+through to **nothing** (unmatched is not the explicitly zero-owned `[]` of S-9 — use
+`unowned` to state that deliberately), and in-scope paths that would fall through to
+**different** owners, which one narrowing rule cannot say. A restated line freezes what it
+copies: later edits to the broader rule no longer reach the narrowed path, the same trade
+`except`'s carve lines make (R-29).
 
 ## Audit checks
 
@@ -493,7 +514,7 @@ rejected, because a subset of a whole-file repair is ambiguous rather than small
 | `--token` / `$GITHUB_TOKEN` | **Required**, bar the offline mode below. Owner existence is not decidable offline. |
 | `--dry-run` | Compute and report; write nothing. Exit 4 if anything is pending. |
 | `--remove-stale-paths` | Stage 3. Deletes rules matching nothing tracked **and** nothing on disk. |
-| `--on-empty error\|inherit\|unowned` | R-6, required only when a removal would empty a rule. `inherit` deletes the line. |
+| `--on-empty error\|inherit\|unowned` | R-6, required only when a removal would empty a rule. `inherit` deletes the line, or narrows when other paths depend on it (R-39). |
 | `--file PATH` | The path is discovered from `--branch`'s tree, so an uncommitted CODEOWNERS needs this. |
 | `--repo`, `--branch`, `--api-url`, `--format` | As elsewhere. |
 

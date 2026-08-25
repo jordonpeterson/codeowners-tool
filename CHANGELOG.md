@@ -90,6 +90,24 @@ changes to which class a failure lands in are called out explicitly.
 
 ### Added
 
+- **`--on-empty=inherit` narrows where it cannot delete (R-39).** Inheritance was
+  implemented as rule deletion only, so removing an owner from a path whose rule
+  also governs paths outside the op's scope refused at exit 2 — "inheritance
+  would require deleting a rule other paths depend on" — even though CODEOWNERS
+  can express the outcome. The intent it blocked is the common one: revoking an
+  automation account from `.github/CODEOWNERS` in the repos where that account is
+  the only owner of `/.github/`. Those repos are indistinguishable from the rest
+  until the wave runs, so a fleet met the refusal per repository with no policy
+  change that could avoid it. The narrowing rule the planner already inserts now
+  restates what the in-scope paths fall through to (minus the owner being
+  removed, so the cascade `inherit` performs when it deletes still happens),
+  leaving the broader rule untouched. Two shapes stay refusals because no line
+  expresses them, and both now say which: paths that would fall through to
+  nothing — unmatched is not the explicitly zero-owned `[]` of S-9 — and paths
+  that would fall through to different owners, which one rule cannot state.
+  Deletion is still preferred wherever it is available, so no file gains a line
+  it did not need.
+
 - **`--max-paths-changed N` / `max_paths_changed` (R-25)**, an opt-in ceiling on how much
   ownership one run may move. Over it, the run refuses (exit 2, per repo), writes nothing,
   and keeps `paths_changed` in the record so the operator can see what it would have been.
