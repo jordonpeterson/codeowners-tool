@@ -516,6 +516,18 @@ a bare line deletion.
 > operator back the illegal advice with nothing failing. Pinning the flag-mode
 > bytes is what turns that drift into a red test.
 
+**`opsemantics_bugs_test.go`**
+
+> Findings in the op/pattern layer: rules the tool writes or refuses where the
+> outcome, or the explanation for it, does not survive contact with a real
+> tree. Nothing here is a matcher bug — 300k differential cases against the
+> vendored oracle and 1.2M Contains pairs came back clean, and no INV-2
+> violation got past the prover for a tracked path. These are the edges around
+> it.
+>
+> Each test is a FAILING repro of a confirmed defect, written first per
+> CONTRIBUTING.md.
+
 **`ownerarray_test.go`**
 
 > End-to-end tests for R-39: `owners` as a JSON array on a policy op.
@@ -4347,6 +4359,25 @@ the block still matches, so this is one path, and it is a real difference to
 anyone diffing rollout logs — the repo-relative name is stable across
 machines and the absolute one is not.
 
+### `TestAuditDiagnosesAUnicodeNormalizationMismatch`
+
+FINDING: a pattern and a path that differ only in Unicode normalization get
+the generic "may be deliberate" A-4, while the exactly analogous case
+mismatch gets A-5 and a fix.
+
+A monorepo touched by both macOS and Linux carries NFD and NFC spellings of
+the same name. CODEOWNERS matches bytes, so the NFC pattern is dead against
+the NFD path — correctly — but every string the reader can see is
+identical:
+
+	[A-4/warning] (line 2) pattern "/docs/réunion/" matches zero tracked files (report-only: may be deliberate, R-11)
+
+A-5 exists precisely to diagnose the other invisible mismatch: "matches zero
+files ONLY because of case — CODEOWNERS is case-sensitive (S-6); correct the
+pattern to the tree's actual casing". Normalization is not mentioned
+anywhere in the code or the docs, so the reader is left staring at two
+identical-looking strings and concluding the tool is broken.
+
 ### `TestAuditJSONCleanIsPureJSON`
 
 Pre-release finding, fixed: `audit --format json` on a clean repo prints the literal line
@@ -4407,6 +4438,28 @@ Pre-release finding, fixed: the S-7 branch-mismatch refusal interpolates raw `gi
 `--end-of-options` operator as an output line — so the one-line error (and
 the JSON record's error field) reads "HEAD is --end-of-options\nmain (…)".
 
+### `TestCommaInScopeIsReachableOrHonestlyRefused`
+
+FINDING: a tracked path containing a comma is unreachable by every op
+spelling, and the policy-file spelling blames the operator for a mistake
+they did not make.
+
+	$ … --op 'add_owner(/a,b/, @org/x)'
+	error: add_owner takes (scope, owner) or (scope, [owners]), got 3 args
+	$ … --op 'add_owner(/a\,b/, @org/x)'
+	error: scope "/a\\" ends with a dangling backslash — it would silently match a different path
+	$ … policy {"op":"add_owner(/a,b/)","owners":["@org/x"]}
+	error: ops[0]: this op names owners in its op string AND in an "owners" array;
+	       one intent, one place (R-39b) — keep either the `(scope, [owners])` spelling or the array
+
+The op string names no owners at all: splitArgs splits on top-level commas
+with no escape awareness, so `b/` became the second "owner". A comma is a
+legal git path byte and `[`/`]` are legal too (S-2 makes them literal, and
+the matcher handles them), so this is a real path a monorepo can hold. The
+escape README documents is for spaces only, and no spelling reaches such a
+path. Nothing is written wrongly; the cost is that the last message sends
+the reader looking for an owners array they did not write.
+
 ### `TestCommandsDocListsEveryFlagThatChangesBehavior`
 
 FINDING: docs/COMMANDS.md's synopses omit flags that change what the command
@@ -4457,6 +4510,35 @@ It is reachable from a policy (`"create": true` plus a pinned `--file`), so
 it is a fleet-scale hazard, and POLICY-FILE.md's "Never overwrites, so it is
 safe to leave set for a fleet where only some repos have a file" is false
 for exactly the repos that have one somewhere other than .github/.
+
+### `TestDeclareRefusesAPatternThatCanNeverMatch`
+
+FINDING: `on_zero_match: declare` writes patterns that can never match
+anything in any repo, and reports them `applied (proven: structural)`.
+
+	$ codeowners-tool check --policy p.json      # {"op":"add_owner(**/, @org/security)","on_zero_match":"declare"}
+	ok: p.json — 1 op(s), no policy errors
+	$ codeowners-tool sync --policy p.json
+	applied: 1 op(s) applied, 0 skipped; 1 line change(s), 0 path(s) change owners
+	  ops[0]  applied (proven: structural)
+	$ cat CODEOWNERS
+	*  @org/everyone
+	**/ @org/security
+
+The codebase already knows this pattern is dead by construction:
+contains.go says `**/` "compiles to `\A(?:.+/)?/.*\z` — no repo-relative
+path can ever match it", and pattern.go has `case pattern == "/": // "/"
+doesn't match anything`. So the guarantee `declare` trades down to —
+GUARANTEES.md: "When someone later adds a matching file, this rule takes
+it" — is not weaker here, it is void. R-5 exists to refuse "creating a dead
+rule"; declare bypasses it for exactly the patterns that are dead
+everywhere rather than merely dead here.
+
+The same policy WITHOUT declare is refused per repo at exit 2 ("this repo
+alone was refused") rather than exit 3 ("broken everywhere; fix it, don't
+retry"), so a fleet triaging on exit codes sends a human to all N repos for
+one policy typo — and `check`, "the cheapest way to catch a broken policy
+before repo #1", passes it.
 
 ### `TestEmptyRepoFlagRejected`
 
@@ -4527,6 +4609,27 @@ go and look for.
 of them `applied (proven: structural)` — which GUIDE.md's own next paragraph
 says to look for. FLEET.md shows both echoes and reproduces exactly, so
 GUIDE is the outlier. The tool is right; the page is stale.
+
+### `TestLeadingHashScopeIsRefusedAtCheckTime`
+
+FINDING: a scope whose written line would start with `#` passes `check` and
+then fails at write time with a refusal that never names the cause.
+
+	$ codeowners-tool check --op 'add_owner(#hash/, @org/x)'
+	ok: ops — 1 op(s), no policy errors
+	$ codeowners-tool sync --dry-run --op 'add_owner(#hash/, @org/x)'
+	error: refusing: synthesized edits do not satisfy the invariants
+	  INV-1 (in-scope result wrong): #hash/a.md — want {…, @org/x}, would get {…}
+
+The real reason is that the synthesized line `#hash/ @org/x` reads back as a
+COMMENT, and it appears nowhere in the message. pattern.go rejects `!` and
+`\#` at compile time with the standard this case fails too — such a rule
+"would be dead there … a mutation tool must never accept or emit one" — so
+the bare leading `#` should be the same exit-3 refusal as its two siblings
+rather than an opaque invariant failure at write time. `declare` already
+gets this right: "the line written for scope \"#future/\" does not read back
+as a rule for that pattern (INV-6)". Nothing wrong is written; the cost is a
+debugging session.
 
 ### `TestLintRefusesCacheDirWithTheDocumentedReason`
 
@@ -4644,6 +4747,32 @@ last-match-wins but still naming its owners to human readers — and the run
 that creates it says nothing. The R-7 duplicate warning fires only on the
 NEXT run that touches the file. The run creating the duplicate must
 disclose it.
+
+### `TestSetOwnersDisclosesTheRuleItStrands`
+
+FINDING: `set_owners` strands a pre-existing narrower rule as permanently
+dead and says nothing, turning a repo that audits clean into one that
+fails its own CI gate.
+
+	$ codeowners-tool audit            → audit clean (exit 0)
+	$ codeowners-tool sync --op 'set_owners(/docs/, [@org/new])'
+	applied: 1 op(s) applied, 0 skipped; 1 line change(s), 2 path(s) change owners
+	  ops[0]  applied (proven: tree)          ← no warning of any kind
+	$ cat CODEOWNERS
+	*         @org/everyone
+	/docs/x/  @org/x-team                     ← dead now; still names an owner
+	/docs/ @org/new
+	$ codeowners-tool audit
+	[A-6/warning] (line 2) rule "/docs/x/" is fully shadowed by line 3 … (S-1)   → exit 4
+
+The resolved ownership is right — those paths are in scope — so the
+invariants hold; the defect is the undisclosed rot the write authors.
+plan.go discloses this hazard only when the stranded rule's pattern is
+BYTE-EQUAL to the op's scope, and its own comment gives the reason the
+disclosure exists: "without this, the run creating the dead line is the one
+run that says nothing about it (pre-release finding)". A narrower pattern is
+exactly that case. Amending `/docs/x/` instead of stranding it would leave
+audit clean.
 
 ### `TestSnapshotIsLosslessForNonUTF8Paths`
 
@@ -7473,4 +7602,4 @@ DIFFERENT states; transitioning between them is a real ownership change.
 
 ---
 
-698 documented test cases across 13 packages.
+703 documented test cases across 13 packages.
