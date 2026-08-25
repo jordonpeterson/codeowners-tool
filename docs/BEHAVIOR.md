@@ -772,6 +772,17 @@ a bare line deletion.
 
 > ---------- R-36e: every command validates the whole file ----------
 
+**`precedence_bugs_test.go`**
+
+> Findings about WHICH CODEOWNERS file a run governs, in repositories that
+> have more than one — or one somewhere other than where discovery looks.
+> S-8 gives GitHub's order (.github/ > root > docs/, first found wins, never
+> merged), and every test here is a case where the tool and that order come
+> apart while the run reports success.
+>
+> Each test is a FAILING repro of a confirmed defect, written first per
+> CONTRIBUTING.md.
+
 **`prerelease_bugs_test.go`**
 
 > Regression guards from the pre-release review: each test began life as a
@@ -784,6 +795,17 @@ a bare line deletion.
 > the KnownBug test that motivated the fix does not — the same behavior on the
 > verbs the bug report only implied, and the neighboring cases the fix must
 > NOT have broken.
+
+**`repostate_bugs_test.go`**
+
+> Findings about the STATE of the checkout a run is pointed at — a CODEOWNERS
+> location occupied by a submodule, a file left unmerged by a conflict, a
+> migration staged but not committed, a symlink the reporting verbs do not
+> recognize. In each case the tool's model of the repository and git's differ,
+> and the run reports success or "clean" anyway.
+>
+> Each test is a FAILING repro of a confirmed defect, written first per
+> CONTRIBUTING.md.
 
 **`rollout_test.go`**
 
@@ -825,6 +847,17 @@ a bare line deletion.
 > document. Like those, they assert the key SET, never the key ORDER —
 > encoding/json emits fields in declaration order, but that ordering is not
 > part of the contract and pinning it would fail on a harmless reshuffle.
+
+**`structural_bugs_test.go`**
+
+> Bug-hunt findings from a review aimed at complex repository structures:
+> monorepos, repos whose CODEOWNERS is not where the tool assumes, trees
+> carrying bytes Go's JSON encoder cannot represent, and fleet scripts that
+> pair the wrong two files.
+>
+> Each test below is a FAILING repro of a confirmed defect, written first per
+> CONTRIBUTING.md. The doc comment on each states the finding, what the tool
+> does today, and which existing guarantee or sibling guard it contradicts.
 
 **`token_redaction_test.go`**
 
@@ -4296,6 +4329,27 @@ Pre-release finding, fixed: `audit --format json` on a clean repo prints the lit
 to jq — the healthy repo — is the one case the output isn't parseable.
 Under `--format json`, stdout is data.
 
+### `TestAuditNamesASymlinkedCodeowners`
+
+FINDING: for a committed SYMLINKED CODEOWNERS, `sync` refuses with a precise
+explanation while `audit` — the documented CI gate — invents a finding about
+a pattern that is really a filesystem path, and never says "symlink".
+
+	$ codeowners-tool audit
+	[A-4/warning] (line 1) pattern "../OWNERS.real" matches zero tracked files …
+	[A-9/info] 3 of 3 tracked paths (100%) have no owner …
+	[A-11/warning] .github/CODEOWNERS itself has no owner …
+	$ codeowners-tool sync --op 'add_owner(/services/api/, @org/x)'
+	error: refusing to write .github/CODEOWNERS: it is a symlink to ../OWNERS.real,
+	       and GitHub does not follow a symlinked CODEOWNERS …
+
+The read-only verbs fetch the blob with `cat-file`, which hands back the link
+TARGET as content, and nothing checks the tree mode — so the target string is
+parsed as a rule. The operator is left to infer the real defect from "100% of
+tracked paths have no owner". The condition is already known to the tool;
+audit is where it belongs, since audit's job is to report rot and this repo's
+entire ownership is inert.
+
 ### `TestAuditRejectsUnknownFormat`
 
 Pre-release finding, fixed: `audit` silently accepts an unknown `--format` and falls back to
@@ -4303,12 +4357,66 @@ text. sync, check, and lint all reject unknown formats at exit 3 — "never a
 silent fallback to text" — and audit is documented with the same
 `--format json|text` contract.
 
+### `TestAuditReportsNestedCodeownersFilesThatGovernNothing`
+
+FINDING: `audit` reports "clean" on a monorepo carrying package-level
+CODEOWNERS files that GitHub never loads.
+
+A-10 is the check for "a CODEOWNERS file that governs nothing", and it fires
+for `docs/CODEOWNERS` sitting beside `.github/CODEOWNERS`. It is built on
+gittree.FindCodeownersPaths, which tests only the three root-level locations
+S-8 names, so `packages/foo/.github/CODEOWNERS` and `packages/bar/CODEOWNERS`
+are invisible to it. Those are the files most likely to mislead: a monorepo
+migrated from Bazel/Gerrit OWNERS or from split repos keeps per-package
+ownership files that look authoritative, review is routed by them in
+people's heads, and GitHub honors not one line of them.
+
+`audit clean`, exit 0, is the CI gate asserting this repository has no
+ownership rot. Here it asserts it over two files' worth of owner
+assignments that do nothing.
+
 ### `TestBranchMismatchErrorNamesHeadCleanly`
 
 Pre-release finding, fixed: the S-7 branch-mismatch refusal interpolates raw `git rev-parse
 --abbrev-ref --end-of-options HEAD` output, and rev-parse echoes the
 `--end-of-options` operator as an output line — so the one-line error (and
 the JSON record's error field) reads "HEAD is --end-of-options\nmain (…)".
+
+### `TestCreateWithFileMustNotSupersedeTheGoverningCodeowners`
+
+FINDING: `--create` with a `--file` that OUTRANKS the repository's real
+CODEOWNERS supersedes it — every rule in the governing file stops applying,
+and the run reports `applied (proven: tree)`, exit 0.
+
+A repo whose ownership lives in `docs/CODEOWNERS`:
+
+	$ codeowners-tool sync --file .github/CODEOWNERS --create --op 'add_owner(/docs/, @org/docs-team)'
+	applied: 1 op(s) applied, 0 skipped; 1 line change(s), 2 path(s) change owners
+	  ops[0]  applied (proven: tree)
+	  created a new CODEOWNERS file
+	$ cat .github/CODEOWNERS
+	/docs/ @org/docs-team
+
+Under S-8 that one line is now the whole repository's ownership. Both
+invariants are broken by the run that called itself proven:
+
+  - INV-2: services/api/main.go silently loses @org/api-team. The tool's own
+    `verify` says INVARIANT VIOLATED on the same change, exit 2.
+  - INV-1: `add_owner` promises "every pre-existing owner of every path in
+    scope is kept" (README) and @org/everyone is gone from /docs/.
+
+BEHAVIOR.md names this precise failure as the thing the spec forbids:
+"'Never overwrites' is also satisfied by writing a SECOND file at
+.github/CODEOWNERS, which leaves the original untouched and, under S-8,
+silently demotes it to a file GitHub never loads — the whole repo's
+ownership replaced by one op's worth of rules." The guard enforcing it sits
+on the DISCOVERY path; an explicit `--file` walks around it, because
+governing() takes rel from --file and proves against empty bytes.
+
+It is reachable from a policy (`"create": true` plus a pinned `--file`), so
+it is a fleet-scale hazard, and POLICY-FILE.md's "Never overwrites, so it is
+safe to leave set for a fleet where only some repos have a file" is false
+for exactly the repos that have one somewhere other than .github/.
 
 ### `TestEmptyRepoFlagRejected`
 
@@ -4348,6 +4456,41 @@ cleans the spelling before matching the tracked file; the S-8 location
 check compares the raw string, so a live change is reported as dead in the
 warning, the --out record, and the --summary-out PR body.
 
+### `TestFileNotInRefErrorNamesThePathCleanly`
+
+FINDING: `--file` naming a path that is not in the ref hands the operator
+raw git plumbing, `--end-of-options` and all.
+
+	$ codeowners-tool snapshot --repo r --file docs/CODEOWNERS
+	error: git cat-file --end-of-options blob HEAD:docs/CODEOWNERS: exit status 128: fatal: path 'docs/CODEOWNERS' does not exist in 'HEAD'
+
+This is the failure mode TestBranchMismatchErrorNamesHeadCleanly already
+pinned for the S-7 refusal: `--end-of-options` is an operator this tool
+passes to git, never something the reader typed, and echoing it sends them
+hunting for a flag that does not exist. `plan` reports the same condition
+cleanly, so the three commands disagree about the same mistake.
+
+### `TestMissingFileTargetIsNotReportedAsNoCodeownersAnywhere`
+
+FINDING: `--file` naming a path that is not in the ref is refused with a
+message that is false three times over, and that false text is what lands in
+the fleet's JSON record.
+
+In a repo carrying all three CODEOWNERS files:
+
+		$ codeowners-tool sync --file OWNERS --op 'add_owner(/services/api/, @org/p)'
+		error: no CODEOWNERS file found in .github/, root, or docs/ at HEAD;
+		       re-run with --create to write one at .github/CODEOWNERS, or --file to name a path (R-23)
+
+	 1. the repo has CODEOWNERS in all three locations;
+	 2. `--create` would write at OWNERS, not at .github/CODEOWNERS;
+	 3. "or --file to name a path" is offered to someone who just passed --file.
+
+noCodeownersError is built from a fixed head with no knowledge that
+filePath was set, and governing() reaches it for any missing --file target.
+A `needs-human` triage pile reading these records concludes those repos have
+no CODEOWNERS.
+
 ### `TestOfflineStaleRuleRemovalReportable`
 
 Pre-release finding (UAT), fixed: a tree-provably-dead rule cannot be repaired
@@ -4358,6 +4501,28 @@ pattern matches zero tracked files is a git-tree fact the offline audit
 requested repair, the dry run should report the pending dead-rule removal
 (exit 4) instead of demanding a token; today the only offline remedy is the
 hand edit the tool exists to prevent.
+
+### `TestPlanApplyAndLintWarnWhenTheyWriteAFileGitHubWillNotRead`
+
+FINDING: R-24's "every time" warning is emitted only by `sync`. `plan`,
+`apply` and `lint` — the other three verbs that touch the file — write a
+CODEOWNERS GitHub does not read, in total silence.
+
+BEHAVIOR.md, TestRollout_WritingAFileGitHubWillNotReadIsWarned: "SPEC R-24
+(S-8/A-10): when the file this run writes is not the file GitHub will read,
+the record says so — every time, on stderr and in `warnings`." That test
+covers `sync`. governingWarnings() has exactly one call site, in sync.go, so
+plan and apply skip it:
+
+	$ codeowners-tool plan --file docs/CODEOWNERS --op 'add_owner(/services/api/, @org/p)' --out p.json
+	plan written to p.json
+	$ codeowners-tool apply --plan p.json
+	applied: docs/CODEOWNERS (5 → 30 bytes)
+
+.github/CODEOWNERS governs this repo. The plan is the artifact a human
+reviews before the write, which is exactly where "this file governs
+nothing" needs to appear, and it is the one place it never does. `lint`,
+which writes without a plan at all, is the same.
 
 ### `TestPlanBelowRepoRootRefused`
 
@@ -4385,6 +4550,79 @@ that creates it says nothing. The R-7 duplicate warning fires only on the
 NEXT run that touches the file. The run creating the duplicate must
 disclose it.
 
+### `TestSnapshotIsLosslessForNonUTF8Paths`
+
+FINDING: `snapshot` emits an ownership object with DUPLICATE keys when the
+tree holds paths that are not valid UTF-8, so the snapshot loses tracked
+paths on the round-trip and `verify` stops checking them.
+
+git stores path bytes verbatim and `ls-tree -z` returns them unquoted, so a
+legacy latin-1 filename reaches the snapshot as an invalid-UTF-8 Go string.
+encoding/json replaces every such byte with U+FFFD, so `a\xe9.md` and
+`a\xff.md` — two distinct tracked files — are written as the same JSON key
+twice. Any decoder keeps one. verify.Load decodes into a map, so one path
+vanishes before Compare ever runs: an ownership change on it is neither a
+change, an addition, nor a removal — it is invisible, and the gate that
+exists to prove INV-2 over "raw data" reports ok.
+
+The snapshot also stops being true on its own terms: it names a path that
+is not in the repository, so anyone grepping it for their file finds
+nothing.
+
+### `TestStagedHigherPrecedenceCodeownersIsNotIgnored`
+
+FINDING: discovery can only ADD a CODEOWNERS from the working tree, never
+let one OUTRANK the tracked file — so a repo mid-migration from root
+`CODEOWNERS` to `.github/CODEOWNERS` gets its outgoing file edited, and
+`audit` calls the repo clean.
+
+	$ git status --short
+	A  .github/CODEOWNERS          # staged, not yet committed
+	$ codeowners-tool audit
+	audit clean
+	$ codeowners-tool sync --op 'add_owner(/services/api/, @org/api)' --format json
+	{"codeowners_path":"CODEOWNERS","status":"applied", …}
+
+The edit is dead the moment the migration commit lands: under S-8 the staged
+`.github/CODEOWNERS` wins outright. `codeowners_path` then tells the fleet
+loop to stage the file that is about to stop governing.
+
+governing()'s working-tree fallback fires only when the TREE has zero
+CODEOWNERS, and A-10's AllPresent is tree-only as well — so the check whose
+severity is `error` ("GitHub uses only the first") is blind to the working
+tree that sync is about to write into. D5's own comment argues the working
+tree must inform discovery; it informs it in one direction only.
+
+### `TestSubmoduleAtCodeownersLocationIsRefused`
+
+FINDING: when a SUBMODULE is mounted at one of the three CODEOWNERS
+locations, `sync` writes into the submodule's checkout, proves the change
+against the submodule's rules, and reports `applied (proven: tree)` — and
+the parent repository can never track the file it wrote.
+
+The shared-org-`.github` submodule is a real layout. `git ls-tree` reports
+`.github` as a gitlink (`160000 commit`), so FindCodeownersPaths correctly
+finds no CODEOWNERS, and governing()'s working-tree fallback then adopts the
+file inside the submodule's own checkout:
+
+	$ codeowners-tool sync --op 'add_owner(/services/api/, @org/api)' --format json
+	{"codeowners_path":".github/CODEOWNERS","status":"applied",
+	 "changes":[{"old_owners":["@sub/owners"],"new_owners":["@sub/owners","@org/api"]}]}
+	$ git add .github/CODEOWNERS
+	fatal: Pathspec '.github/CODEOWNERS' is in submodule '.github'
+
+`@sub/owners` is a fact about a DIFFERENT repository; the parent has no
+CODEOWNERS at all, so its true INV-2 baseline is "everything unowned".
+`snapshot` and `plan` both exit 3 on this repo, agreeing with git.
+
+refuseSymlinkedTarget refuses the exactly-analogous case and says why: "git
+commits a symlinked directory as a link BLOB, not a tree, so with
+`.github -> real-gh` there is no `.github/CODEOWNERS` in the tree GitHub
+reads … the write would edit a file that governs nothing while reporting
+applied." A gitlink is not a tree either, and there is no guard for it —
+"submodule" does not appear in the write path at all. The evidence needed to
+refuse is already in hand: `.github` is itself a path in the tracked tree.
+
 ### `TestSymlinkedCodeownersNotSilentSuccess`
 
 Pre-release finding, fixed: a symlinked .github/CODEOWNERS inside the clone is written
@@ -4393,6 +4631,77 @@ GitHub does not follow a symlinked CODEOWNERS, so the run edited a file
 that governs nothing while reporting success. An out-of-repo symlink target
 is already refused (containedWritePath); the in-repo case must at minimum
 not be a silent success.
+
+### `TestSyncWarnsWhenGoverningCodeownersIsUntracked`
+
+FINDING: `sync` silently adopts an UNTRACKED CODEOWNERS as the governing
+file, while `plan`, `snapshot` and `audit` all refuse the same repository at
+the same moment with "no CODEOWNERS file found … at HEAD" (exit 3).
+
+governing()'s D5 fallback searches the working tree when `git ls-tree` finds
+no CODEOWNERS, so a file that exists on disk but was never committed becomes
+the baseline INV-1 and INV-2 are proven against. On GitHub that repository
+has NO CODEOWNERS: every path is unowned, and the "before" state the proof
+rests on is one GitHub has never seen. The run reports
+`applied (proven: tree)`, exit 0, with no warning — and R-23's `--create`
+gate, the tool's stated permission to write a CODEOWNERS into a repo that
+has none, is never consulted.
+
+D5's stated purpose is narrower than its effect: it exists so a nightly job
+that created the file in pass 1 can converge in pass 2. It also silently
+adopts a .gitignore'd CODEOWNERS, a template a provisioning script dropped
+in, and a half-finished manual edit. governingWarnings() is the mechanism
+for exactly this class ("Every condition below exits 0 and reports
+'applied' … invisible at fleet scale unless the run that touched the file
+says so") and has no case for it.
+
+### `TestUnmergedCodeownersIsNotSilentlyRewritten`
+
+FINDING: `sync` rewrites a CODEOWNERS left UNMERGED by a conflict and
+reports `applied (proven: tree)`, exit 0.
+
+	$ git status --short
+	UU .github/CODEOWNERS
+	$ codeowners-tool sync --op 'add_owner(/services/api/, @org/api)'
+	warning: … has 2 line(s) GitHub cannot parse and silently skips (S-3) …
+	applied: 1 op(s) applied, 0 skipped; 1 line change(s), 1 path(s) change owners
+	  ops[0]  applied (proven: tree)
+
+The conflict markers are the only thing it notices, and it reads them as
+syntax errors rather than as an unmerged file. `=======` parses as a valid
+zero-owner rule (S-9), and BOTH sides' `/docs/` lines stay live, so the
+"before" ownership the invariants were proven against is a conflict-mangled
+state that no commit has ever had and GitHub will never see. The file is
+still `UU` afterwards — the run reports a proven change to something that
+cannot be committed as it stands.
+
+The tool refuses the adjacent checkout hazards in detail (the sparse-checkout
+refusal names sparse-checkout, partial clones and local deletion by name),
+and S-7's checkBranchIsWritable exists to stop "a rule justified by one tree
+and landing in another". An unmerged index is the same class, and one
+`git status --porcelain` settles it.
+
+### `TestVerifyRefusesSnapshotsFromDifferentRepositories`
+
+FINDING: `verify` accepts a before/after pair taken from two DIFFERENT
+repositories and reports `ok`, exit 0.
+
+verify is the documented CI gate — COMMANDS.md prescribes `snapshot` twice
+then `verify --before … --after …` to "prove in CI that a merged change
+moved nothing outside its declared scope". A snapshot carries `repo`, `ref`,
+`codeowners_path` and `codeowners_sha256`, and verify.Compare reads none of
+them: it diffs the two ownership maps and classifies every path present in
+only one snapshot as a tree delta, which R-18 says is never a violation.
+Two unrelated repositories share no paths at all, so EVERY row is a tree
+delta and the gate reports "0 change(s), all within scope".
+
+The failure mode is a fleet loop — the setting FLEET.md is written for —
+where before.json and after.json are per-repo filenames and one loop
+variable is wrong: every repo comes back green, and the invariant the gate
+exists to prove was never checked on any of them. `apply` already refuses
+exactly this mistake ("--repo X is a different repository from the one this
+plan was computed against"); verify, which is the LAST line of defence
+rather than the first, has no such guard.
 
 ## internal/file
 
@@ -7068,4 +7377,4 @@ DIFFERENT states; transitioning between them is a real ownership change.
 
 ---
 
-681 documented test cases across 13 packages.
+693 documented test cases across 13 packages.
