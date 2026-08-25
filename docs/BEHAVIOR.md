@@ -266,6 +266,17 @@ a bare line deletion.
 > tests pin only that the bytes outside the repository are never touched and that no
 > record claims otherwise.
 
+**`declaredpair_test.go`**
+
+> R-22b end-to-end tests: which pairs the declare-op order-dependence guard
+> (R-8 for zero-match ops) is entitled to refuse.
+>
+> Written ahead of the implementation per CONTRIBUTING.md. The four negative
+> cases below pass against today's binary and are labeled as pins — they
+> freeze refusals R-22b must preserve, so the change cannot be "fixed" by
+> deleting the guard. The positive cases fail today with the R-8 refusal
+> quoted in TestR22b_ExactTrackedFileAgainstADeclareApplies.
+
 **`except_roundtrip_test.go`**
 
 > R-37's round trip, end to end: the `except` array is validated, applied and
@@ -2271,6 +2282,78 @@ Duplicates are compared over the PATTERN LANGUAGE, not as strings: /x/gen/
 and /x/gen/** are one pattern spelled twice, and a string-equality check
 waves the pair through (R-27.3, and the adversarial-review finding behind
 TestR27_StaticExceptDefectsAreExit3).
+
+### `TestR22b_CheckCannotDecideDeclaredPairs`
+
+SPEC R-22b: `check` reads no repository, so it cannot reach any of this.
+
+Whether an op is declared is a fact about one repo's tree, so both the
+accepted and the refused policies above are valid policies. This is why the
+refusal surfaces at sync, per repo, as exit 2 rather than halting a rollout
+at exit 3 — and it is the reason an operator sees "check passed, sync
+failed" and reasonably concludes the policy file is fine.
+
+### `TestR22b_DirectoryScopeAgainstADeclareStaysRefused`
+
+SPEC R-22b (the boundary that must keep refusing): a DIRECTORY scope is not
+an exact tracked file, however anchored and wildcard-free it is spelled.
+
+`/.github/` names a directory that can gain files, so a future
+.github/main.tf matches both that scope and the declared `**/*.tf`. Which
+one governs it depends on which line was written where, so the batch really
+is order-dependent and R-8 must still refuse it. This is the case that
+broke when the exemption was first written as "the other op resolved
+against a non-empty tree" — a condition a directory satisfies too.
+
+Pin: passes today, and must keep passing.
+
+### `TestR22b_ExactTrackedFileAgainstADeclareApplies`
+
+SPEC R-22b: an op whose scope is an anchored, wildcard-free path naming one
+TRACKED FILE commutes with a declared op, whatever owners the two name.
+
+The declared op matched zero tracked paths, so by construction it does not
+match that file; and no path can appear beneath a file. The two scopes can
+never meet, so there is no order to depend on.
+
+The guard refuses the pair today. Its own comment (plan.go:376) justifies
+itself with a hazard that needs BOTH ops declared — two rules stacked at
+EOF where last-match-wins silently picks the winner — but the condition it
+fires on is `declared[i] || declared[j]`, so it also catches a declare
+paired with an op that resolves against the real tree. `remove_owner`
+cannot even carry `declare` (plan.go:232), so the pair below is
+unreachable by the hazard the guard was written for:
+
+	error: ops "remove_owner(/.github/CODEOWNERS, @org/bot)" and
+	"add_owner(**/justfile, @org/bot)" can both govern a path that does not
+	exist yet and do not commute (R-8: refusing order-dependent batch)
+
+This is the shape every real "grant the bot everything except CODEOWNERS"
+fleet policy takes, and refusing it forces the operator to split one
+reviewed artifact into two invocations that must both be rolled out.
+
+### `TestR22b_ExactTrackedFilePairIsByteIdenticalInBothOrders`
+
+SPEC R-22b: the accepted batch is order-independent in the strong sense —
+the two orderings produce the SAME BYTES, not merely the same resolution.
+
+That is what makes the exemption safe for a path that does not exist yet: a
+declared rule always appends at EOF and a narrowing rule is always inserted
+after the rule it corrects, so even if .github/CODEOWNERS were replaced by a
+directory containing a justfile, both orderings agree on which line wins.
+An assertion on resolution alone would not have caught a file that differs.
+
+### `TestR22b_TwoDeclaresStayRefused`
+
+SPEC R-22b (the boundary that must keep refusing): two DECLARED ops are the
+hazard the guard was written for, and the exemption must not reach them.
+
+Neither op resolves against the tree, both rules land at EOF, and
+last-match-wins hands a future terraform/main.tf to whichever was listed
+second — so the two orderings produce different files. Refusing here is the
+whole point of the guard.
+
+Pin: passes today, and must keep passing.
 
 ### `TestR33a_ListFoldsToTheSameFileAsTheOpsItReplaces`
 
@@ -4831,6 +4914,16 @@ Contains must not blow up or report true on patterns Compile rejects.
 
 ## internal/plan
 
+**`declaredpair_test.go`**
+
+> R-22b at the level the guard lives: which SCOPE SPELLINGS earn the
+> exemption from the declare-op order-dependence check.
+>
+> internal/cli covers the operator-visible contract. These cover the two
+> spellings that resolve to one tracked file TODAY while naming a language
+> that can grow tomorrow — the cases where "it matched exactly one file" is
+> not the same claim as "it can only ever match that file".
+
 **`plan_test.go`**
 
 > Package plan_test encodes the spec's acceptance tests for Engine A.
@@ -5529,6 +5622,36 @@ decides — the two orderings produce different CODEOWNERS files and both are
 accepted today. The refusal must cite R-8; a refusal citing R-5 means
 `declare` was never implemented and this test is passing for the wrong
 reason.
+
+### `TestR22b_AnchoredExactFileScopeCommutesWithADeclare`
+
+SPEC R-22b: an anchored, wildcard-free scope naming one tracked file
+commutes with a declared op. The declared op matched zero tracked paths, so
+it cannot match a tracked file, and nothing can appear beneath a file.
+
+### `TestR22b_UnanchoredScopeIsNotAnExactFileEvenWhenItMatchesOne`
+
+SPEC R-22b: an UNANCHORED scope is refused even when it resolves to exactly
+one tracked file.
+
+"justfile" matches that basename at any depth, so it is not a claim about
+one path at all — a justfile added under any new directory joins the scope,
+and a declared "/vendor/**" would then govern it too. The leading slash is
+what makes the scope's language finite, which is the property the exemption
+rests on; without it the tool would be reading a spelling as a guarantee it
+does not carry.
+
+### `TestR22b_WildcardScopeIsNotAnExactFileEvenWhenItMatchesOne`
+
+SPEC R-22b: a scope containing a wildcard is refused even when it resolves
+to exactly one tracked file.
+
+"/.github/CODEOWNER?" selects only .github/CODEOWNERS in this tree, so a
+tree-count test ("scope matched one path") would admit it. Its LANGUAGE is
+wider: a future .github/CODEOWNERX matches it, and so does a declared
+"**/CODEOWNERX". Admitting it would repeat TestINV6_TrailingStarStarIsNot
+ADirectoryPrefix — a disjointness claim that the tree happens to satisfy
+and the pattern does not, which is a wrong write rather than a missed one.
 
 ### `TestRenameOwner_Global`
 
@@ -6279,4 +6402,4 @@ DIFFERENT states; transitioning between them is a real ownership change.
 
 ---
 
-610 documented test cases across 13 packages.
+618 documented test cases across 13 packages.
