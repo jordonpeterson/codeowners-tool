@@ -250,6 +250,14 @@ func Build(content []byte, tree []string, opList []ops.Op, opts Options) (*Plan,
 						return nil, &InvalidError{Msg: fmt.Sprintf(
 							"scope %q matches %d tracked file(s), but every one of them is excepted — the except clause empties the op in this repo (R-28)", op.Scope, raw)}
 					}
+					// remove_owner creates nothing, so "refusing to create a
+					// dead rule" describes an act the operator did not
+					// attempt and sends them to the wrong argument. The
+					// reason is the same; the consequence is not.
+					if op.Kind == ops.RemoveOwner {
+						return nil, &InvalidError{Msg: fmt.Sprintf(
+							"scope %q matches zero tracked files, so there is nothing here for remove_owner to act on (R-5). A rule matching this pattern may still exist and still name the owner — an op scoped to paths cannot reach it; remove the line by hand, or with `lint --remove-stale-paths`", op.Scope)}
+					}
 					return nil, &InvalidError{Msg: fmt.Sprintf("scope %q matches zero tracked files (R-5: refusing to create a dead rule)", op.Scope)}
 				default:
 					// Policy parsing validates the field, but the struct is
@@ -943,7 +951,53 @@ func synthRemove(f *file.File, tree []string, op ops.Op, scope map[string]bool, 
 		}
 		desired[p] = got // inherit fallthrough: owners come from surviving rules
 	}
+	warnUnreachableOwnerRules(f, tree, op, pl)
 	return nil
+}
+
+// warnUnreachableOwnerRules reports rules that still name an owner this
+// remove_owner was asked to take away, and that the op could not reach because
+// their pattern matches no tracked file.
+//
+// The op need not edit a dormant rule: its scope is derived from paths, and a
+// pattern matching nothing has no path to derive from. What it must not do is
+// report `unchanged` with `warnings: null` — in a fleet grouped on `.status`
+// that repo reads as ALREADY CORRECT, so a dissolved team keeps a live claim
+// that activates the moment somebody creates the directory. One reporter found
+// this only by grepping the fleet for the handle after the tool had declared it
+// clean, which no documented workflow tells you to do.
+//
+// Gated on PATTERN containment rather than on the resolved tree: a dormant rule
+// matches nothing, so tree-derived scope can never decide whether it is in
+// scope. remove_owner(*, …) contains /vendor/ and reports it; remove_owner(
+// /src/, …) does not, and stays quiet about a rule it never claimed to touch.
+func warnUnreachableOwnerRules(f *file.File, tree []string, op ops.Op, pl *Plan) {
+	for i, ln := range f.Lines {
+		r := ln.Rule
+		if r == nil {
+			continue
+		}
+		survivors := ownersPresent(r.Owners, op.Owners)
+		if len(survivors) == 0 {
+			continue
+		}
+		if !pattern.Contains(op.Scope, r.PatternText) {
+			continue
+		}
+		matched := false
+		for _, p := range tree {
+			if r.Pattern.Match(p) {
+				matched = true
+				break
+			}
+		}
+		if matched {
+			continue
+		}
+		pl.addWarning(fmt.Sprintf(
+			"line %d: rule %q still names %s; it owns no files today, so remove_owner could not reach it — the owner keeps a claim that takes effect the moment a matching path appears (R-5/R-11); remove the line by hand, or with `lint --remove-stale-paths`",
+			i+1, r.PatternText, ownerNames(survivors)))
+	}
 }
 
 // removePass performs one round of removal edits; reports whether any edit
