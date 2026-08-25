@@ -1,7 +1,8 @@
 # Reference: the policy file
 
-Every field a policy may carry, the four operations, and the three settings that decide
-what a run is allowed to do. Commands and flags are in [COMMANDS.md](COMMANDS.md).
+Every field a policy may carry, and the three settings that decide what a run is allowed
+to do. What the ops themselves mean is in [OPERATIONS.md](OPERATIONS.md); commands and
+flags in [COMMANDS.md](COMMANDS.md).
 
 ## Policy file fields
 
@@ -18,7 +19,7 @@ what a run is allowed to do. Commands and flags are in [COMMANDS.md](COMMANDS.md
 | `op` | per op | yes | Op string, same syntax as `--op`. |
 | `id` | per op | no | Short label used in JSON results and error messages. |
 | `on_zero_match` | per op | no | `require` (default) \| `skip` \| `declare` |
-| `on_except_zero_match` | per op | no | `require` (default) \| `allow` — only on ops whose scope carries an `except` clause; governs an except pattern that matches zero tracked files ([below](#except--carving-paths-out-of-a-scope-r-26r-32), R-28) |
+| `on_except_zero_match` | per op | no | `require` (default) \| `allow` — only on ops whose scope carries an `except` clause; governs an except pattern that matches zero tracked files ([OPERATIONS.md](OPERATIONS.md#except--carving-paths-out-of-a-scope-r-26r-32), R-28) |
 | `except` | per op | no | Carve-out as a JSON array — `["/.github/CODEOWNERS"]` — equivalent to the `<scope> except <pat> …` string spelling, and exit 3 alongside it (R-37). Array elements need no delimiter escaping, so a space is written plainly: `"my dir/"`. |
 | `note` | per op | no | Reaches the PR reviewer via `--summary-out`. |
 
@@ -63,56 +64,6 @@ matters to a fleet:
 The static half is sound rather than complete: it reports only what `pattern.Contains`
 proves, because exit 3 halts a rollout and a false positive there is the expensive
 direction.
-
-## Operations
-
-Scope is a directory, file path, or glob — same syntax as CODEOWNERS patterns.
-
-| Op | Meaning |
-|---|---|
-| `add_owner(scope, owner)` | Owner — or a bracketed list `[a, b]` (R-33) — becomes a **co-owner**; every pre-existing owner of every path in scope is retained. |
-| `set_owners(scope, [owners])` | Exact owner set for every path in scope, displacing prior owners. `[]` is legal: it deliberately un-owns the scope. |
-| `remove_owner(scope, owner)` | Owner — or a bracketed list (R-33) — stops owning every path in scope. If a rule's owner set would empty, an `--on-empty` policy is **required**. |
-| `rename_owner(old, new)` | Global identifier substitution — the only op safe as pure text replacement (it can't change any rule's match set). |
-
-### `except` — carving paths out of a scope (R-26…R-32)
-
-An op's effective scope is `{tracked paths matching scope}` minus
-`{tracked paths matching any except pattern}`. Excepted paths are simply **out of this
-op's scope**: it neither grants nor revokes there. `except` is not a revocation — if the
-grantee already owns an excepted path, that ownership persists and is reported. It is also
-not a standing guarantee: `remove_owner` is the revoking verb, `audit` the watching one.
-
-Both spellings are equivalent, and carrying both on one op is exit 3 (R-37b):
-
-```
-add_owner(/.github/ except /.github/CODEOWNERS /.github/workflows/, @org/team-a)
-{ "op": "add_owner(/.github/, @org/team-a)", "except": ["/.github/CODEOWNERS"] }
-```
-
-In the string form the delimiter is unescaped whitespace, so a pattern containing a space
-escapes it (`my\ dir/`); in the array form each element is a plain JSON string and a
-pre-escaped one is refused. Flat subtraction only — no unions, no nesting, no
-except-of-except — and `rename_owner` has no scope, so it takes no `except`.
-
-These are policy errors (exit 3, caught by `check` with no repository): an except pattern
-not **provably contained** in its op's scope, one whose language equals or contains the
-scope (it would empty the op), two patterns of one op with equal languages, an `except`
-keyword with no patterns, and `on_zero_match: declare` alongside `except` (R-30 — a
-declared line cannot encode subtraction).
-
-Per repo, the two emptiness questions are **ordered**: an empty effective scope is
-disposed of by `on_zero_match` first, and `on_except_zero_match` is never consulted — an
-op that writes nothing can reopen nothing. Only if the op will write does an except
-pattern matching zero tracked files reach `on_except_zero_match`
-([cost](GUARANTEES.md#what-on_except_zero_match-allow-costs)).
-
-Where a written or amended line would otherwise govern an excepted path, the planner
-synthesizes a **carve line** restating that path's current owners, placed immediately
-after the line it corrects, and names the except clause in the `changes[]` reason. One
-edge refuses rather than synthesizing: an excepted path that currently matches **no** rule
-(exit 2). Unmatched and explicitly zero-owned are distinct states (S-9), and no writable
-line restores "unmatched" once a broad line captures the path.
 
 ## `--on-empty` / `on_empty` (R-6)
 

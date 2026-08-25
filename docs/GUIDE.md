@@ -192,7 +192,7 @@ guessing. Two ways out, both stated in the op itself:
 - **Narrow the scope** to something a sound rule *can* be written for — the concrete
   paths, or a directory-local glob: `add_owner(/infra/*.tf, @org/infra)`.
 - **Carve the conflicting paths out** with an `except` clause:
-  `add_owner(infra/ except infra/README.md, @org/infra)` — see [POLICY-FILE.md](POLICY-FILE.md#except--carving-paths-out-of-a-scope-r-26r-32).
+  `add_owner(infra/ except infra/README.md, @org/infra)` — see [OPERATIONS.md](OPERATIONS.md#except--carving-paths-out-of-a-scope-r-26r-32).
 
 A same-owners `set_owners` does not help: it changes no ownership, so the run reports
 `unchanged`. Exit `2` means *this repo* needs a human; exit `3` means *the policy* is

@@ -79,7 +79,7 @@ reports `unchanged`, and every untouched byte survives: comments, blank lines, o
 
 Beyond `ops`, a policy carries `create` (permission to write a CODEOWNERS where a repo has
 none), `on_empty`, `max_paths_changed`, `defaults`, and a `lint` block — every field in
-[POLICY-FILE.md#policy-file-fields](docs/POLICY-FILE.md#policy-file-fields).
+[POLICY-FILE.md](docs/POLICY-FILE.md#policy-file-fields).
 
 > **One-off changes.** `--op 'add_owner(/docs/, @org/docs-team)'` runs a single op with no
 > file. It is for exploring; anything you'd want reviewed, or run twice, belongs in a policy.
@@ -94,7 +94,9 @@ derives for you.
 
 **Each entry in `ops` is one intent.** Scope is a directory, file path, or glob, using
 CODEOWNERS pattern syntax; a space in a path is escaped with a backslash
-(`docs/release\ notes.md`).
+(`docs/release\ notes.md`). Where an op takes an owner it also takes a bracketed **list** —
+`add_owner(/services/api/, [@org/platform, @org/sre])` — one line change rather than two,
+and for `remove_owner` [the only always-correct spelling](docs/OPERATIONS.md#naming-several-owners-in-one-op-r-33).
 
 | Op | What it means |
 |---|---|
@@ -113,9 +115,9 @@ the mistake the tool exists to prevent. Against `/services/api/ @org/api-team`:
 
 **`@org/api-team` survives the first and is gone from the second** — which is what
 `set_owners` was asked for, explicitly. Editing the file by hand, both look like the same
-one-line edit. That's the trap: adding `/services/api/ @org/team-1` at the bottom of a
-file *silently* performs the second one. (An op can also carve out sub-paths with an
-`except` clause — see [POLICY-FILE.md#operations](docs/POLICY-FILE.md#operations).)
+one-line edit. That's the trap: adding `/services/api/ @org/team-1` at the bottom of a file
+*silently* performs the second one. (An op can also carve out sub-paths with an `except`
+clause — see [OPERATIONS.md](docs/OPERATIONS.md#except--carving-paths-out-of-a-scope-r-26r-32).)
 
 **Two invariants hold on every write**, or the write doesn't happen:
 
@@ -169,16 +171,15 @@ a silent no-op looking like success: **[docs/FLEET.md](docs/FLEET.md)**.
 
 ## Documentation
 
-- **[GUIDE.md](docs/GUIDE.md)** — worked end-to-end changes: bootstrap a file, modify
-  one, review a change, understand a refusal.
-- **[REFERENCE.md](docs/REFERENCE.md)** — every flag, policy field, JSON field, exit
-  code, op semantic and audit check; plus GitHub semantics the tool encodes.
+- **[GUIDE.md](docs/GUIDE.md)** — worked end-to-end changes: bootstrap a file, modify one,
+  review a change, understand a refusal.
+- **[REFERENCE.md](docs/REFERENCE.md)** — the lookup tables: flags, policy fields, op
+  semantics, JSON fields, exit codes, audit checks, guarantees.
 - **[LINTING.md](docs/LINTING.md)** — audit and repair, and every error they can print.
 - **[FLEET.md](docs/FLEET.md)** — rolling one policy across many repos.
 - **[CONCEPTS.md](docs/CONCEPTS.md)** — glossary, and habits that save you.
-- **[BEHAVIOR.md](docs/BEHAVIOR.md)** — generated from the test suite. Every `R-`, `S-`,
-  `INV-` and `A-` identifier in these docs is a numbered requirement enforced by a named
-  test, and this is where you look it up.
+- **[BEHAVIOR.md](docs/BEHAVIOR.md)** — generated from the test suite; every `R-`, `S-`,
+  `INV-` and `A-` identifier in these docs is looked up here.
 - **[INSTALL.md](docs/INSTALL.md)** — every install route, provenance verification, GHES.
 - **[CONTRIBUTING.md](CONTRIBUTING.md)** · **[SECURITY.md](SECURITY.md)** · **[CHANGELOG.md](CHANGELOG.md)**
 
@@ -187,10 +188,9 @@ a silent no-op looking like success: **[docs/FLEET.md](docs/FLEET.md)**.
 The test suite is the specification: every test carries a doc comment naming the
 requirement it enforces, and `make docs` regenerates
 [docs/BEHAVIOR.md](docs/BEHAVIOR.md) from those comments, so the docs cannot drift from
-what is verified. On top of the unit and end-to-end tests: a 500k-case differential
-fuzz against the [hmarr/codeowners](https://github.com/hmarr/codeowners) matcher as an
-oracle, and property tests that prove INV-1/INV-2 and idempotence by independent
-re-resolution.
+what is verified. On top of the unit and end-to-end tests: a 500k-case differential fuzz
+against the [hmarr/codeowners](https://github.com/hmarr/codeowners) matcher as an oracle,
+and property tests proving INV-1/INV-2 and idempotence by independent re-resolution.
 
 ## License
 
