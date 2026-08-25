@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/jordonpeterson/codeowners-tool/internal/apply"
@@ -220,6 +221,10 @@ func cmdSync(args []string, stdout, stderr io.Writer) int {
 	// means the parser read nothing after it, flags included.
 	if err := rejectLeftoverArgs(fs); err != nil {
 		return exit3s(err)
+	}
+	if err := rejectEmptyRepo(fs, *repo); err != nil {
+		fmt.Fprintln(stderr, "error:", err)
+		return ExitInvalid
 	}
 	// Which flags were TYPED, as opposed to which hold a non-zero value. Every
 	// "not allowed with --policy" ban below is a ban on the flag being
@@ -457,6 +462,7 @@ func (r *syncRun) execute() (SyncRecord, int) {
 		}
 	}
 	rec.PathsChanged = len(p.Rows)
+	rec.OwnersRemoved = lostAccess(p.Rows)
 	rec.Warnings = append(fileWarnings, p.Warnings...)
 
 	// R-25: the blast-radius ceiling. Opt-in, no default — a default would
@@ -1136,7 +1142,7 @@ func (r *syncRun) write(rel string, p *plan.Plan, creating bool) error {
 			return err
 		}
 	}
-	if err := apply.Apply(p, target); err != nil {
+	if _, err := apply.Apply(p, target); err != nil {
 		if creating {
 			// Never leave the empty seed behind: a zero-byte CODEOWNERS is a file
 			// that governs nothing while making every later run think one exists.
@@ -1302,6 +1308,18 @@ func renderSummary(rec SyncRecord, r *syncRun) string {
 		b.WriteString("\n## Worth a look\n\n")
 		for _, w := range rec.Warnings {
 			fmt.Fprintf(&b, "- %s\n", w)
+		}
+	}
+
+	// Owners losing access get their own section, above the per-op table. A
+	// reviewer reading a rollout PR needs "who stops owning things" before
+	// "how many paths changed": five paths changing reads the same whether the
+	// run co-owned them or displaced their owners, and only one of those is
+	// worth stopping for. The PR is the one moment somebody is already reading.
+	if len(rec.OwnersRemoved) > 0 {
+		b.WriteString("\n## Owners losing access\n\n")
+		for _, line := range lostAccessByOwner(rec.OwnersRemoved) {
+			fmt.Fprintf(&b, "- %s\n", line)
 		}
 	}
 
@@ -1557,4 +1575,85 @@ func resolvedExceptZeroMatch(o ops.Op) resolvedSetting {
 		return resolvedSetting{Value: o.OnExceptZeroMatch}
 	}
 	return resolvedSetting{Value: ops.ExceptZeroMatchRequire, Note: "built-in"}
+}
+
+// lostAccess reduces the planner's ownership rows to the paths whose owner set
+// SHRANK, with the owners that stop owning each. The rows already carry
+// before/after for every path the run moves; this is surfacing, not analysis.
+//
+// Owner identity is R-38a's throughout (ops.FoldOwner via ownersMissing), so a
+// re-spelled handle is not reported as a loss — a fleet that cried "@Org/Team
+// loses access" every time a run normalised nothing would be unreadable.
+//
+// A path going from owned to unowned is the sharpest loss there is, and falls
+// out of the same subtraction: every before-owner is missing from an empty
+// after-set.
+func lostAccess(rows []plan.Row) []LostAccess {
+	var out []LostAccess
+	for _, r := range rows {
+		if lost := ownersLost(r.Before, r.After); len(lost) > 0 {
+			out = append(out, LostAccess{Path: r.Path, Owners: lost})
+		}
+	}
+	return out
+}
+
+// ownersLost returns the members of before, in before's order, that no longer
+// appear in after. Identity is R-38a's -- @handles are case-insensitive on
+// GitHub -- so a run that merely re-spells a handle reports no loss. A fleet
+// that cried "@Org/Team loses access" every time a spelling settled would be
+// unreadable, and worse, would be wrong.
+func ownersLost(before, after []string) []string {
+	keep := map[string]bool{}
+	for _, o := range after {
+		keep[ops.FoldOwner(o)] = true
+	}
+	var out []string
+	seen := map[string]bool{}
+	for _, o := range before {
+		k := ops.FoldOwner(o)
+		if keep[k] || seen[k] {
+			continue
+		}
+		seen[k] = true
+		out = append(out, o)
+	}
+	return out
+}
+
+// summaryPathsPerOwner caps how many paths one owner's line names in the PR
+// body. A displacing baseline on a large repository can touch thousands; the
+// reviewer's question is "who, and roughly how much", and the record carries
+// the full list for anyone who needs it.
+const summaryPathsPerOwner = 5
+
+// lostAccessByOwner renders one line per owner rather than one per path: the
+// question a reviewer is answering is "which teams stop owning things", and a
+// per-path list buries three team names under five hundred rows.
+func lostAccessByOwner(lost []LostAccess) []string {
+	paths := map[string][]string{}
+	var order []string
+	for _, l := range lost {
+		for _, o := range l.Owners {
+			if _, seen := paths[o]; !seen {
+				order = append(order, o)
+			}
+			paths[o] = append(paths[o], l.Path)
+		}
+	}
+	sort.Strings(order)
+
+	out := make([]string, 0, len(order))
+	for _, o := range order {
+		ps := paths[o]
+		shown := ps
+		suffix := ""
+		if len(ps) > summaryPathsPerOwner {
+			shown = ps[:summaryPathsPerOwner]
+			suffix = fmt.Sprintf(", and %d more", len(ps)-summaryPathsPerOwner)
+		}
+		out = append(out, fmt.Sprintf("**%s** stops owning %d path(s): `%s`%s",
+			o, len(ps), strings.Join(shown, "`, `"), suffix))
+	}
+	return out
 }

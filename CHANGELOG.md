@@ -73,6 +73,7 @@ changes to which class a failure lands in are called out explicitly.
 - **docs/FLEET.md's resumable script no longer retires the repos it files for
   triage.** An exit-2 repo went into `needs-human` *and* `done.txt`, so the
   resume guard skipped it forever — including after a human fixed it. (#37)
+<<<<<<< HEAD
 - **What `declare` costs a FLEET is documented.** `docs/GUARANTEES.md` was honest
   about the single-repo mechanism (INV-1 weakens) and silent on the consequence a
   baseline rollout exists to prevent: one policy, one op, two owner sets. Where
@@ -86,12 +87,75 @@ changes to which class a failure lands in are called out explicitly.
   name the owner set explicitly with `set_owners` rather than relying on the
   carry — and GUIDE.md's worked example, which teaches the carry, now says where
   it does not apply. (#38)
+=======
+<<<<<<< HEAD
+- **`sync` reports who LOSES access.** The record and `--summary-out` are what
+  docs/FLEET.md loops over, and for a displacing change they carried no
+  before-state at all: `changes` is line-level, an inserted rule has no previous
+  line, so `set_owners(*, [@acme/everyone])` over a repo with hand-curated
+  ownership reported `applied`, `5 path(s) change owners`, `warnings: null` —
+  and three teams had just lost a security directory. Nothing distinguished
+  co-owning five files from displacing five files' owners. The planner already
+  computed it; `owners_removed` now carries it per path, and `--summary-out`
+  gains an **Owners losing access** section grouped by owner, since the
+  reviewer's question is which teams stop owning things rather than how many
+  paths moved. Present only when access is actually lost, and a run that merely
+  re-spells a handle reports none: owner identity is R-38a's. Named the single
+  highest-value improvement by two independent user tests. (#32)
+=======
+- **A `remove_owner` that could not reach a dormant rule says so.** A rule whose
+  pattern matches zero tracked files is invisible to the op — its scope is
+  derived from paths, and a pattern matching nothing has no path to derive from
+  — so `remove_owner(*, @org/legacy)` reported `unchanged` at exit 0 with
+  `warnings: null` against a file still reading `/vendor/ @org/legacy`. In a
+  fleet grouped on `.status` that repo read as ALREADY CORRECT, and a dissolved
+  team kept a live claim that activates the moment somebody creates `vendor/`.
+  One reporter found it only by grepping the fleet for the handle after the tool
+  had declared it clean. The run now warns, naming the line and the owner, gated
+  on pattern containment so a narrower op stays quiet about rules it never
+  claimed to touch. The R-5 refusal reached by naming the dormant pattern
+  directly no longer says "refusing to create a dead rule" either: `remove_owner`
+  creates nothing, and blaming creation sent operators to the wrong argument.
+  `docs/OPERATIONS.md` now states the reachability difference between
+  `remove_owner` (path-scoped) and `rename_owner` (textual), which nothing did.
+  (#31)
+>>>>>>> origin/main
+>>>>>>> origin/main
 - **`--summary-out`'s `proven` column stops doubling as the skip reason**, which
   put a full sentence where a reviewer scans for `tree` or `structural`. Reasons
   have their own column. (#41)
 
 ### Security
 
+- **`apply` verifies the plan, not just the file the plan was computed against.**
+  `sha256_before` covers the CODEOWNERS a plan was planned over; nothing covered
+  the plan, so a plan corrupted, truncated or hand-edited between review and
+  apply was written verbatim at exit 0 — and the success line's byte counts came
+  from the plan's own `size_before`/`size_after`, so the confirmation reported
+  101 bytes for an 18-byte write. Plans now carry `sha256_after` over
+  `after_content`, `apply` checks it, and a plan without the field is refused
+  rather than treated as a waived check. The bytes reported are measured on
+  disk. A plan is explicitly a reviewable artifact that travels between
+  generation and application, which is the window this closes. **Schema change:**
+  `sha256_after` is a new required key in the plan document.
+- **A plan is bound to the repository and the tree it was computed in.**
+  `sha256_before` caught a CODEOWNERS that moved between `plan` and `apply`;
+  nothing caught a repository swap or a moved TREE. `apply --repo` took the flag
+  and ignored the plan's own `repo` field, so a plan computed against one clone
+  wrote into another — and because identical bootstrap CODEOWNERS across many
+  repos is exactly what this tool is for, the hash guard collided legitimately
+  and let it through, while the bytes-differ refusal blamed "changed since the
+  plan was computed" and sent the operator after an edit that never happened.
+  Separately, `ownership_rows` — the artifact a human approves — was computed at
+  plan time and never revalidated, so in the documented plan-in-CI /
+  apply-after-merge sequence a colleague's merge under the reviewed scope
+  widened the blast radius silently at exit 0 (3 paths where the plan declared
+  1). Plans now record `tree_sha256` and an absolute `repo`, and `apply` refuses
+  on either mismatch, naming the actual cause. Recording `repo` absolute also
+  fixes `plan --repo .`, whose plan could not be applied from any other working
+  directory: it died on `git rev-parse --show-toplevel: fatal: not a git
+  repository`. **Schema change:** `tree_sha256` is a new key in the plan
+  document, and `repo` is now always absolute.
 - **`install.sh` verifies build provenance, not just the checksum.** Releases
   already carried an attestation and nothing read it. `checksums.txt` ships on the
   same release from the same host, so it proves integrity in transit and nothing

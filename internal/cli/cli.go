@@ -94,6 +94,31 @@ func rejectLeftoverArgs(fs *flag.FlagSet) error {
 		fs.Arg(0), fs.Name())
 }
 
+// rejectEmptyRepo refuses `--repo ""`, the unset-variable bug every fleet
+// script eventually has:
+//
+//	REPO=$(lookup_repo "$name")     # returned nothing
+//	codeowners-tool sync --repo "$REPO" --op '...'
+//
+// A typo'd path fails correctly. The empty string was the one wrong value that
+// got a DEFAULT instead of an error — `.` — so the run targeted whatever
+// directory the script happened to be standing in and wrote to it at exit 0,
+// while the record carried "repo":"" and a fleet's results.jsonl gained a
+// success row that did not say which repository had changed.
+//
+// It asks whether the flag was PASSED rather than reading its value, because
+// `apply --repo` defaults to "" to mean "use the plan's own repo" — there the
+// value alone cannot tell an operator's empty string from an absent flag.
+//
+// Exit 3: an empty --repo is broken invocation, identical on every repository,
+// so a fleet should stop at repo 0 rather than report it a hundred times.
+func rejectEmptyRepo(fs *flag.FlagSet, value string) error {
+	if !isFlagSet(fs, "repo") || value != "" {
+		return nil
+	}
+	return fmt.Errorf(`--repo was given an empty value; pass a path, or omit the flag to use the working directory. An empty string is what a shell produces when the variable behind it is unset, so it is refused rather than defaulting`)
+}
+
 // isFlagSet reports whether the operator actually PASSED a flag, as opposed to
 // inheriting its default. --cache-ttl has a non-zero default, so "did you ask
 // for this?" cannot be read off its value.
@@ -147,7 +172,25 @@ type SyncRecord struct {
 	DryRun   bool          `json:"dry_run,omitempty"`
 	Warnings []string      `json:"warnings,omitempty"`
 	Changes  []plan.Change `json:"changes,omitempty"`
-	Error    string        `json:"error,omitempty"`
+	// OwnersRemoved names, per path, the owners this run takes access AWAY
+	// from. `changes` is line-level and an `insert` has no previous line, so a
+	// displacing `set_owners` carried no before-state at all: the record said
+	// five paths CHANGED, never "three teams stop owning things". Nothing in
+	// the sync path distinguished co-owning five files from displacing five
+	// files' owners, and docs/FLEET.md is explicit that a rollout loops over
+	// sync, so at fleet scale the artifact that would catch it was the one you
+	// did not have. The planner already computes this; the key surfaces it.
+	//
+	// omitempty: present only when access is actually lost. A key on every
+	// record is a key a fleet stops reading.
+	OwnersRemoved []LostAccess `json:"owners_removed,omitempty"`
+	Error         string       `json:"error,omitempty"`
+}
+
+// LostAccess is one path and the owners that stop owning it.
+type LostAccess struct {
+	Path   string   `json:"path"`
+	Owners []string `json:"owners"`
 }
 
 // Sync statuses (R-24). "skipped" is distinct from "unchanged" so a policy
@@ -164,9 +207,19 @@ const (
 // planFile is Plan plus the apply-time context the CLI adds.
 type planFile struct {
 	plan.Plan
+	// Repo is absolute. It used to be whatever string reached --repo, so a
+	// plan made with `--repo .` recorded "." and could not be applied from any
+	// other working directory — it died on raw git plumbing. A plan is an
+	// artifact that travels; a relative path in it names a different place
+	// depending on where it is read.
 	Repo           string `json:"repo"`
 	Ref            string `json:"ref"`
 	CodeownersPath string `json:"codeowners_path"`
+	// TreeSHA256 fingerprints the tracked tree the plan was computed against.
+	// sha256_before catches a CODEOWNERS that moved; nothing caught a TREE
+	// that moved, so ownership_rows -- the artifact a human reviews -- could
+	// understate the blast radius by the time apply ran.
+	TreeSHA256 string `json:"tree_sha256"`
 }
 
 // Run executes argv (without the program name) and returns the exit code.
@@ -455,6 +508,30 @@ func resolveExistingPrefix(dir string) string {
 // absent component (the --create case) has no link to refuse, and a --repo
 // reached through links above the root (macOS /var -> /private/var) stays
 // legitimate. The walk is bounded by the path's own depth.
+// absRepo makes a repository path absolute for the record. A plan travels, so
+// a relative path in it names a different place depending on where it is read.
+// Abs can only fail when the working directory is gone; degrading to the raw
+// spelling then is no worse than what was recorded before.
+func absRepo(dir string) string {
+	if abs, err := filepath.Abs(dir); err == nil {
+		return abs
+	}
+	return dir
+}
+
+// sameRepo compares two repository paths as LOCATIONS rather than as strings,
+// so /tmp/r, /tmp/./r and a symlinked spelling of the same clone all agree.
+func sameRepo(a, b string) bool {
+	ra, rb := absRepo(a), absRepo(b)
+	if resolved, err := filepath.EvalSymlinks(ra); err == nil {
+		ra = resolved
+	}
+	if resolved, err := filepath.EvalSymlinks(rb); err == nil {
+		rb = resolved
+	}
+	return ra == rb
+}
+
 func refuseSymlinkedTarget(target string) error {
 	// Abs can only fail when the CWD is gone; degrade to the raw spelling —
 	// the walk then covers the final component, the pre-walk behavior.
@@ -536,6 +613,10 @@ func cmdPlan(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "error:", err)
 		return ExitInvalid
 	}
+	if err := rejectEmptyRepo(fs, *repo); err != nil {
+		fmt.Fprintln(stderr, "error:", err)
+		return ExitInvalid
+	}
 	if len(opSpecs) == 0 {
 		fmt.Fprintln(stderr, "error: at least one --op is required")
 		return ExitInvalid
@@ -572,7 +653,7 @@ func cmdPlan(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		return errExit(err, stderr)
 	}
-	pf := planFile{Plan: *p, Repo: *repo, Ref: *branch, CodeownersPath: coPath}
+	pf := planFile{Plan: *p, Repo: absRepo(*repo), Ref: *branch, CodeownersPath: coPath, TreeSHA256: gittree.Digest(tree)}
 	b, _ := json.MarshalIndent(pf, "", "  ")
 	if *out != "" {
 		if err := os.WriteFile(*out, b, 0o644); err != nil {
@@ -602,6 +683,10 @@ func cmdApply(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "error:", err)
 		return ExitInvalid
 	}
+	if err := rejectEmptyRepo(fs, *repo); err != nil {
+		fmt.Fprintln(stderr, "error:", err)
+		return ExitInvalid
+	}
 	if *planPath == "" {
 		fmt.Fprintln(stderr, "error: --plan is required")
 		return ExitInvalid
@@ -616,6 +701,19 @@ func cmdApply(args []string, stdout, stderr io.Writer) int {
 	}
 	repoDir := pf.Repo
 	if *repo != "" {
+		// A plan is bound to the repository it was computed in. --repo used to
+		// override the plan's own repo field silently, so a plan computed
+		// against one clone was applied to another -- and because identical
+		// bootstrap CODEOWNERS across many repos is exactly what this tool is
+		// for, the sha256_before guard collided legitimately and let it
+		// through. The bytes-differ refusal also blamed "changed since the
+		// plan was computed", pointing the operator at an edit that never
+		// happened.
+		if pf.Repo != "" && !sameRepo(*repo, pf.Repo) {
+			return errExit(&plan.RefusalError{Msg: fmt.Sprintf(
+				"refusing: --repo %s is a different repository from the one this plan was computed against (%s). A plan's ownership rows are facts about ONE tree, so applying it elsewhere moves ownership nobody reviewed; re-run plan against this repository, or use `sync --policy` to roll one intent across a fleet — nothing was written",
+				*repo, pf.Repo)}, stderr)
+		}
 		repoDir = *repo
 	}
 	// The same repo-root guard `sync` enforces (checkRepoRoot), re-checked at
@@ -639,10 +737,40 @@ func cmdApply(args []string, stdout, stderr io.Writer) int {
 	if err := refuseSymlinkedTarget(target); err != nil {
 		return errExit(err, stderr)
 	}
-	if err := apply.Apply(&pf.Plan, target); err != nil {
+	// The tree the plan was reviewed against. sha256_before proves CODEOWNERS
+	// has not moved; this proves the thing it is resolved AGAINST has not
+	// either. Without it the documented plan-in-CI / apply-after-merge
+	// sequence let a colleague's merge widen the blast radius under a plan a
+	// human had already approved, silently and at exit 0.
+	if pf.TreeSHA256 != "" {
+		ref := pf.Ref
+		if ref == "" {
+			ref = "HEAD"
+		}
+		tree, err := gittree.ListTracked(repoDir, ref)
+		if err != nil {
+			return errExit(&plan.InvalidError{Msg: err.Error()}, stderr)
+		}
+		if got := gittree.Digest(tree); got != pf.TreeSHA256 {
+			return errExit(&plan.RefusalError{Msg: fmt.Sprintf(
+				"refusing: the tracked tree at %s has changed since this plan was computed, so the ownership rows that were reviewed are no longer what this plan would do — paths added under a reviewed scope gain its owners without appearing in the plan; re-run plan and review it again — nothing was written",
+				ref)}, stderr)
+		}
+	}
+	// A plan read off disk MUST carry its own integrity field. Treating a
+	// missing sha256_after as "no check requested" would make deleting one
+	// line of JSON the way past the check that exists to catch edited plans.
+	if pf.HashAfter == "" {
+		return errExit(&plan.InvalidError{Msg: fmt.Sprintf(
+			"%s has no sha256_after, so the plan's own contents cannot be verified; it was written by a version that predates the field — re-run plan", *planPath)}, stderr)
+	}
+	written, err := apply.Apply(&pf.Plan, target)
+	if err != nil {
 		return errExit(err, stderr)
 	}
-	fmt.Fprintf(stdout, "applied: %s (%d → %d bytes)\n", target, pf.SizeBefore, pf.SizeAfter)
+	// The plan's size_before/size_after are claims by the document being
+	// applied. These two numbers were measured on disk.
+	fmt.Fprintf(stdout, "applied: %s (%d → %d bytes)\n", target, written.Before, written.After)
 	return ExitOK
 }
 
@@ -657,6 +785,10 @@ func cmdSnapshot(args []string, stdout, stderr io.Writer) int {
 		return flagParseCode(err)
 	}
 	if err := rejectLeftoverArgs(fs); err != nil {
+		fmt.Fprintln(stderr, "error:", err)
+		return ExitInvalid
+	}
+	if err := rejectEmptyRepo(fs, *repo); err != nil {
 		fmt.Fprintln(stderr, "error:", err)
 		return ExitInvalid
 	}
@@ -720,14 +852,35 @@ func cmdVerify(args []string, stdout, stderr io.Writer) int {
 	for _, c := range res.Changed {
 		fmt.Fprintf(stdout, "changed: %s  %s → %s\n", c.Path, fmtOwners(c.Before), fmtOwners(c.After))
 	}
+	// Tree deltas are reported, never fatal (R-18). They are the ordinary
+	// difference between two refs, so they print after the ownership changes
+	// rather than competing with them for a reader's attention.
+	for _, c := range res.Added {
+		fmt.Fprintf(stdout, "added:   %s  %s\n", c.Path, fmtOwners(c.After))
+	}
+	for _, c := range res.Removed {
+		fmt.Fprintf(stdout, "removed: %s  %s\n", c.Path, fmtOwners(c.Before))
+	}
 	if !res.OK() {
-		fmt.Fprintf(stderr, "INVARIANT VIOLATED: %d path(s) changed outside the declared scope\n", len(res.Violations))
+		// The loudest string in the tool is reserved for the case it is about:
+		// a run that DECLARED where change was allowed and found change
+		// elsewhere. With no --scope, verify is a query — "did anything
+		// change?" — and a negative answer is information, not an alarm. Three
+		// of five user tests flagged the old wording independently, one of them
+		// on the documented post-merge recipe ("a scary word for a routine
+		// query"). The exit code is unchanged in both cases; only the sentence
+		// moves.
+		if len(scopes) == 0 {
+			fmt.Fprintf(stderr, "%d path(s) changed, and no --scope was declared — with no scope, verify asserts that NOTHING changed (--scope is repeatable; pass one per intended scope)\n", len(res.Violations))
+		} else {
+			fmt.Fprintf(stderr, "INVARIANT VIOLATED: %d path(s) changed that no --scope declared (--scope is repeatable; pass one per intended scope)\n", len(res.Violations))
+		}
 		for _, v := range res.Violations {
 			fmt.Fprintf(stderr, "  %s  %s → %s\n", v.Path, fmtOwners(v.Before), fmtOwners(v.After))
 		}
 		return ExitRefused
 	}
-	fmt.Fprintf(stdout, "ok: %d change(s), all within scope\n", len(res.Changed))
+	fmt.Fprintf(stdout, "ok: %d change(s), all within scope%s\n", len(res.Changed), fmtTreeDeltas(res))
 	return ExitOK
 }
 
@@ -760,6 +913,10 @@ func cmdAudit(args []string, stdout, stderr io.Writer) int {
 		return flagParseCode(err)
 	}
 	if err := rejectLeftoverArgs(fs); err != nil {
+		fmt.Fprintln(stderr, "error:", err)
+		return ExitInvalid
+	}
+	if err := rejectEmptyRepo(fs, *repo); err != nil {
 		fmt.Fprintln(stderr, "error:", err)
 		return ExitInvalid
 	}
@@ -985,4 +1142,16 @@ func fmtOwners(o []string) string {
 		return "{}"
 	}
 	return "{" + strings.Join(o, ", ") + "}"
+}
+
+// fmtTreeDeltas renders the tree-delta counts as a suffix to verify's success
+// line. They are reported rather than folded into the change count: a reader
+// checking "all within scope" against a number needs that number to be the
+// ownership changes it is a claim about.
+func fmtTreeDeltas(res *verify.Result) string {
+	if len(res.Added) == 0 && len(res.Removed) == 0 {
+		return ""
+	}
+	return fmt.Sprintf(" (%d added, %d removed — tree deltas, not ownership changes)",
+		len(res.Added), len(res.Removed))
 }
