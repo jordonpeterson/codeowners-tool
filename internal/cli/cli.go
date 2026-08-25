@@ -757,14 +757,35 @@ func cmdVerify(args []string, stdout, stderr io.Writer) int {
 	for _, c := range res.Changed {
 		fmt.Fprintf(stdout, "changed: %s  %s → %s\n", c.Path, fmtOwners(c.Before), fmtOwners(c.After))
 	}
+	// Tree deltas are reported, never fatal (R-18). They are the ordinary
+	// difference between two refs, so they print after the ownership changes
+	// rather than competing with them for a reader's attention.
+	for _, c := range res.Added {
+		fmt.Fprintf(stdout, "added:   %s  %s\n", c.Path, fmtOwners(c.After))
+	}
+	for _, c := range res.Removed {
+		fmt.Fprintf(stdout, "removed: %s  %s\n", c.Path, fmtOwners(c.Before))
+	}
 	if !res.OK() {
-		fmt.Fprintf(stderr, "INVARIANT VIOLATED: %d path(s) changed outside the declared scope\n", len(res.Violations))
+		// The loudest string in the tool is reserved for the case it is about:
+		// a run that DECLARED where change was allowed and found change
+		// elsewhere. With no --scope, verify is a query — "did anything
+		// change?" — and a negative answer is information, not an alarm. Three
+		// of five user tests flagged the old wording independently, one of them
+		// on the documented post-merge recipe ("a scary word for a routine
+		// query"). The exit code is unchanged in both cases; only the sentence
+		// moves.
+		if len(scopes) == 0 {
+			fmt.Fprintf(stderr, "%d path(s) changed, and no --scope was declared — with no scope, verify asserts that NOTHING changed (--scope is repeatable; pass one per intended scope)\n", len(res.Violations))
+		} else {
+			fmt.Fprintf(stderr, "INVARIANT VIOLATED: %d path(s) changed that no --scope declared (--scope is repeatable; pass one per intended scope)\n", len(res.Violations))
+		}
 		for _, v := range res.Violations {
 			fmt.Fprintf(stderr, "  %s  %s → %s\n", v.Path, fmtOwners(v.Before), fmtOwners(v.After))
 		}
 		return ExitRefused
 	}
-	fmt.Fprintf(stdout, "ok: %d change(s), all within scope\n", len(res.Changed))
+	fmt.Fprintf(stdout, "ok: %d change(s), all within scope%s\n", len(res.Changed), fmtTreeDeltas(res))
 	return ExitOK
 }
 
@@ -1026,4 +1047,16 @@ func fmtOwners(o []string) string {
 		return "{}"
 	}
 	return "{" + strings.Join(o, ", ") + "}"
+}
+
+// fmtTreeDeltas renders the tree-delta counts as a suffix to verify's success
+// line. They are reported rather than folded into the change count: a reader
+// checking "all within scope" against a number needs that number to be the
+// ownership changes it is a claim about.
+func fmtTreeDeltas(res *verify.Result) string {
+	if len(res.Added) == 0 && len(res.Removed) == 0 {
+		return ""
+	}
+	return fmt.Sprintf(" (%d added, %d removed — tree deltas, not ownership changes)",
+		len(res.Added), len(res.Removed))
 }
