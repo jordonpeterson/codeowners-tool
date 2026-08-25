@@ -720,6 +720,15 @@ func cmdVerify(args []string, stdout, stderr io.Writer) int {
 	for _, c := range res.Changed {
 		fmt.Fprintf(stdout, "changed: %s  %s → %s\n", c.Path, fmtOwners(c.Before), fmtOwners(c.After))
 	}
+	// Tree deltas are reported, never fatal (R-18). They are the ordinary
+	// difference between two refs, so they print after the ownership changes
+	// rather than competing with them for a reader's attention.
+	for _, c := range res.Added {
+		fmt.Fprintf(stdout, "added:   %s  %s\n", c.Path, fmtOwners(c.After))
+	}
+	for _, c := range res.Removed {
+		fmt.Fprintf(stdout, "removed: %s  %s\n", c.Path, fmtOwners(c.Before))
+	}
 	if !res.OK() {
 		fmt.Fprintf(stderr, "INVARIANT VIOLATED: %d path(s) changed outside the declared scope\n", len(res.Violations))
 		for _, v := range res.Violations {
@@ -727,7 +736,7 @@ func cmdVerify(args []string, stdout, stderr io.Writer) int {
 		}
 		return ExitRefused
 	}
-	fmt.Fprintf(stdout, "ok: %d change(s), all within scope\n", len(res.Changed))
+	fmt.Fprintf(stdout, "ok: %d change(s), all within scope%s\n", len(res.Changed), fmtTreeDeltas(res))
 	return ExitOK
 }
 
@@ -985,4 +994,16 @@ func fmtOwners(o []string) string {
 		return "{}"
 	}
 	return "{" + strings.Join(o, ", ") + "}"
+}
+
+// fmtTreeDeltas renders the tree-delta counts as a suffix to verify's success
+// line. They are reported rather than folded into the change count: a reader
+// checking "all within scope" against a number needs that number to be the
+// ownership changes it is a claim about.
+func fmtTreeDeltas(res *verify.Result) string {
+	if len(res.Added) == 0 && len(res.Removed) == 0 {
+		return ""
+	}
+	return fmt.Sprintf(" (%d added, %d removed — tree deltas, not ownership changes)",
+		len(res.Added), len(res.Removed))
 }
