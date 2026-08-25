@@ -62,6 +62,12 @@ same list:
 each time someone adds a file — at the cost of a weaker guarantee, explained in
 [what `declare` costs](GUARANTEES.md#what-declare-costs).
 
+One of those costs bites specifically here: an `add_owner` that is declared in some repos
+and amended in others produces **different owner sets**, because only the amended ones
+carry the catch-all owner onto the new rule. If the baseline is supposed to be identical,
+name the owners you want with `set_owners` instead of relying on that carry — otherwise
+you find it, as one reporter did, by diffing two output files against each other.
+
 Check the policy before it reaches a single repo:
 
 ```console

@@ -74,6 +74,21 @@ changes to which class a failure lands in are called out explicitly.
   triage.** An exit-2 repo went into `needs-human` *and* `done.txt`, so the
   resume guard skipped it forever — including after a human fixed it. (#37)
 <<<<<<< HEAD
+- **What `declare` costs a FLEET is documented.** `docs/GUARANTEES.md` was honest
+  about the single-repo mechanism (INV-1 weakens) and silent on the consequence a
+  baseline rollout exists to prevent: one policy, one op, two owner sets. Where
+  the directory exists, `add_owner` amends against the tree and carries the
+  catch-all owner onto the narrowing rule; where it does not, the rule is
+  declared from nothing and the catch-all is absent — so
+  `/.github/workflows/ @acme/platform-ci` displaces `@acme/everyone` the moment
+  somebody adds a workflow. One reporter's "identical org baseline" left 3 of 12
+  repos that way, found only by diffing two output files. Now stated in
+  GUARANTEES.md and FLEET.md with the workaround they had to derive unaided —
+  name the owner set explicitly with `set_owners` rather than relying on the
+  carry — and GUIDE.md's worked example, which teaches the carry, now says where
+  it does not apply. (#38)
+=======
+<<<<<<< HEAD
 - **`sync` reports who LOSES access.** The record and `--summary-out` are what
   docs/FLEET.md loops over, and for a displacing change they carried no
   before-state at all: `changes` is line-level, an inserted rule has no previous
@@ -104,6 +119,7 @@ changes to which class a failure lands in are called out explicitly.
   `docs/OPERATIONS.md` now states the reachability difference between
   `remove_owner` (path-scoped) and `rename_owner` (textual), which nothing did.
   (#31)
+>>>>>>> origin/main
 >>>>>>> origin/main
 - **`--summary-out`'s `proven` column stops doubling as the skip reason**, which
   put a full sentence where a reviewer scans for `tree` or `structural`. Reasons

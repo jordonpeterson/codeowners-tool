@@ -57,7 +57,8 @@ README.md @org/everyone @org/docs-team
 Three things happened that are worth noticing:
 
 - `@org/everyone` was **carried onto the new line** — they owned `README.md` via `*`, and
-  `add_owner` means co-own, so the new rule restates them or they'd be dropped.
+  `add_owner` means co-own, so the new rule restates them or they'd be dropped. The carry
+  is a fact about the tree, so a *declared* rule gets none ([cost](GUARANTEES.md#what-declare-costs)).
 - The line went **in the middle, not at the end** — directly after the rule it narrows,
   which is what keeps out-of-scope ownership (INV-2) untouched.
 - `/services/api/` was **not touched at all**, including its original spacing.
