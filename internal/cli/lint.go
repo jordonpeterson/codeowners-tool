@@ -134,6 +134,10 @@ func cmdLint(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "error:", err)
 		return ExitInvalid
 	}
+	if err := rejectEmptyRepo(fs, *repo); err != nil {
+		fmt.Fprintln(stderr, "error:", err)
+		return ExitInvalid
+	}
 	removeStalePaths, onEmptyPolicy := *removeStale, *onEmpty
 	if len(policyPaths) > 0 {
 		var err error

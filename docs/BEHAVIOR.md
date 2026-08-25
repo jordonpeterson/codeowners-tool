@@ -4171,6 +4171,57 @@ Every verb, not just audit: a token in the environment must survive any usage
 render anywhere in the CLI. This is the regression guard for the day a second
 command grows a credential flag.
 
+### `TestVerify_AddedFileDoesNotLaunderAReassignment`
+
+The gate is not weakened by the above. A CODEOWNERS edit that reassigns a
+subtree still fails, and adding a file to that same subtree in the same
+commit does not launder it — the reassignment shows on the subtree's
+PRE-EXISTING files, which have a before for INV-2 to be about.
+
+### `TestVerify_AddedFilePassesTheDocumentedRecipe`
+
+SPEC R-18: the documented CI recipe — snapshot two refs, verify against the
+declared scope — survives a pull request that adds a file, with CODEOWNERS
+byte-identical. This is the whole reason the gate exists, run end to end
+through the real command surface rather than through Compare alone.
+
+It used to exit 2 with "INVARIANT VIOLATED: 1 path(s) changed outside the
+declared scope", because two snapshots taken from different refs differ in
+their trees on every real pull request.
+
+### `TestVerify_DeclaredScopeViolationKeepsTheLoudName`
+
+With scopes declared, a change outside them IS the invariant failing, and
+keeps the loud name — plus the reminder that --scope is repeatable, which is
+what the under-declared case actually needs.
+
+### `TestVerify_NoScopeFailureIsNotShouted`
+
+SPEC R-18: `verify` reserves its loudest string for the case it is about.
+With no --scope the command means "assert nothing changed" — a query whose
+negative answer is information, not an alarm. Three of five user tests
+flagged the old wording independently: a platform engineer re-read the
+README twice, a repo owner running the documented post-merge recipe called
+it "a scary word for a routine query", and a reorg manager got one from an
+unquoted `--scope *` the shell had expanded.
+
+### `TestVerify_RemovedFileIsReportedNotFatal`
+
+A path leaving the tree is the mirror case: no after, so nothing INV-2
+preserves, so not a violation — but still reported.
+
+### `TestAbsentRepoFlagStillDefaultsToCwd`
+
+Absent is not empty. Omitting --repo still means the working directory,
+which is the documented default and what every one-repo invocation relies on.
+
+### `TestApplyEmptyRepoDistinguishesPassedFromAbsent`
+
+apply's --repo defaults to "" meaning "use the plan's repo", so the rejection
+cannot be read off the VALUE — it has to ask whether the flag was passed.
+Both readings are pinned here: passing it empty is an error, omitting it is
+how the plan's own repo field gets used.
+
 ### `TestAuditJSONCleanIsPureJSON`
 
 Pre-release finding, fixed: `audit --format json` on a clean repo prints the literal line
@@ -4191,6 +4242,28 @@ Pre-release finding, fixed: the S-7 branch-mismatch refusal interpolates raw `gi
 --abbrev-ref --end-of-options HEAD` output, and rev-parse echoes the
 `--end-of-options` operator as an output line — so the one-line error (and
 the JSON record's error field) reads "HEAD is --end-of-options\nmain (…)".
+
+### `TestEmptyRepoFlagRejected`
+
+SPEC: `--repo ""` is rejected at argument-parsing time (exit 3), on every
+verb that takes the flag. `.` stays the default when the flag is ABSENT.
+
+An empty string is the one wrong value that used to get a default instead of
+an error, and it is the value a shell produces by accident:
+
+	REPO=$(lookup_repo "$name")     # returned nothing
+	codeowners-tool sync --repo "$REPO" --op '...'
+
+A typo'd path fails correctly. The empty string fell through to the flag's
+own default and targeted the working directory, so a fleet script standing
+in an unrelated checkout wrote to it at exit 0 — and the record carried
+"repo":"", so results.jsonl got a success row that did not say which
+repository had been changed.
+
+### `TestEmptyRepoWritesNothingToTheWorkingDirectory`
+
+The refusal happens before anything is written. The working directory this
+process is standing in must be untouched — that is the whole point.
 
 ### `TestEscapedHashPatternRefused`
 
@@ -6867,6 +6940,31 @@ SPEC S-9: GitHub's official example — a zero-owner rule un-owns a subtree.
 > be checked in CI from two ownership snapshots WITHOUT trusting the tool
 > that produced the change.
 
+### `TestR18_AddedFileDoesNotMaskReassignment`
+
+The gate is not weakened. A CODEOWNERS edit that reassigns a subtree still
+shows up on that subtree's PRE-EXISTING files, so adding a file to the same
+subtree cannot launder the reassignment. Only a scope whose every file is
+new to the branch goes unchecked, and there the invariant has nothing to say.
+
+### `TestR18_AddedPathIsNotAViolation`
+
+SPEC R-18 + INV-2: a path present in only ONE snapshot is a tree delta, not
+an ownership change, and cannot violate the invariant. INV-2 preserves what
+a path resolved to BEFORE; an added path has no before and a removed one has
+no after, so neither has anything the invariant can be about. Reported, so
+the run is not silent about a tree that moved — but never fatal.
+
+Before this, the documented CI recipe (snapshot two branches, verify against
+the declared scope) failed on any PR that added a file outside that scope,
+with CODEOWNERS byte-identical. Snapshots come from different refs, so their
+trees differ on every real pull request.
+
+### `TestR18_AddedUnownedPathIsStillOnlyATreeDelta`
+
+A path that is added AND lands in an unowned state is still only a tree
+delta. `null` here is the absence of a matching rule, not a lost owner.
+
 ### `TestR18_NoScope_AssertNoChange`
 
 SPEC R-18 + INV-2: with no scope given, verify asserts NOTHING changed.
@@ -6875,14 +6973,26 @@ SPEC R-18 + INV-2: with no scope given, verify asserts NOTHING changed.
 
 Order of owners on a line is presentation: {"@a","@b"} == {"@b","@a"}.
 
+### `TestR18_RemovedPathIsNotAViolation`
+
+The mirror: a deleted path has no after, so it cannot violate INV-2 either.
+
 ### `TestR18_ScopedChangesConfined`
 
 With scopes, changes inside scope pass; any out-of-scope change fails —
 this is INV-2 checked from raw data.
 
-### `TestR18_TreeChangesSurface`
+### `TestR18_TreeChangesSurfaceButDoNotViolate`
 
 A path added or removed from the tree is reported, not silently ignored.
+It is NOT a violation — see TestR18_AddedPathIsNotAViolation for why. This
+test pinned the older reading, where any tree delta failed verification;
+it now pins that the delta still SURFACES, which is the half worth keeping.
+
+### `TestR18_TreeDeltasAreNotViolationsWithoutScopes`
+
+Tree deltas stay out of the violation set under EVERY scope setting,
+including the no-scope "assert nothing changed" mode — the strictest one.
 
 ### `TestR18_UnownedVsZeroOwnersDistinct`
 
@@ -6891,4 +7001,4 @@ DIFFERENT states; transitioning between them is a real ownership change.
 
 ---
 
-658 documented test cases across 13 packages.
+672 documented test cases across 13 packages.

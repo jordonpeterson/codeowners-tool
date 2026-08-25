@@ -54,7 +54,7 @@ else (bad enum values, ops that can't carry the `on_zero_match` you gave them, a
 | Flag | Meaning |
 |---|---|
 | `--op` / `--policy` | Where the ops come from. Mutually exclusive; passing both or neither is exit 3. |
-| `--repo` | Local git repository. Default `.`. |
+| `--repo` | Local git repository. Default `.` when the flag is absent; an explicitly empty `--repo ""` is refused (exit 3), because that is what a shell produces from an unset variable. |
 | `--branch` | Ref whose tracked tree governs resolution (S-7). Default `HEAD`. |
 | `--file` | CODEOWNERS path override, repo-relative. |
 | `--on-empty` | Policy when `remove_owner` empties an owner set. Allowed only with `--op`; with `--policy`, set `on_empty` in the file instead. An unknown value is exit 3, checked before any repository is opened. |
@@ -134,8 +134,9 @@ assigns no owners; `null` means no rule matches it at all.
 `verify` compares two snapshots and exits `0` when every ownership change falls inside
 a declared `--scope` (repeatable), `2` — printing each offending path — when any change
 falls outside them (with no `--scope`, any change at all violates), and `3` for a
-malformed snapshot. A path that enters or leaves the tracked tree counts as a change
-(R-18), so don't commit the snapshot files themselves between the two snapshots.
+malformed snapshot. A path present in only one snapshot is a **tree delta**, reported as
+`added:`/`removed:` and never a violation: INV-2 preserves what a path resolved to
+before, and an added path has no before (R-18).
 
 ## Exit codes
 

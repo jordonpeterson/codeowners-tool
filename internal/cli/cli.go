@@ -94,6 +94,31 @@ func rejectLeftoverArgs(fs *flag.FlagSet) error {
 		fs.Arg(0), fs.Name())
 }
 
+// rejectEmptyRepo refuses `--repo ""`, the unset-variable bug every fleet
+// script eventually has:
+//
+//	REPO=$(lookup_repo "$name")     # returned nothing
+//	codeowners-tool sync --repo "$REPO" --op '...'
+//
+// A typo'd path fails correctly. The empty string was the one wrong value that
+// got a DEFAULT instead of an error — `.` — so the run targeted whatever
+// directory the script happened to be standing in and wrote to it at exit 0,
+// while the record carried "repo":"" and a fleet's results.jsonl gained a
+// success row that did not say which repository had changed.
+//
+// It asks whether the flag was PASSED rather than reading its value, because
+// `apply --repo` defaults to "" to mean "use the plan's own repo" — there the
+// value alone cannot tell an operator's empty string from an absent flag.
+//
+// Exit 3: an empty --repo is broken invocation, identical on every repository,
+// so a fleet should stop at repo 0 rather than report it a hundred times.
+func rejectEmptyRepo(fs *flag.FlagSet, value string) error {
+	if !isFlagSet(fs, "repo") || value != "" {
+		return nil
+	}
+	return fmt.Errorf(`--repo was given an empty value; pass a path, or omit the flag to use the working directory. An empty string is what a shell produces when the variable behind it is unset, so it is refused rather than defaulting`)
+}
+
 // isFlagSet reports whether the operator actually PASSED a flag, as opposed to
 // inheriting its default. --cache-ttl has a non-zero default, so "did you ask
 // for this?" cannot be read off its value.
@@ -570,6 +595,10 @@ func cmdPlan(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "error:", err)
 		return ExitInvalid
 	}
+	if err := rejectEmptyRepo(fs, *repo); err != nil {
+		fmt.Fprintln(stderr, "error:", err)
+		return ExitInvalid
+	}
 	if len(opSpecs) == 0 {
 		fmt.Fprintln(stderr, "error: at least one --op is required")
 		return ExitInvalid
@@ -633,6 +662,10 @@ func cmdApply(args []string, stdout, stderr io.Writer) int {
 		return flagParseCode(err)
 	}
 	if err := rejectLeftoverArgs(fs); err != nil {
+		fmt.Fprintln(stderr, "error:", err)
+		return ExitInvalid
+	}
+	if err := rejectEmptyRepo(fs, *repo); err != nil {
 		fmt.Fprintln(stderr, "error:", err)
 		return ExitInvalid
 	}
@@ -737,6 +770,10 @@ func cmdSnapshot(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "error:", err)
 		return ExitInvalid
 	}
+	if err := rejectEmptyRepo(fs, *repo); err != nil {
+		fmt.Fprintln(stderr, "error:", err)
+		return ExitInvalid
+	}
 	tree, coPath, _, err := locate(*repo, *branch, *filePath)
 	if err != nil {
 		return errExit(err, stderr)
@@ -797,14 +834,35 @@ func cmdVerify(args []string, stdout, stderr io.Writer) int {
 	for _, c := range res.Changed {
 		fmt.Fprintf(stdout, "changed: %s  %s → %s\n", c.Path, fmtOwners(c.Before), fmtOwners(c.After))
 	}
+	// Tree deltas are reported, never fatal (R-18). They are the ordinary
+	// difference between two refs, so they print after the ownership changes
+	// rather than competing with them for a reader's attention.
+	for _, c := range res.Added {
+		fmt.Fprintf(stdout, "added:   %s  %s\n", c.Path, fmtOwners(c.After))
+	}
+	for _, c := range res.Removed {
+		fmt.Fprintf(stdout, "removed: %s  %s\n", c.Path, fmtOwners(c.Before))
+	}
 	if !res.OK() {
-		fmt.Fprintf(stderr, "INVARIANT VIOLATED: %d path(s) changed outside the declared scope\n", len(res.Violations))
+		// The loudest string in the tool is reserved for the case it is about:
+		// a run that DECLARED where change was allowed and found change
+		// elsewhere. With no --scope, verify is a query — "did anything
+		// change?" — and a negative answer is information, not an alarm. Three
+		// of five user tests flagged the old wording independently, one of them
+		// on the documented post-merge recipe ("a scary word for a routine
+		// query"). The exit code is unchanged in both cases; only the sentence
+		// moves.
+		if len(scopes) == 0 {
+			fmt.Fprintf(stderr, "%d path(s) changed, and no --scope was declared — with no scope, verify asserts that NOTHING changed (--scope is repeatable; pass one per intended scope)\n", len(res.Violations))
+		} else {
+			fmt.Fprintf(stderr, "INVARIANT VIOLATED: %d path(s) changed that no --scope declared (--scope is repeatable; pass one per intended scope)\n", len(res.Violations))
+		}
 		for _, v := range res.Violations {
 			fmt.Fprintf(stderr, "  %s  %s → %s\n", v.Path, fmtOwners(v.Before), fmtOwners(v.After))
 		}
 		return ExitRefused
 	}
-	fmt.Fprintf(stdout, "ok: %d change(s), all within scope\n", len(res.Changed))
+	fmt.Fprintf(stdout, "ok: %d change(s), all within scope%s\n", len(res.Changed), fmtTreeDeltas(res))
 	return ExitOK
 }
 
@@ -837,6 +895,10 @@ func cmdAudit(args []string, stdout, stderr io.Writer) int {
 		return flagParseCode(err)
 	}
 	if err := rejectLeftoverArgs(fs); err != nil {
+		fmt.Fprintln(stderr, "error:", err)
+		return ExitInvalid
+	}
+	if err := rejectEmptyRepo(fs, *repo); err != nil {
 		fmt.Fprintln(stderr, "error:", err)
 		return ExitInvalid
 	}
@@ -1062,4 +1124,16 @@ func fmtOwners(o []string) string {
 		return "{}"
 	}
 	return "{" + strings.Join(o, ", ") + "}"
+}
+
+// fmtTreeDeltas renders the tree-delta counts as a suffix to verify's success
+// line. They are reported rather than folded into the change count: a reader
+// checking "all within scope" against a number needs that number to be the
+// ownership changes it is a claim about.
+func fmtTreeDeltas(res *verify.Result) string {
+	if len(res.Added) == 0 && len(res.Removed) == 0 {
+		return ""
+	}
+	return fmt.Sprintf(" (%d added, %d removed — tree deltas, not ownership changes)",
+		len(res.Added), len(res.Removed))
 }
