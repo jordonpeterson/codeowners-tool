@@ -59,7 +59,7 @@ Lookups are cached in memory per run and optionally on disk (`--cache-dir`, `--c
 string defaults in its usage text, so the environment variable is read only after parsing,
 where nothing can render it into a log (CWE-532).
 
-### `lint`
+## `lint`
 
 Repairs three of the checks above, over the whole file. **[LINTING.md](LINTING.md)** is
 the guide — what each stage does, what it refuses to guess at, the errors and what to do

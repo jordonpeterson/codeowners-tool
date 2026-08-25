@@ -3,8 +3,6 @@
 The record `sync`, `plan` and `snapshot` emit, and the `jq` guards worth knowing. Fleet
 aggregation recipes are in [FLEET.md](FLEET.md#the-jq-habit-worth-having).
 
-## JSON output
-
 Real `sync --format json` output, abridged only in `changes`:
 
 ```json

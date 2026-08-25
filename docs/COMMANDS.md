@@ -157,10 +157,10 @@ the policy, or about this repo?*
 | Code | Meaning |
 |---|---|
 | 0 | Success — applied, or audit found nothing |
-| 1 | No-op — nothing to change (never returned by `audit --lint`; see below) |
+| 1 | No-op — nothing to change (never returned by `audit --lint` — see [AUDIT.md](AUDIT.md#lint)) |
 | 2 | Refused — would violate INV-1/INV-2, or exceed the 3 MB cap |
 | 3 | Invalid input — malformed op, zero-match scope, conflicting batch |
-| 4 | Audit findings present at or above `--fail-on` (default: any finding) |
+| 4 | Audit findings at or above `--fail-on` (default: any finding) — see [AUDIT.md](AUDIT.md) |
 | 5 | Inconclusive — API unavailable, token insufficient, rate limited |
 | 6 | Validation failed post-write; rolled back |
 
