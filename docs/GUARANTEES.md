@@ -37,6 +37,27 @@ error: refusing: rule "infra/" also governs paths outside scope "**/*.tf", and n
 Ops that took this path report `"proven": "structural"` in the JSON and are called out in
 `--summary-out`, so a reviewer can find them without reading the diff.
 
+**At fleet scale it costs something else: one policy yields two different owner sets.**
+Where the directory exists, `add_owner` amends against the tree and carries the catch-all
+owner onto the narrowing rule. Where it does not, the rule is declared from nothing and the
+catch-all is absent:
+
+```
+# repo HAS .github/workflows/          # repo does NOT
+/.github/workflows/ @acme/everyone @acme/platform-ci
+                                      /.github/workflows/ @acme/platform-ci
+```
+
+The second repo displaces `@acme/everyone` the moment somebody adds a workflow — from an
+"identical org baseline" that a rollout exists to make identical. State the intended owner
+set explicitly rather than relying on a catch-all being carried, and both shapes converge
+on the same line:
+
+```json
+{ "op": "set_owners(/.github/workflows/, [@acme/everyone, @acme/platform-ci])",
+  "on_zero_match": "declare" }
+```
+
 ## What `on_except_zero_match: allow` costs
 
 The same class of weakening, reachable from `except` ([OPERATIONS.md](OPERATIONS.md#except--carving-paths-out-of-a-scope-r-26r-32), R-28): an
