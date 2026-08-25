@@ -4,11 +4,73 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); version
 are [semantic](https://semver.org/), with `MAJOR.MINOR` set by hand in `VERSION`
 and `PATCH` assigned by the release workflow.
 
-While the version is `0.x`, flag names, JSON record fields, and the exit-code
-contract may change in a minor release. Exit codes are what scripts depend on, so
-changes to which class a failure lands in are called out explicitly.
+From `1.0.0` on, the CLI surface, the exit-code contract and the policy-file
+schema are stable under semver: they change only in a MAJOR release. See
+**Stability** under 1.0.0 for exactly what that covers, and the one exception it
+names.
 
-## [Unreleased]
+## [1.0.0] - 2026-08-25
+
+### Stability
+
+This is the promise `1.0.0` makes, aimed at the people wiring this into CI, for
+whom a silent reclassification is worse than a missing feature. It was written by
+probing the shipped binary, not by reading the docs — two claims in
+`docs/COMMANDS.md` did not survive that and are corrected in this release.
+
+**The CLI surface.** Verb names, flag names and flag semantics do not change
+except in a MAJOR release. Flags may be ADDED in a minor; none is removed or
+repurposed. `audit --lint` keeps routing to `lint` for all of 1.x.
+
+**The policy-file schema.** `version`, the op grammar, `on_zero_match`,
+`on_except_zero_match`, `on_empty`, `except`, `defaults`, `create`, `lint`,
+`max_paths_changed`, `notes` and the owner-list forms keep their names and
+meanings. New OPTIONAL fields may appear in a minor; a policy valid under 1.0.0
+stays valid for all of 1.x.
+
+**JSON records.** Keys present in 1.0.0 keep their names and types. Keys may be
+ADDED in a minor, so parse permissively — a consumer that rejects unknown keys is
+not covered by this promise.
+
+**Exit codes.** The numeric meanings are fixed for 1.x:
+
+| Code | Meaning |
+|---|---|
+| 0 | The requested state holds — changed, or already correct |
+| 1 | Nothing to change. **`plan` only** — see the note below |
+| 2 | Refused for a reason about THIS repository; the next repo may succeed |
+| 3 | Refused before any repository outcome exists; retrying this repo will not help |
+| 4 | Findings a gate is configured to fail on (`audit`, `lint --dry-run`) |
+| 5 | Inconclusive — no answer could be obtained (R-12); retry is meaningful |
+| 6 | Written content failed post-write validation and was rolled back (R-10) |
+
+**Exit 2 vs exit 3 is load-bearing and will not move.** A fleet script routes on
+exactly this seam: 2 means record this repo and carry on, 3 means stop the run.
+No case that is 2 in 1.0.0 becomes 3 in a 1.x release, and no policy error stops
+being 3.
+
+**Exit 1 is `plan`-only, and that is deliberate.** `sync` reports an
+already-satisfied op as **0**, not 1: under `set -euo pipefail` a scheduled fleet
+run would otherwise read every healthy repository as a failure. `lint` never
+returns 1 for the same reason (docs/LINTING.md). Only `plan` distinguishes
+"nothing to do" from "done".
+
+**A zero-match scope is 2 under `sync` and 3 under `plan`.** Same condition, two
+codes, because the verbs answer different questions — `sync` is reporting on one
+repository in a fleet, `plan` is rejecting an op it cannot build an artifact for.
+This is pinned as-is for 1.x. `docs/COMMANDS.md` listed a zero-match scope under 3
+without qualification, which was wrong for `sync`; corrected here.
+
+**The one exception, named rather than hidden.** Exit 3 currently also fires on
+failures that have nothing to do with the policy: a missing or unreadable
+`--policy` file, `apply --plan missing.json`, `verify --before missing.json`, and
+I/O failures such as a full disk or a read-only mount. Those are local and
+retryable, and calling them "stop the rollout" contradicts docs/FLEET.md's own
+description of exit 3. Tracked in
+[#49](https://github.com/jordonpeterson/codeowners-tool/issues/49).
+Reclassifying them is the one exit-code change reserved for a 1.x minor. It can
+only ever move cases OUT of 3 into a retryable class — never the reverse, and
+never touching 2. Route on exit 3 as "stop" today and you stay correct either way.
 
 ### Fixed (from five user-test personas driving the shipped binary)
 
@@ -396,6 +458,10 @@ changes to which class a failure lands in are called out explicitly.
   tap` while the formula went nowhere.
 
 ## Earlier releases
+
+Everything above shipped incrementally across the `v0.0.6`–`v0.0.26` patch
+releases as it landed on `main`; `1.0.0` is where that work is named and its
+surface frozen, not a single drop.
 
 `v0.0.1` (2026-07-27) through `v0.0.5` (2026-08-04) predate this file; see the
 auto-generated notes on each

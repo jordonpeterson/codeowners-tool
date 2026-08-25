@@ -171,9 +171,9 @@ the policy, or about this repo?*
 | Code | Meaning |
 |---|---|
 | 0 | Success — applied, or audit found nothing |
-| 1 | No-op — nothing to change (never returned by `audit --lint` — see [AUDIT.md](AUDIT.md#lint)) |
+| 1 | No-op — nothing to change. `plan` only: `sync` reports an already-correct repo as 0, and `lint` never returns 1 (see [AUDIT.md](AUDIT.md#lint)) |
 | 2 | Refused — would violate INV-1/INV-2, or exceed the 3 MB cap |
-| 3 | Invalid input — malformed op, zero-match scope, conflicting batch |
+| 3 | Refused before any repo outcome exists — malformed op, conflicting batch, unreadable `--policy`/`--plan`. A zero-match scope is 3 under `plan` but **2** under `sync` (see CHANGELOG 1.0.0 → Stability) |
 | 4 | Audit findings at or above `--fail-on` (default: any finding) — see [AUDIT.md](AUDIT.md) |
 | 5 | Inconclusive — API unavailable, token insufficient, rate limited |
 | 6 | Validation failed post-write; rolled back |
