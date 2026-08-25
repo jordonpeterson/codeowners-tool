@@ -275,3 +275,128 @@ func TestParse_DuplicateOwnersFoldCase(t *testing.T) {
 		t.Errorf("email owners must not be case-folded: %v", err)
 	}
 }
+
+// SPEC R-39a: WithOwners writes the one string an `owners` array is validated,
+// applied and reported as — so what it returns has to re-parse to the same
+// intent, and it has to REFUSE what an op string cannot carry rather than
+// return something that parses as a different op.
+//
+// The refusals are the ones only an email owner can reach: `handleRe` admits
+// none of these characters, while `emailRe` is `[^@\s]+@[^@\s]+\.[^@\s]+` and
+// admits a comma and a bracket. `a,b@x.com` spliced in re-splits into the two
+// owners `a` and `b@x.com` — one input landing on two identities, in the field
+// where that is a grant to a stranger.
+//
+// The scope argument is re-emitted as Parse itself reads it, which normalizes
+// space around it (`add_owner( /x/ )`). That is deliberate and safe: the
+// re-spelled op is what the operator is shown and what they can re-run, and
+// both strings parse to the same scope. Escaped whitespace INSIDE the scope is
+// a different matter and is preserved exactly — `/x\ y/` names a path with a
+// space in it, and losing that escape names a different path.
+func TestWithOwners_RoundTripsOrRefuses(t *testing.T) {
+	ok := []struct {
+		op     string
+		owners []string
+		want   string
+	}{
+		{"add_owner(/x/)", []string{"@a"}, "add_owner(/x/, [@a])"},
+		{"add_owner( /x/ )", []string{"@a", "@b"}, "add_owner(/x/, [@a, @b])"},
+		// The empty list is the one an array may legitimately be: it is how
+		// set_owners spells "nobody owns this" (R-33d).
+		{"set_owners(/x/)", []string{}, "set_owners(/x/, [])"},
+		{"add_owner(/x/ except /x/gen/)", []string{"@a"}, "add_owner(/x/ except /x/gen/, [@a])"},
+		{`remove_owner(/x\ y/)`, []string{"@a"}, `remove_owner(/x\ y/, [@a])`},
+		{"add_owner(/x/)", []string{"dev@example.com"}, "add_owner(/x/, [dev@example.com])"},
+		// rename_owner takes no array: the list lands on the argument that
+		// exists, so Parse can say so (R-33f/R-39c) rather than reporting a
+		// bad owner token.
+		{"rename_owner(@a)", []string{"@b"}, "rename_owner(@a, [@b])"},
+	}
+	for _, tc := range ok {
+		got, valid := ops.WithOwners(tc.op, tc.owners)
+		if !valid || got != tc.want {
+			t.Errorf("WithOwners(%q, %q) = %q, %v; want %q, true", tc.op, tc.owners, got, valid, tc.want)
+			continue
+		}
+		if strings.HasPrefix(tc.op, "rename_owner") {
+			continue // refused by Parse on purpose (R-39c)
+		}
+		back, err := ops.Parse(got)
+		if err != nil {
+			t.Errorf("WithOwners(%q, %q) = %q, which does not parse: %v", tc.op, tc.owners, got, err)
+			continue
+		}
+		if len(back.Owners) != len(tc.owners) {
+			t.Errorf("%q re-parses with %d owners, want %d", got, len(back.Owners), len(tc.owners))
+		}
+	}
+
+	bad := []struct {
+		op     string
+		owners []string
+	}{
+		{"add_owner(/x/, @a)", []string{"@b"}},      // already names owners
+		{"add_owner(/x/, [@a])", []string{"@b"}},    // same, spelled as a list
+		{"add_owner()", []string{"@a"}},             // no scope for the owners to apply to
+		{"add_owner(/x/", []string{"@a"}},           // not an op string at all
+		{"add_owner(/x/)", []string{"a,b@x.com"}},   // re-splits into two owners
+		{"add_owner(/x/)", []string{"a]b@x.com"}},   // closes the list early
+		{"add_owner(/x/)", []string{"a[b@x.com"}},   // opens a list that never closes
+		{"add_owner(/x/)", []string{"a b@x.com"}},   // whitespace separates owners
+		{"add_owner(/x/)", []string{"@a", "@b @c"}}, // one element, two tokens
+	}
+	for _, tc := range bad {
+		if got, valid := ops.WithOwners(tc.op, tc.owners); valid {
+			t.Errorf("WithOwners(%q, %q) = %q, true; want false — the list does not survive the split", tc.op, tc.owners, got)
+		}
+	}
+}
+
+// SPEC R-39b: NamesOwners is the question "does this op string already state
+// its owners", asked before the op parses. Arity is the test, not a search for
+// a bracket: `add_owner(/x/, @a)` states owners exactly as much as the list
+// spelling does, and an implementation looking for `[` would let that op carry
+// an `owners` array too — one intent in two places, with nothing to say which
+// half wins when the next generator run changes only one of them.
+func TestNamesOwners_IsAboutArityNotBrackets(t *testing.T) {
+	for _, tc := range []struct {
+		op   string
+		want bool
+	}{
+		{"add_owner(/x/)", false},
+		{"add_owner(/x/ except /x/gen/)", false},
+		{`add_owner(/x\ y/)`, false},
+		{"set_owners(/x/)", false},
+		{"rename_owner(@a)", false},
+		{"add_owner(/x/, @a)", true},
+		{"add_owner(/x/, [@a])", true},
+		{"set_owners(/x/, [])", true},
+		{"rename_owner(@a, @b)", true},
+		{"not an op", false},
+	} {
+		if got := ops.NamesOwners(tc.op); got != tc.want {
+			t.Errorf("NamesOwners(%q) = %v, want %v", tc.op, got, tc.want)
+		}
+	}
+}
+
+// SPEC R-39c: SpelledKind reads the verb off text that may not parse yet, which
+// is the only thing available when deciding whether an op may carry an `owners`
+// array at all — a scope-only op string does not parse until the array has been
+// folded into it.
+func TestSpelledKind_ReadsTheVerbBeforeTheOpParses(t *testing.T) {
+	for _, tc := range []struct {
+		op   string
+		want ops.Kind
+	}{
+		{"add_owner(/x/)", ops.AddOwner},
+		{" set_owners (/x/)", ops.SetOwners},
+		{"rename_owner(@a)", ops.RenameOwner},
+		{"add_ownr(/x/)", ops.Kind("add_ownr")},
+		{"no parens here", ops.Kind("")},
+	} {
+		if got := ops.SpelledKind(tc.op); got != tc.want {
+			t.Errorf("SpelledKind(%q) = %q, want %q", tc.op, got, tc.want)
+		}
+	}
+}

@@ -12,6 +12,24 @@ changes to which class a failure lands in are called out explicitly.
 
 ### Fixed (from five user-test personas driving the shipped binary)
 
+- **A `declare` batched with an op on one tracked file is no longer refused
+  (R-22b).** R-8's zero-match guard exists because two `declare`d rules both land
+  at EOF, where last-match-wins picks between them silently — but it fired
+  whenever *either* op was declared, so it also caught a declare paired with an
+  op resolved against the real tree. `remove_owner(/.github/CODEOWNERS, @org/bot)`
+  batched with `add_owner(**/justfile, @org/bot)` was refused as
+  order-dependent in exactly the repositories with no justfile, even though the
+  two scopes can never meet — forcing "grant the bot .github/ but not
+  .github/CODEOWNERS" to be split into two rollouts, and doing it repo by repo
+  so `check` passed and `sync` failed. The guard now skips a pair whose other op
+  scopes an anchored, wildcard-free path naming one tracked file: a declared
+  scope matches nothing tracked, and no path can appear beneath a file. Every
+  other pair is refused exactly as before — a directory scope (`/src/`) still
+  gains files, a wildcard scope (`/.github/CODEOWNER?`) still grows, an
+  unanchored scope (`justfile`) still matches at any depth, and two declares are
+  still the hazard the guard was written for. No exit-code class moves: what was
+  a per-repo exit 2 is now exit 0.
+
 - **One owner identity, everywhere (R-38).** `@handles` are case-insensitive on
   GitHub, and only `lint` and the R-33c duplicate check knew it — matching
   compared bytes. So `remove_owner(/x/, @ORG/TEAM)` reported `unchanged` at exit

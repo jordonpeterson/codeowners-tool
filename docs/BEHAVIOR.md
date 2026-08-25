@@ -266,6 +266,17 @@ a bare line deletion.
 > tests pin only that the bytes outside the repository are never touched and that no
 > record claims otherwise.
 
+**`declaredpair_test.go`**
+
+> R-22b end-to-end tests: which pairs the declare-op order-dependence guard
+> (R-8 for zero-match ops) is entitled to refuse.
+>
+> Written ahead of the implementation per CONTRIBUTING.md. The four negative
+> cases below pass against today's binary and are labeled as pins — they
+> freeze refusals R-22b must preserve, so the change cannot be "fixed" by
+> deleting the guard. The positive cases fail today with the R-8 refusal
+> quoted in TestR22b_ExactTrackedFileAgainstADeclareApplies.
+
 **`except_roundtrip_test.go`**
 
 > R-37's round trip, end to end: the `except` array is validated, applied and
@@ -289,7 +300,7 @@ a bare line deletion.
 
 **`except_test.go`**
 
-> Except-clause end-to-end tests (docs/except.md, R-26…R-32). Written ahead
+> Except-clause end-to-end tests (R-26…R-32). Written ahead
 > of the implementation per CONTRIBUTING.md; every negative case asserts a
 > message fragment as well as the exit code, because today the whole grammar
 > dies at checkScope's whitespace rule with exit 3 — the same code several of
@@ -371,6 +382,20 @@ a bare line deletion.
 >
 > `plan` is deliberately exempt from both: it emits an artifact and writes no
 > CODEOWNERS, so proving against another ref is exactly its job.
+
+**`lint_offline_test.go`**
+
+> The offline tree-only mode of `lint --remove-stale-paths` (UAT finding,
+> TestOfflineStaleRuleRemovalReportable).
+>
+> R-12 makes owner existence — an API fact — undecidable offline, so lint
+> without credentials refuses at exit 5. Whether a pattern matches zero
+> tracked files is a git-TREE fact (audit's A-4/A-5), so when
+> --remove-stale-paths names that repair as what the run is for, the run
+> proceeds offline: stage 3 alone, owner checks skipped and DISCLOSED, no
+> owner verified, repaired, or removed. Everything else about lint's contract
+> holds unchanged — exit 4 for pending or spared work, exit 0 for clean,
+> never 1; the A-5 sparing of case-only typos; apply as the single writer.
 
 **`lint_test.go`**
 
@@ -480,6 +505,74 @@ a bare line deletion.
 > operator back the illegal advice with nothing failing. Pinning the flag-mode
 > bytes is what turns that drift into a red test.
 
+**`ownerarray_test.go`**
+
+> End-to-end tests for R-39: `owners` as a JSON array on a policy op.
+>
+> R-33 gave every owner-naming verb a bracketed list inside the op STRING.
+> R-37 gave `except` a JSON array beside the op string. R-39 closes the
+> asymmetry those two left: a generator emitting a policy can hand `except`
+> to the JSON encoder but has to string-build `[@a, @b]` for owners, quoting
+> and comma-joining by hand in the one field where a mistake grants the wrong
+> team. The array is the same fact as the list, so it is validated, applied
+> and REPORTED as the `(scope, [owners])` spelling it is equivalent to.
+>
+> 	{"op": "add_owner(/x/)", "owners": ["@a", "@b"]}
+> 	{"op": "add_owner(/x/, [@a, @b])"}
+>
+> Written ahead of the implementation per CONTRIBUTING.md. Vacuity has four
+> sources here, and every assertion below is shaped against them:
+>
+>   - Today `"owners"` on an op is an UNKNOWN FIELD, which is exit 3 — the
+>     same code most negative cases expect. Every negative case therefore
+>     also asserts a message fragment today's unknown-field error does not
+>     contain: either the requirement id "R-39", or the string spelling's own
+>     diagnosis of the same defect.
+>   - `policy.Error` renders the FILE first, so a fixture named owners.json
+>     would make "the message mentions owners" true by accident. Every policy
+>     here is written by oaPolicy, which names it p.json.
+>   - `t.TempDir()` embeds the test's own name in the path, and the path is in
+>     the message. No test below is named with a fragment any assertion looks
+>     for — in particular the requirement id is spelled "R-39" in assertions
+>     and "R39" in test names.
+>   - The word "owners" appears inside `set_owners` and inside `field
+>     "owners"` alike, so a bare "owners" fragment proves nothing. Assertions
+>     quote the field (`"owners"`) or cite the requirement.
+>
+> Where the array has a defect the string spelling already diagnoses — a
+> duplicate owner, an invalid token, an empty list on add_owner — the fragment
+> asserted is the STRING spelling's own message. R-39a says the two spellings
+> are equivalent in every respect, so an array that fails differently from the
+> list it is equivalent to is a defect, not a wording choice.
+>
+> Because the array is re-spelled as the bracketed list before anything else
+> sees it, an array and the LIST it is equivalent to produce byte-identical op
+> strings — so unlike R-37 these tests can compare the WHOLE per-op record,
+> `op` field included, rather than redacting it. That equality is the
+> requirement: it is what makes `results.jsonl` from an array-spelled wave
+> greppable by the same tooling as a hand-written one. The one exception is
+> the BARE single-owner spelling, which R-33a already declares to be the same
+> op as `[@a]`; that test compares outcomes rather than spelling, and says so.
+>
+> Mutating tests assert EXACT file bytes. Under last-match-wins (S-1) a
+> strings.Contains check over file content is satisfied by a file whose line
+> ORDER hands the scope to the wrong owners — and every claim here about a
+> grant, a carve or a displacement is a claim about that order.
+>
+> Three subtests are pins that pass today and are labeled as such: the
+> scope-only op string with no array is still an arity error, `set_owners`
+> still requires its brackets in the string spelling, and the string list is
+> unchanged. They freeze behavior R-39 promises not to disturb; everything
+> else fails until the feature lands.
+
+> ---------- R-39a: the array IS the bracketed list ----------
+
+> ---------- R-39a: the array is validated as the list it becomes ----------
+
+> ---------- R-39: the array under every other setting ----------
+
+> ---------- Pins: what R-39 promises NOT to change ----------
+
 **`ownerdup_test.go`**
 
 > R-33c end to end: an owner named twice in one list is a fact about the op
@@ -497,7 +590,7 @@ a bare line deletion.
 
 **`owneridentity_test.go`**
 
-> Owner-identity end-to-end tests (docs/policy.md, R-38). Written ahead of
+> Owner-identity end-to-end tests (R-38). Written ahead of
 > the implementation per CONTRIBUTING.md.
 >
 > The vacuity trap in this area is unusually sharp: most of the broken cases
@@ -529,7 +622,7 @@ a bare line deletion.
 
 **`ownerlist_test.go`**
 
-> Owner-list end-to-end tests (docs/policy.md, R-33). Written ahead of the
+> Owner-list end-to-end tests (R-33). Written ahead of the
 > implementation per CONTRIBUTING.md: today every one of these op strings
 > dies in ops.Parse with "add_owner takes a single owner, not a list" — exit
 > 3, the same code several of these tests expect — so every negative case
@@ -584,7 +677,7 @@ a bare line deletion.
 **`policyfields_test.go`**
 
 > Policy-field end-to-end tests: `create` in the policy (R-34) and the
-> `defaults` block (R-35), from docs/policy.md. Written ahead of the
+> `defaults` block (R-35). Written ahead of the
 > implementation per CONTRIBUTING.md.
 >
 > The vacuity trap in this area is unusually sharp. Today `create` and
@@ -625,9 +718,8 @@ a bare line deletion.
 **`policylint_test.go`**
 
 > Policy-as-source-of-truth end-to-end tests for the two requirements this
-> file owns: the `lint` block (R-36) and `except` as a JSON array (R-37),
-> specified in docs/policy.md. Written ahead of the implementation per
-> CONTRIBUTING.md.
+> file owns: the `lint` block (R-36) and `except` as a JSON array (R-37).
+> Written ahead of the implementation per CONTRIBUTING.md.
 >
 > Vacuity is the whole difficulty here, and it has three sources:
 >
@@ -679,6 +771,19 @@ a bare line deletion.
 > ---------- R-36: the lint block ----------
 
 > ---------- R-36e: every command validates the whole file ----------
+
+**`prerelease_bugs_test.go`**
+
+> Regression guards from the pre-release review: each test began life as a
+> failing repro of a confirmed bug and now pins the fixed behavior. The doc
+> comments keep the original finding so the guarded failure mode stays legible.
+
+**`prerelease_fixes_test.go`**
+
+> Regression guards around the pre-release fixes: each test here pins an edge
+> the KnownBug test that motivated the fix does not — the same behavior on the
+> verbs the bug report only implied, and the neighboring cases the fix must
+> NOT have broken.
 
 **`rollout_test.go`**
 
@@ -930,6 +1035,107 @@ SPEC R-17: exit 1 no-op, exit 3 invalid input.
 Review finding: a typo'd --scope must be a loud exit-3 error, not silently
 dropped (which turned every change into an inexplicable violation).
 
+### `TestFix_ApplyBelowRepoRootRefused`
+
+The repo-root guard reaches `apply` too: --repo can point the apply at a
+different clone than the plan's, and pointed below the root the joined
+codeowners_path names a file GitHub never reads (checkRepoRoot).
+
+### `TestFix_ApplyRefusesSymlinkedCodeowners`
+
+The symlink refusal reaches `apply` too: a plan is reviewed in one place and
+applied in another, so the link can appear between the two — the write must
+refuse, and the link's in-repo target must keep its bytes.
+
+### `TestFix_ApplyRefusesSymlinkedParentDir`
+
+The parent-directory refusal reaches `apply` too: the link can appear
+between planning and applying, exactly like the final-component case the
+existing guard pins.
+
+### `TestFix_AuditCleanLineStaysInTextMode`
+
+The pure-JSON fix must not have taken the human verdict with it: under the
+default text format a clean audit still says so on stdout.
+
+### `TestFix_AuditJSONWithFindingsIsPureJSON`
+
+`audit --format json` stdout is one JSON document in the findings case too,
+not only on the clean repo the KnownBug test pins.
+
+### `TestFix_CeilingRefusalNamesOnlyAppliedOps`
+
+R-25's refusal names only the ops that would have APPLIED: an op whose rule
+was already satisfied changed zero paths, so naming it sent the operator
+narrowing an op that was never behind the number.
+
+### `TestFix_DetachedHeadLabelIsBareSHA`
+
+headLabel's contract: on a detached HEAD the label is the bare abbreviated
+SHA — the honest answer, since there is no branch name to offer. Before the
+fix the echoed `--end-of-options` line meant the name never equalled "HEAD"
+and the detached path could not fire.
+
+### `TestFix_FileFlagSpellingsClassifyByCleanPath`
+
+The other uncleaned spellings of a governing location: `.github//CODEOWNERS`
+and `docs/../CODEOWNERS` name the S-8 files they clean to, so neither draws
+the "governs nothing" warning — while a path that genuinely is not an S-8
+location still does.
+
+### `TestFix_LintRefusesSymlinkedCodeowners`
+
+lint shares the same write path, and its symlink refusal fires before any
+API call — so it is decidable, and tested, offline.
+
+### `TestFix_LintRefusesSymlinkedParentDir`
+
+lint shares the helper, so the parent-directory case refuses there too —
+offline, before any API call, like its final-component sibling above.
+
+### `TestFix_NoRecordNoteCoversEverySyncExit3`
+
+Every sync exit-3 verdict asked for a sink discloses that no record was
+written — not only the two paths the first fix covered. A fleet aggregating
+--out records otherwise loses these repos silently, the exact hazard the
+note exists to disclose.
+
+### `TestFix_PositionalArgsRejectedOnEveryVerb`
+
+Positional args are rejected on EVERY verb, not only the audit invocation
+that surfaced the bug: the flag package stops at the first non-flag token on
+all of them alike, so any verb left unguarded still swallows whole
+arguments. Exit 3 — decidable from the arguments alone, like every other
+member of that class.
+
+### `TestFix_StaleCommentWarningLeadingBoundary`
+
+The stale-comment warning needs a LEADING token boundary too: a rename of
+@old-team must stay quiet about `someone@old-team`, where the match is the
+tail of an email, while a real mention — space-separated or glued to the
+comment glyph — still warns.
+
+### `TestFix_SymlinkElsewhereStaysIrrelevant`
+
+A symlink that is NOT the governing CODEOWNERS stays irrelevant: only the
+write path's components are Lstat'ed, so an ordinary repo full of links
+syncs as before.
+
+### `TestFix_SymlinkedDirOffWritePathStaysIrrelevant`
+
+A symlinked DIRECTORY that is not on the write path stays irrelevant, like a
+symlinked file elsewhere always has: the walk covers only the components
+between the repository root and the CODEOWNERS being written.
+
+### `TestFix_SyncRefusesSymlinkedParentDir`
+
+A symlinked PARENT directory is the same dead-on-arrival write one level up:
+git tracks `.github -> real-gh` as a link blob, so `.github/CODEOWNERS` does
+not exist in the tree GitHub reads — yet Lstat'ing only the final component
+(a real file, reached through the link) let sync write through it at exit 0.
+The refusal must fire, name WHICH component is the link, and leave the
+link's target untouched.
+
 ### `TestFleet_BrokenPolicyHaltsOnTheFirstRepo`
 
 SPEC R-20/R-22: a broken policy is exit 3 on the FIRST repo, before a single
@@ -1109,6 +1315,85 @@ repos with a mistyped `--out` directory that is 100 real edits reported as
 
 The record on stdout is the durable trace and goes first, unconditionally; a
 sink that cannot be written is a warning on stderr and nothing more.
+
+### `TestLintOffline_CaseOnlyMissIsSparedNotDeleted`
+
+SPEC A-5/S-6 offline: a rule that misses ONLY because of case is a typo, not
+a dead rule, and the offline mode spares it exactly as the online mode does
+— deleting it would silently un-own the files it was aimed at. Spared means
+reported, and the run exits 4: a typo still needs a person.
+
+### `TestLintOffline_DryRunReportsThePendingRemovalAndWritesNothing`
+
+SPEC A-4/R-11 offline: the dry run is the CI-shaped half of the fix — the
+pending dead-rule removal is reported at exit 4, the dead pattern is named,
+nothing is written, and the output says the owner checks were skipped so
+nobody reads the report as "the owners are fine too".
+
+### `TestLintOffline_InvalidLineFailsTheJSONGate`
+
+SPEC offline reporting (docs/LINTING.md's exit table): a line GitHub is
+silently skipping is reported at exit 4 / needs_human even offline —
+"syntactically broken" is a file fact, no API needed — so a CI gate on
+`jq -e .needs_human` cannot go green over broken lines.
+
+### `TestLintOffline_JSONRecordCarriesTheDisclosure`
+
+SPEC --format json offline: the record carries the disclosure as a field, so
+a script consuming a mixed fleet of online and offline records can tell
+which ones say nothing about owners — prose in a note line cannot be jq'd.
+
+### `TestLintOffline_MalformedGitHubRepoIsInvalidEvenWithoutAToken`
+
+SPEC exit 3: a malformed --github-repo is a misspelled argument the operator
+plainly meant to use, and it is diagnosed with or without a token — before
+the fix, a garbage value with no token slid into the offline mode with the
+flag silently ignored.
+
+### `TestLintOffline_OwnerRepairsAndRemovalsStayRefused`
+
+SPEC R-12 offline: the fail-closed contract for OWNERS is untouched. A split
+handle (stage 1's repair) and a dead-looking owner (stage 2's removal) both
+survive the offline run byte-for-byte while the dead PATTERN on another line
+is removed — the run does the tree work without touching a single owner. The
+broken line is REPORTED, not repaired: GitHub is skipping it, which is a
+file fact, so the run exits 4 and names the credentialed run that can fix it.
+
+### `TestLintOffline_PartialCredentialsRefuseNamingWhatIsMissing`
+
+SPEC R-12: the offline mode engages only when NEITHER credential was
+offered. A run that named a repo or held a token asked for the credentialed
+lint; silently narrowing it to dead patterns would report success over owner
+checks the operator believes ran. Refused at exit 5, naming exactly what is
+absent — never the credential that was supplied.
+
+### `TestLintOffline_PolicyRefusalNamesThePolicyFieldNotTheBannedFlag`
+
+SPEC R-36b: the offline refusal's escape hatch is worded for how THIS run
+was configured. --remove-stale-paths is exit-3-banned next to --policy, so
+under --policy the remedy is the policy field, not the flag — the old advice
+sent a policy-mode operator straight into a second refusal.
+
+### `TestLintOffline_PolicyRemoveStalePathsEnablesTreeOnlyMode`
+
+SPEC R-36a offline: `"remove_stale_paths": true` in the policy file's "lint"
+block opts in to the tree-only mode exactly as the flag does — the reviewed
+artifact IS the configuration, so the offline escape must not require a flag
+the same run bans (R-36b).
+
+### `TestLintOffline_WithoutRemoveStalePathsStillRefuses`
+
+SPEC R-12: offline WITHOUT --remove-stale-paths keeps the exit-5 refusal —
+there is no tree-only repair to run, and quietly doing nothing would report
+success over a file full of owners nobody checked. The refusal now names the
+one offline escape, so the operator who only wanted the dead rules gone is
+told the flag instead of being told to find a token.
+
+### `TestLintOffline_WriteRemovesTheDeadRuleAndIsIdempotent`
+
+SPEC R-0 offline: the write path works too, through the same apply machinery
+as every other write — and re-running over its own output is a no-op at exit
+0 (clean is lint's success, never exit 1), so the mode is schedulable.
 
 ### `TestLintVerb_CaseOnlyMissIsSparedNotDeleted`
 
@@ -1725,7 +2010,7 @@ Note the DELIBERATE difference between the two documents: plan.Plan renders
 this exact same []plan.OpResult under `op_results`, because Plan.Ops already
 owns `ops` there as the list of raw op strings (R-16) and must keep it. The
 sync record has no such collision, so it uses the shorter, documented name —
-`ops` is what the JSON output section of docs/REFERENCE.md shows and what
+`ops` is what docs/JSON.md shows and what
 fleet scripts select. This is not an inconsistency to be tidied up: renaming
 either one to match the other breaks a published contract. The test pins
 both names at once so a well-meant "fix" fails here instead of in a user's
@@ -2066,6 +2351,245 @@ and /x/gen/** are one pattern spelled twice, and a string-equality check
 waves the pair through (R-27.3, and the adversarial-review finding behind
 TestR27_StaticExceptDefectsAreExit3).
 
+### `TestR39_ArrayIsComparedUnderTheOwnerIdentity`
+
+SPEC R-39/R-38: the array is compared under the one owner identity (R-38a),
+not by bytes. @handles fold on GitHub, so an array naming `@org/api-team`
+against a file spelling it `@org/API-Team` names an owner that is already
+there — and an implementation that decoded the array into its own comparison
+would report "applied" over a semantic no-op on every repository that
+capitalised a handle, which is the fleet-wide false diff R-38 exists to
+prevent.
+
+All three verbs are asserted, because the identity has to hold on the way in
+(add sees the owner as present), on the way through (set is satisfied) and on
+the way out (remove takes every spelling). The file's own spelling is
+preserved throughout: folding governs MATCHING, never output (R-38b), and a
+run that rewrote `@org/API-Team` to the array's spelling would put a diff in
+front of a reviewer that nobody asked for.
+
+### `TestR39_ArrayPolicyIsValidatedAlongsideTheLintBlock`
+
+SPEC R-39/R-36e: an array-spelled policy is validated whole, including the
+sections the running command does not act on. `sync` ignores the `lint`
+block and `lint` ignores `ops`, but a malformed half of either would
+otherwise ride through a whole fleet unseen — and a policy carrying both an
+`owners` array and a `lint` block is the shape a repository-wide baseline
+actually has.
+
+### `TestR39_ArrayShapeErrorsAreExit3`
+
+SPEC R-39: the array's SHAPE is checked before its contents. A generator
+that emits a bare string where an array belongs — the most common encoder
+mistake, and one JSON itself will not catch — must not have it read as a
+one-owner array by a decoder being helpful.
+
+The fragment is the requirement id and not `field "owners"`: today's
+unknown-field message is literally `unknown field "owners"`, so an assertion
+on the field name passes against a binary that never implemented the array.
+
+### `TestR39_BlastRadiusCountsPathsNotOwners`
+
+SPEC R-39/R-25: the blast-radius ceiling counts PATHS whose owners change,
+not owners named, so an array of five owners over one path is one path. The
+ceiling is the reviewed artifact's statement about how big this wave is; an
+implementation that counted owners would refuse every multi-owner policy
+under a sane ceiling.
+
+### `TestR39_CreateWritesTheFirstFileNamingEveryOwner`
+
+SPEC R-39/R-34: `create` writes a repository's first CODEOWNERS from an
+array-spelled policy, at the highest-precedence location (S-8), naming every
+owner on one line. A fleet wave that creates files is exactly where a
+per-owner append bug would produce N one-owner lines and let last-match-wins
+hand the scope to whichever owner sorted last.
+
+### `TestR39_DefaultsBlockReachesAnArraySpelledOp`
+
+SPEC R-39/R-35: a `defaults` block reaches an array-spelled op exactly as it
+reaches a string-spelled one. The block supplies what an op does not state,
+and an implementation that resolved defaults against the op string before
+the array was folded in would leave array-spelled ops running under R-5's
+require while `check` echoed the default — the resolved echo and the run
+disagreeing, which is the one thing R-35b exists to prevent.
+
+### `TestR39_DryRunPreviewsTheArrayWithoutWriting`
+
+SPEC R-39/R-19: `--dry-run` previews an array-spelled policy and writes
+nothing. The record must still name every owner: the preview is what an
+operator reads before letting the wave run, and one that under-reported the
+grant would be worse than no preview at all.
+
+### `TestR39_MixedSpellingsAndVerbsInOneWave`
+
+SPEC R-39: a real wave mixes spellings and verbs in one policy, and the
+result must not depend on which op was written which way. Four ops, two
+spellings, three verbs, one run — the shape of an actual migration, where a
+generator emits arrays for the ops it computes and a human hand-writes the
+one-off.
+
+Exact bytes over the whole file, because the interesting failure here is not
+a missing owner but a line ORDER that resolves a path to the wrong one.
+
+### `TestR39_OnEmptyDisposesAnArrayRemoval`
+
+SPEC R-39/R-6: an array-spelled removal reaches `on_empty` like any other.
+The three dispositions are asserted together because they are one decision
+with three answers, and because `inherit` and `unowned` produce files that
+differ by one line whose absence changes what GitHub does with the path.
+
+### `TestR39_OneOwnerMayAppearInSeveralOps`
+
+SPEC R-39/R-33c: the duplicate rule is per LIST, not per policy. Two ops may
+name the same owner — that is an ordinary wave granting one team several
+scopes — and only a repeat inside one array is the generator bug R-33c
+refuses. An implementation that hoisted the check to the policy would refuse
+the most common multi-op policy there is.
+
+### `TestR39_OwnersAndExceptArraysOnOneOp`
+
+SPEC R-39/R-37: the two JSON-shaped features on ONE op. `owners` and
+`except` together are where a hand-written decoder drops one of them, and
+where the order they are folded into the op string matters: owners becomes
+the second argument, except a clause on the first, and an implementation
+that spliced them in the wrong order produces an op string that parses as a
+DIFFERENT op.
+
+Exact bytes assert both halves — the broad grant carries both owners, and
+the carve line restates the excepted path's current owners and sits AFTER
+the line it corrects, so last-match-wins (S-1) resolves the excepted path to
+the owners it had rather than to the grantees.
+
+### `TestR39_OwnersIsAPerOpFieldAndNowhereElse`
+
+SPEC R-39/R-35c: `owners` is a per-OP field and belongs nowhere else. A
+`defaults` block supplying owners would be a fleet-wide grant stated once,
+far from the ops it silently joins — the ambiguity R-35c exists to remove,
+one field worse. The top level is refused for the same reason.
+
+Both refusals are the unknown-field message, which names the set the level
+does accept, so the fragment asserted is that set rather than R-39: this is
+a claim that the field did NOT spread, and the evidence is the accept-list
+staying as it was.
+
+### `TestR39_PinsBehaviorTheArrayDoesNotDisturb`
+
+SPEC R-39: the string spellings R-33 shipped are untouched. These three
+subtests PASS TODAY and are pins, not specifications of new behavior: a
+feature that made a scope-only op string legal on its own, or relaxed
+`set_owners`' brackets as a side effect, would change what an existing
+policy means without anyone editing it.
+
+The first two are the errors an operator sees when they forget the array
+entirely — they must stay the arity message, which names the two legal
+spellings, rather than becoming a message about a field the policy does not
+mention.
+
+### `TestR39_R8CommutationSeesEveryOwnerInTheArray`
+
+SPEC R-39/R-8: commutation is decided over every owner the ARRAY names. An
+implementation that folded the array in after ops.StaticConflict ran would
+compare two ops that name no owners at all, find every pair commuting, and
+admit an order-dependent batch — at exit 0, into a hundred repositories,
+which is precisely what R-8 exists to prevent.
+
+The commuting pair is asserted alongside the refusal: an implementation that
+refused every array-carrying batch to be safe would satisfy the first half
+and break every real policy.
+
+### `TestR39_SummaryNamesEveryOwnerFromTheArray`
+
+SPEC R-39/R-24: the PR body a reviewer reads names every owner the array
+grants. `--summary-out` is the one artifact a human sees before merging a
+hundred near-identical PRs; an array-spelled op rendered as
+`add_owner(/docs/)` would put a grant naming nobody in front of the only
+person positioned to catch it.
+
+### `TestR39_ZeroMatchDisposesTheOpNotTheOwners`
+
+SPEC R-39/R-21: the array changes WHO an op names, never WHETHER it runs. A
+zero-match scope is still disposed of by on_zero_match: require refuses this
+repo naming the SCOPE (the owners are not why it refused), skip is a clean
+no-op that writes nothing at all, and declare writes ONE line carrying every
+owner in the array — the R-33b shape on the path where no tracked file
+exists to fold against.
+
+The declare case is where an implementation that appended owners one at a
+time shows itself: two lines, or one line rewritten twice, in a repository
+where nothing tracked matches and structure is the whole proof (INV-6).
+
+### `TestR22b_CheckCannotDecideDeclaredPairs`
+
+SPEC R-22b: `check` reads no repository, so it cannot reach any of this.
+
+Whether an op is declared is a fact about one repo's tree, so both the
+accepted and the refused policies above are valid policies. This is why the
+refusal surfaces at sync, per repo, as exit 2 rather than halting a rollout
+at exit 3 — and it is the reason an operator sees "check passed, sync
+failed" and reasonably concludes the policy file is fine.
+
+### `TestR22b_DirectoryScopeAgainstADeclareStaysRefused`
+
+SPEC R-22b (the boundary that must keep refusing): a DIRECTORY scope is not
+an exact tracked file, however anchored and wildcard-free it is spelled.
+
+`/.github/` names a directory that can gain files, so a future
+.github/main.tf matches both that scope and the declared `**/*.tf`. Which
+one governs it depends on which line was written where, so the batch really
+is order-dependent and R-8 must still refuse it. This is the case that
+broke when the exemption was first written as "the other op resolved
+against a non-empty tree" — a condition a directory satisfies too.
+
+Pin: passes today, and must keep passing.
+
+### `TestR22b_ExactTrackedFileAgainstADeclareApplies`
+
+SPEC R-22b: an op whose scope is an anchored, wildcard-free path naming one
+TRACKED FILE commutes with a declared op, whatever owners the two name.
+
+The declared op matched zero tracked paths, so by construction it does not
+match that file; and no path can appear beneath a file. The two scopes can
+never meet, so there is no order to depend on.
+
+The guard refuses the pair today. Its own comment (plan.go:376) justifies
+itself with a hazard that needs BOTH ops declared — two rules stacked at
+EOF where last-match-wins silently picks the winner — but the condition it
+fires on is `declared[i] || declared[j]`, so it also catches a declare
+paired with an op that resolves against the real tree. `remove_owner`
+cannot even carry `declare` (plan.go:232), so the pair below is
+unreachable by the hazard the guard was written for:
+
+	error: ops "remove_owner(/.github/CODEOWNERS, @org/bot)" and
+	"add_owner(**/justfile, @org/bot)" can both govern a path that does not
+	exist yet and do not commute (R-8: refusing order-dependent batch)
+
+This is the shape every real "grant the bot everything except CODEOWNERS"
+fleet policy takes, and refusing it forces the operator to split one
+reviewed artifact into two invocations that must both be rolled out.
+
+### `TestR22b_ExactTrackedFilePairIsByteIdenticalInBothOrders`
+
+SPEC R-22b: the accepted batch is order-independent in the strong sense —
+the two orderings produce the SAME BYTES, not merely the same resolution.
+
+That is what makes the exemption safe for a path that does not exist yet: a
+declared rule always appends at EOF and a narrowing rule is always inserted
+after the rule it corrects, so even if .github/CODEOWNERS were replaced by a
+directory containing a justfile, both orderings agree on which line wins.
+An assertion on resolution alone would not have caught a file that differs.
+
+### `TestR22b_TwoDeclaresStayRefused`
+
+SPEC R-22b (the boundary that must keep refusing): two DECLARED ops are the
+hazard the guard was written for, and the exemption must not reach them.
+
+Neither op resolves against the tree, both rules land at EOF, and
+last-match-wins hands a future terraform/main.tf to whichever was listed
+second — so the two orderings produce different files. Refusing here is the
+whole point of the guard.
+
+Pin: passes today, and must keep passing.
+
 ### `TestR33a_ListFoldsToTheSameFileAsTheOpsItReplaces`
 
 SPEC R-33a: an owner list produces exactly the file the single-owner ops it
@@ -2333,7 +2857,7 @@ under those directories later.
 
 SPEC R-35c: `on_empty` inside `defaults` is exit 3. It is one policy for
 the run, not a per-op setting, and two spellings for one setting is the
-ambiguity docs/policy.md exists to remove — accepting it in both places
+ambiguity the policy format exists to remove — accepting it in both places
 would leave "which one wins" as a precedence rule nobody wrote down.
 
 The fragment cannot be "on_empty" or "defaults": today's rejection of the
@@ -2807,6 +3331,148 @@ Repair is `lint`'s verb; a sync that quietly edits what the policy did not
 name is the surprise this tool exists to avoid. Both subtests pass today
 and are here so a fix that folds owners on the way OUT — deduplicating the
 line while it is open — turns them red.
+
+### `TestR39a_AMalformedOpStringKeepsItsOwnDiagnosis`
+
+SPEC R-39a: an op string that is not an op keeps its OWN diagnosis when an
+`owners` array rides along. Adding the array must not turn a syntax error
+into a semantic one about a different thing.
+
+The defect (found by review of the first cut): `add_owner(/x/` — a missing
+closing paren — was reported as an op that "has to state a scope", which is
+the one thing it does state. The array-less spelling of the same typo says
+`malformed op "add_owner(/x/": want kind(args)`, which names the actual
+defect, and an operator told the scope is missing goes looking at the scope.
+
+The assertion is differential AND literal: each case runs the same op string
+with and without the array and demands the grammar's own words in both, and
+demands the misleading sentence appears in neither. A literal-only check
+would pass against an implementation that hard-coded these strings in the
+array path — a second copy of the grammar's messages, which is exactly what
+R-39a exists to prevent.
+
+### `TestR39a_ArrayAndListSpellingsAreIndistinguishable`
+
+SPEC R-39a: the array spelling and the list spelling of one grant produce
+the same file, byte for byte, and the same record — the echoed `op` string
+included, because the array is re-spelled as the list before anything else
+sees it. That echo is not cosmetic: `results.jsonl` from a hundred repos is
+grepped and aggregated by op string, and an array-spelled wave whose records
+said `add_owner(/services/api/)` would report a grant naming nobody.
+
+### `TestR39a_ArrayIsIdempotentAndAddsOnlyWhatIsMissing`
+
+SPEC R-39a: the array is idempotent and adds only what is missing, exactly as
+the list is. The second run of a converged policy must be byte-identical —
+the property a fleet depends on to tell "already done" from "changed", and
+the one an implementation that appends the whole array unconditionally
+breaks on run two.
+
+### `TestR39a_ArrayOrderFixesAppendOrderNotResolution`
+
+SPEC R-39a/R-33e: array order fixes the APPEND order in the written line and
+nothing else. The bytes differ between two orders — that is what "order is
+preserved" means, and a writer that sorted would violate it — while the
+resolution is identical, because owners are a set to GitHub.
+
+The oracle for the second half is `snapshot`, not the file: a test that
+asserted only bytes would pass against an implementation that wrote the
+owners in a line the resolver never reaches.
+
+### `TestR39a_ArrayReachesEveryOwnerNamingVerb`
+
+SPEC R-39a: the array reaches every verb that names owners, not just
+add_owner. A feature that carved only for add_owner would push generators
+straight back to string-building for the two verbs where a mistake is
+destructive — `set_owners` displaces, `remove_owner` revokes.
+
+Each case asserts the whole outcome, not just that something changed:
+set_owners must drop @org/api-team (that is the difference from add_owner),
+and remove_owner must leave the line with the survivors and not delete it.
+
+### `TestR39a_EmptyArrayFollowsTheVerb`
+
+SPEC R-39a/R-33d: an empty array follows the VERB, exactly as an empty list
+does. `set_owners(scope, [])` is how "nobody owns this" is spelled and stays
+legal; an empty add or remove states no intent at all and is exit 3.
+
+This is the one place the owners array must NOT copy R-37d's blanket refusal
+of an empty `except` array: emptiness means something here. A generator that
+computes an owner set and finds it empty is making a statement when the verb
+is set_owners and has a bug when it is not.
+
+### `TestR39a_SingleElementArrayEqualsTheBareForm`
+
+SPEC R-39a/R-33a: a one-element array is the bare single-owner form, byte for
+byte in the FILE. R-33a made that promise for `[@a]` inside the op string; a
+generator that emits an array of length one for a one-owner intent — which
+every generator does, because the length is data — must not produce a
+different file from a human typing `@a`.
+
+The echoed op string is the one thing that legitimately differs: the array is
+always re-spelled as a list, so it reports itself as `add_owner(/docs/,
+[@org/x])` where the hand-written op says `add_owner(/docs/, @org/x)`. R-33a
+is precisely the statement that those two are the same op, so the assertion
+here is over the bytes, the changes and the op's outcome — never over the
+spelling. Asserting spelling equality would force a one-element special case
+into the re-speller, which is a rule that buys nothing and one more place for
+the two spellings to diverge.
+
+### `TestR39a_TheArrayInheritsEveryListRefusal`
+
+SPEC R-39a: every refusal the bracketed list makes is the array's refusal
+too, in the STRING spelling's own words. A second copy of these checks
+beside the array is how the two would drift — the array would still accept a
+duplicate owner a year after the list stopped, and `verify` would report a
+rollback-worthy invariant violation over a policy `check` called clean.
+
+The duplicate cases are the ones that need both spellings asserted: an
+owner named twice is a fact about the TEXT, so it is exit 3 on every
+repository rather than a per-repo refusal, and case-variant handles are one
+owner under R-38a because GitHub folds them.
+
+### `TestR39b_OwnersInBothPlacesIsExit3`
+
+SPEC R-39b: one intent, one place. An op naming owners in its op string AND
+in an `owners` array is exit 3 before any repo is read — a policy whose two
+halves might disagree must never reach a decision about which one wins.
+Silently preferring either one grants a team somebody reviewed out, or drops
+one they reviewed in, in a diff where both spellings are visible and neither
+is marked dead.
+
+Both string spellings are covered: the bare owner and the bracketed list.
+An implementation that detected the conflict by "does the op string parse"
+catches the first and misses neither — but one that looked for a `[` catches
+only the second.
+
+The fragment is the requirement id: today this policy dies with `unknown
+field "owners"`, which contains the word owners and the word field, so any
+obvious semantic fragment passes vacuously against a binary that does not
+implement the array at all.
+
+### `TestR39c_RenameOwnerTakesNoOwnersArray`
+
+SPEC R-39c: `rename_owner` takes no `owners` array, in the same way and for
+the same reason it takes no list (R-33f) and no `except` (R-27.4): it names
+one owner and one replacement, both required, neither a set. Falling through
+to a message about arity or about a list nobody wrote sends the operator
+hunting a typo instead of learning the verb takes no array.
+
+### `TestR39d_ElementTheOpStringCannotCarryIsExit3`
+
+SPEC R-39d: an element is one owner token, and the array is not a delimited
+string — so an element carrying a character the op string uses as structure
+is refused in the operator's terms rather than silently read as two owners.
+
+Only an email owner can reach this: `handleRe` admits none of these
+characters, while `emailRe` is `[^@\s]+@[^@\s]+\.[^@\s]+` and admits a comma
+and a bracket. `a,b@x.com` spliced into an op string re-splits into the two
+owners `a` and `b@x.com`, and `a]b@x.com` closes the list early — one input
+landing on two identities, in the field where that is a grant to a stranger.
+
+The control matters as much as the refusals: an ordinary email owner is
+legal in the array (R-13), and an implementation that refused every email to
+be safe would break the one owner form GitHub allows for individuals.
 
 ### `TestRecord_OpRunOmitsThePolicyKey`
 
@@ -3429,6 +4095,89 @@ Every verb, not just audit: a token in the environment must survive any usage
 render anywhere in the CLI. This is the regression guard for the day a second
 command grows a credential flag.
 
+### `TestAuditJSONCleanIsPureJSON`
+
+Pre-release finding, fixed: `audit --format json` on a clean repo prints the literal line
+"audit clean" after the JSON object, so the one case CI most wants to pipe
+to jq — the healthy repo — is the one case the output isn't parseable.
+Under `--format json`, stdout is data.
+
+### `TestAuditRejectsUnknownFormat`
+
+Pre-release finding, fixed: `audit` silently accepts an unknown `--format` and falls back to
+text. sync, check, and lint all reject unknown formats at exit 3 — "never a
+silent fallback to text" — and audit is documented with the same
+`--format json|text` contract.
+
+### `TestBranchMismatchErrorNamesHeadCleanly`
+
+Pre-release finding, fixed: the S-7 branch-mismatch refusal interpolates raw `git rev-parse
+--abbrev-ref --end-of-options HEAD` output, and rev-parse echoes the
+`--end-of-options` operator as an output line — so the one-line error (and
+the JSON record's error field) reads "HEAD is --end-of-options\nmain (…)".
+
+### `TestEscapedHashPatternRefused`
+
+Pre-release finding, fixed: a `\#`-escaped pattern is accepted and written, but S-6/S-2 says
+GitHub honors no `\#` escape — on GitHub the written line is dead, so the
+tool reports `proven: tree` for a rule that provably does not hold there.
+The unescaped spelling `add_owner(#tag.md, …)` is already refused; the
+escaped spelling must be refused too, and nothing written.
+
+### `TestFileFlagSpellingNoFalseGovernsNothing`
+
+Pre-release finding, fixed: `--file ./.github/CODEOWNERS` (or any uncleaned spelling of a
+governing location) triggers a false "governs nothing" warning. trackedAt
+cleans the spelling before matching the tracked file; the S-8 location
+check compares the raw string, so a live change is reported as dead in the
+warning, the --out record, and the --summary-out PR body.
+
+### `TestOfflineStaleRuleRemovalReportable`
+
+Pre-release finding (UAT), fixed: a tree-provably-dead rule cannot be repaired
+offline. `lint --dry-run --remove-stale-paths` refuses everything at exit 5
+citing R-12 ("owner existence is not decidable offline") — but whether a
+pattern matches zero tracked files is a git-tree fact the offline audit
+(A-4/A-5) itself proves, no API needed. With --remove-stale-paths as the
+requested repair, the dry run should report the pending dead-rule removal
+(exit 4) instead of demanding a token; today the only offline remedy is the
+hand edit the tool exists to prevent.
+
+### `TestPlanBelowRepoRootRefused`
+
+Pre-release finding, fixed: plan and apply skip the repo-root guard that sync enforces.
+sync refuses `--repo <subdir>` because the CODEOWNERS it would write lands
+at a path GitHub never reads (checkRepoRoot). plan happily plans against the
+subtree and apply writes the dead file, reporting success — the "applied,
+dead on arrival" outcome the guard exists to prevent. plan must refuse
+exactly as sync does.
+
+### `TestPositionalArgsRejected`
+
+Pre-release finding, fixed: positional arguments are silently discarded, and every flag
+after them with them. `audit ../other-repo --checks a999` (note the missing
+--repo) audits the CWD with all defaults and exits 0 — the invalid
+`--checks a999`, which the parser would reject loudly, is never seen. A
+tool this strict about flag values must not swallow whole arguments.
+
+### `TestSetOwnersDisclosesAuthoredDuplicate`
+
+Pre-release finding, fixed: set_owners on a scope whose pattern already exists earlier in
+the file authors a shadowed duplicate — the old line stays, dead under
+last-match-wins but still naming its owners to human readers — and the run
+that creates it says nothing. The R-7 duplicate warning fires only on the
+NEXT run that touches the file. The run creating the duplicate must
+disclose it.
+
+### `TestSymlinkedCodeownersNotSilentSuccess`
+
+Pre-release finding, fixed: a symlinked .github/CODEOWNERS inside the clone is written
+through and reported applied with no warning. The tool's own docs state
+GitHub does not follow a symlinked CODEOWNERS, so the run edited a file
+that governs nothing while reporting success. An out-of-repo symlink target
+is already refused (containedWritePath); the in-repo case must at minimum
+not be a silent success.
+
 ## internal/file
 
 **`file_test.go`**
@@ -3745,6 +4494,28 @@ an error condition for the caller, never a merge.
 
 > ---------- no-op, byte preservation, reporting ----------
 
+**`offline_test.go`**
+
+> The tree-only mode behind offline `lint --remove-stale-paths`
+> (Options.SkipOwnerChecks).
+>
+> R-12 makes owner existence — an API fact — undecidable offline, and the
+> whole run fails closed on it. But whether a pattern matches zero tracked
+> files is a git-TREE fact the offline audit (A-4/A-5) already proves, so a
+> run that asks ONLY for the stale-path repair may run with no Verifier at
+> all. The contract for that mode, pinned here:
+>
+>   - stage 3 runs exactly as it does online — same staleness judgment, same
+>     A-5 sparing of case-only misses;
+>   - the owner WORK of stages 1 and 2 is skipped, not degraded: no owner is
+>     looked up, repaired, or removed, and no invalid line is rewritten;
+>   - stage 1's REPORTING still runs: an invalid line GitHub is skipping is a
+>     file fact, no API needed, so it is reported (NeedsHuman → exit 4) — a
+>     line the online run would repair with a reason that names the
+>     credentialed run, any other with the same reason as online;
+>   - SkipOwnerChecks without RemoveStalePaths is invalid input, because with
+>     owner work forbidden there is nothing left the run may do (R-11/R-12).
+
 ### `TestBuild_ActionsCarryLineAndReason`
 
 SPEC R-16 (reporting): every action carries the 1-based line it happened on
@@ -3907,6 +4678,57 @@ destroy it in the one commit an operator is least likely to read closely: the
 automated one. The correct outcome is a file that still contains the broken
 line and a report that says so.
 
+### `TestOffline_CaseOnlyMissIsSparedAndNeedsAHuman`
+
+SPEC A-5/S-6 offline: a rule that matches nothing ONLY because of case is a
+typo, not a dead rule, and the offline mode spares it with exactly the
+online logic — deleting it would silently un-own the files it was aimed at.
+Spared means reported (NeedsHuman), so the caller still exits 4.
+
+### `TestOffline_DeadRuleIsRemovedWithANilVerifier`
+
+SPEC A-4/R-11 offline: a rule whose pattern matches nothing tracked and
+nothing on disk is deleted with a NIL Verifier. The nil is the proof that no
+lookup can possibly have been made — an implementation that touched the
+network here would panic, not pass.
+
+### `TestOffline_EmailOwnersAreNotReportedUnverifiable`
+
+SPEC R-13 offline: email owners are not looked up online either, but online
+they are REPORTED as unverifiable — a statement about a check that ran
+around them. Offline no owner check ran at all, so the report would imply
+the rest of the file's owners were verified. Nothing is reported.
+
+### `TestOffline_OwnersAreNeverLookedUpOrRemoved`
+
+SPEC R-12 offline: owners are never touched, even one a lookup WOULD have
+proven dead. Proven from the call log, not the output — an implementation
+that asked and ignored the answer is one refactor from believing it.
+
+### `TestOffline_SkipWithoutRemoveStaleIsInvalid`
+
+SPEC R-11/R-12: SkipOwnerChecks without RemoveStalePaths is invalid input,
+not a clean run. Stages 1 and 2 are owner work the mode forbids, and stage 3
+was not opted into — a "clean" from a run that checked nothing would be a
+green check that means nothing.
+
+### `TestOffline_SplitHandleIsReportedNotRepaired`
+
+SPEC R-12 offline: stage 1's REPAIR is an owner repair — it puts a
+previously skipped line, and the unverified owner on it, into force — so
+offline the line is left byte-for-byte. But it IS reported: GitHub skipping
+the line is a file fact, and a run that exits 0 over it goes green over rot.
+The reason is honest about which run can fix it — a credentialed one, which
+repairs it mechanically and verifies the reassembled owner.
+
+### `TestOffline_UnrepairableLineIsReportedSameAsOnline`
+
+SPEC offline reporting: a line no run can repair — `@keep /docs` is shaped
+exactly like two rules on one line — is reported offline with the SAME
+reason as online. GitHub skipping it is a file fact, and docs/LINTING.md
+promises exit 4 for it; an offline exit 0 would let a CI gate on
+.needs_human go green over a broken line.
+
 ### `TestOwners_CaseFoldedForLookupButNotRewritten`
 
 Owner identity is case-folded for the lookup, because GitHub's is.
@@ -3993,6 +4815,15 @@ it. It is reported in Result.Unverifiable and left exactly where it is.
 Proven from the call log, not from the output: an implementation that asks
 about `docs@example.com` and merely ignores the reply is one refactor away
 from believing it.
+
+### `TestRemoveDeadOwner_MixedCaseSpellingKeepsItsReason`
+
+SPEC R-38a in stage 2's record: a dead owner spelled @Org/Gone is the same
+owner as @org/gone, so the lookup and the `dead` map are both case-folded —
+but the Action.Reason was read back with the UNFOLDED spelling, an empty
+reason on exactly the removals whose spelling differs from the fold. The
+reason is what a reviewer approves the deletion on, so it must survive the
+file's own capitalisation.
 
 ### `TestRepairHandle_ConservesBytesAndProducesOnlyHandles`
 
@@ -4269,6 +5100,15 @@ it claimed to be. Only an org owner sees secret teams.
 > Package ops_test defines the intent language: operations are expressed
 > over resolved ownership, never over lines (§1 of the spec).
 
+### `TestNamesOwners_IsAboutArityNotBrackets`
+
+SPEC R-39b: NamesOwners is the question "does this op string already state
+its owners", asked before the op parses. Arity is the test, not a search for
+a bracket: `add_owner(/x/, @a)` states owners exactly as much as the list
+spelling does, and an implementation looking for `[` would let that op carry
+an `owners` array too — one intent in two places, with nothing to say which
+half wins when the next generator run changes only one of them.
+
 ### `TestParse_AddOwner`
 
 (no doc comment)
@@ -4343,6 +5183,13 @@ line "a b @x" re-parses as pattern "a" owned by "b" — a different, valid
 rule that silently breaks both invariants (review finding). CODEOWNERS
 spells such patterns with escaped spaces, and so must ops.
 
+### `TestSpelledKind_ReadsTheVerbBeforeTheOpParses`
+
+SPEC R-39c: SpelledKind reads the verb off text that may not parse yet, which
+is the only thing available when deciding whether an op may carry an `owners`
+array at all — a scope-only op string does not parse until the array has been
+folded into it.
+
 ### `TestWithExcept_RoundTripsOrRefuses`
 
 SPEC R-37a/R-37e: WithExcept writes the one string the array spelling is
@@ -4355,6 +5202,26 @@ clause as another argument (the arity error that followed named an owner
 list nobody wrote), and a trailing backslash escapes the space in front of
 the next pattern, silently merging two carve-outs into one pattern that
 matches nothing.
+
+### `TestWithOwners_RoundTripsOrRefuses`
+
+SPEC R-39a: WithOwners writes the one string an `owners` array is validated,
+applied and reported as — so what it returns has to re-parse to the same
+intent, and it has to REFUSE what an op string cannot carry rather than
+return something that parses as a different op.
+
+The refusals are the ones only an email owner can reach: `handleRe` admits
+none of these characters, while `emailRe` is `[^@\s]+@[^@\s]+\.[^@\s]+` and
+admits a comma and a bracket. `a,b@x.com` spliced in re-splits into the two
+owners `a` and `b@x.com` — one input landing on two identities, in the field
+where that is a grant to a stranger.
+
+The scope argument is re-emitted as Parse itself reads it, which normalizes
+space around it (`add_owner( /x/ )`). That is deliberate and safe: the
+re-spelled op is what the operator is shown and what they can re-run, and
+both strings parse to the same scope. Escaped whitespace INSIDE the scope is
+a different matter and is preserved exactly — `/x\ y/` names a path with a
+space in it, and losing that escape names a different path.
 
 ## internal/pattern
 
@@ -4387,6 +5254,12 @@ paths like /apps/[param]/file.ts only match the literal bracket path).
 SPEC S-2 (differential): every case in the vendored hmarr/codeowners corpus
 must match GitHub's observed behavior exactly.
 
+### `TestS2_EscapedLeadingHashRejected`
+
+SPEC S-2/S-6: GitHub honors no `\#` escape of a leading hash — a line
+starting with '#' is always a comment there, so a `\#…` rule is dead on
+GitHub. Same standard as `!`: a mutation tool must never accept or emit one.
+
 ### `TestS2_GitHubDocExamples`
 
 SPEC S-2: examples taken verbatim from GitHub's "About code owners" docs.
@@ -4395,6 +5268,12 @@ SPEC S-2: examples taken verbatim from GitHub's "About code owners" docs.
 
 Literal special characters observed accepted by GitHub (hmarr issues
 #47 caret, #50 tilde, #52 colon): they match themselves.
+
+### `TestS2_MidPatternHashAccepted`
+
+Only the LEADING position is special-cased: a mid-pattern '#' needs no
+escape at all, and a mid-pattern `\#` keeps the reference implementation's
+literal-'#' meaning.
 
 ### `TestS2_NegationRejected`
 
@@ -4447,6 +5326,16 @@ and hand its owner every file the inner rule will ever match.
 Contains must not blow up or report true on patterns Compile rejects.
 
 ## internal/plan
+
+**`declaredpair_test.go`**
+
+> R-22b at the level the guard lives: which SCOPE SPELLINGS earn the
+> exemption from the declare-op order-dependence check.
+>
+> internal/cli covers the operator-visible contract. These cover the two
+> spellings that resolve to one tracked file TODAY while naming a language
+> that can grow tomorrow — the cases where "it matched exactly one file" is
+> not the same claim as "it can only ever match that file".
 
 **`plan_test.go`**
 
@@ -4807,6 +5696,14 @@ the white-box divergence case lives in settle_internal_test.go.
 SPEC R-7: with duplicate patterns, edit the EFFECTIVE (last) one and
 report the shadowed duplicate — never silently fix it.
 
+### `TestR7_SetOwnersDisclosesAuthoredDuplicate`
+
+SPEC R-7, same-run case (pre-release finding): set_owners on a scope whose
+pattern already exists earlier inserts after the last intersecting rule,
+leaving the earlier byte-equal line permanently shadowed but still naming
+its old owners to readers. The run that AUTHORS the duplicate must disclose
+it — not only the next run that touches the file.
+
 ### `TestR8_ConflictingBatchRejected`
 
 SPEC R-8: order-dependent overlapping batches are rejected, not resolved
@@ -5139,6 +6036,36 @@ accepted today. The refusal must cite R-8; a refusal citing R-5 means
 `declare` was never implemented and this test is passing for the wrong
 reason.
 
+### `TestR22b_AnchoredExactFileScopeCommutesWithADeclare`
+
+SPEC R-22b: an anchored, wildcard-free scope naming one tracked file
+commutes with a declared op. The declared op matched zero tracked paths, so
+it cannot match a tracked file, and nothing can appear beneath a file.
+
+### `TestR22b_UnanchoredScopeIsNotAnExactFileEvenWhenItMatchesOne`
+
+SPEC R-22b: an UNANCHORED scope is refused even when it resolves to exactly
+one tracked file.
+
+"justfile" matches that basename at any depth, so it is not a claim about
+one path at all — a justfile added under any new directory joins the scope,
+and a declared "/vendor/**" would then govern it too. The leading slash is
+what makes the scope's language finite, which is the property the exemption
+rests on; without it the tool would be reading a spelling as a guarantee it
+does not carry.
+
+### `TestR22b_WildcardScopeIsNotAnExactFileEvenWhenItMatchesOne`
+
+SPEC R-22b: a scope containing a wildcard is refused even when it resolves
+to exactly one tracked file.
+
+"/.github/CODEOWNER?" selects only .github/CODEOWNERS in this tree, so a
+tree-count test ("scope matched one path") would admit it. Its LANGUAGE is
+wider: a future .github/CODEOWNERX matches it, and so does a declared
+"**/CODEOWNERX". Admitting it would repeat TestINV6_TrailingStarStarIsNot
+ADirectoryPrefix — a disjointness claim that the tree happens to satisfy
+and the pattern does not, which is a wrong write rather than a missed one.
+
 ### `TestRenameOwner_Global`
 
 rename_owner replaces the identifier everywhere; it cannot change any
@@ -5315,6 +6242,23 @@ The fleet record is the only artifact of an unattended run. "Which repos
 lack Terraform" is answerable only if each op reports itself, by id, in the
 order the policy lists them — a bare count cannot answer it, and a reordered
 list attributes the wrong outcome to the wrong op.
+
+### `TestZeroMatch_UnrecognizedOnExceptZeroMatchIsInvalid`
+
+Same defense for the sibling switch: an unrecognized on_except_zero_match on
+an op whose except bites nothing must be invalid input (exit 3) naming the
+value — not silently run as `require`, whose exit-2 refusal reads as a
+per-repo problem when the defect is in the policy and identical everywhere.
+
+### `TestZeroMatch_UnrecognizedOnZeroMatchIsInvalid`
+
+Regression guard from the pre-release review: an UNRECOGNIZED on_zero_match
+value on a zero-match scope must refuse (exit 3), naming the value. Policy
+parsing validates the enum, but the field is exported with a json tag, so a
+library caller — or a value the policy layer learns before the planner does
+— can carry anything. Before the fix no switch arm matched, the op
+synthesized nothing, and the run reported the repo converged with a proven
+tree: the silent no-op rollout this file exists to prevent.
 
 ### `TestBasenameSpellingsSelectTheSameFiles`
 
@@ -5805,6 +6749,13 @@ Observed before the fix, at exit 0 on a repo holding `my dir/x.txt` and
 > SPEC INV-3: resolution is computed over the actual tracked file tree, never
 > over the pattern set.
 
+### `TestA8_EscapedLeadingHashLineIsInvalidAndSkipped`
+
+A pre-existing `\#…` line takes the same path as `!` negation: the pattern
+no longer compiles (S-2/S-6 — GitHub reads such a line as a comment), so the
+line is INVALID, skipped in resolution, and surfaced through the same A-8
+invalid-line reporting — never a rule this tool edits or counts on.
+
 ### `TestA8_InvalidLinesDoNotResolve`
 
 Invalid lines are skipped during resolution (current GitHub semantics) —
@@ -5864,4 +6815,4 @@ DIFFERENT states; transitioning between them is a real ownership change.
 
 ---
 
-559 documented test cases across 13 packages.
+648 documented test cases across 13 packages.

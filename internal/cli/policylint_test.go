@@ -1,7 +1,6 @@
 // Policy-as-source-of-truth end-to-end tests for the two requirements this
-// file owns: the `lint` block (R-36) and `except` as a JSON array (R-37),
-// specified in docs/policy.md. Written ahead of the implementation per
-// CONTRIBUTING.md.
+// file owns: the `lint` block (R-36) and `except` as a JSON array (R-37).
+// Written ahead of the implementation per CONTRIBUTING.md.
 //
 // Vacuity is the whole difficulty here, and it has three sources:
 //

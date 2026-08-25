@@ -60,18 +60,3 @@ verify --before before.json --after after.json --scope '/services/api/'
 ## Exit codes
 
 `sync` and `check` use a coarse contract — **0** converged, **2** this repo needs a human, **3** the policy is broken. The other commands use the full ladder: **0** ok, **1** no-op, **2** refused, **3** invalid input, **4** audit findings, **5** inconclusive, **6** rolled back.
-
-## If the proposals land
-
-This file documents the tool as it ships today. [PROPOSAL-NAMING.md](PROPOSAL-NAMING.md) argues
-for these renames, which would arrive with the `version: 2` policy format in
-[PROPOSAL-POLICY-V2.md](PROPOSAL-POLICY-V2.md) — v1 files keep today's names forever.
-
-| today | proposed |
-|---|---|
-| `add_owner` | `add` |
-| `set_owners` | `replace_all` |
-| `remove_owner` | `remove` |
-| `rename_owner` | `rename` |
-| `on_zero_match: require \| skip \| declare` | `if_no_files_match: error \| skip \| write_anyway` |
-| `on_empty` | `if_no_owners_left` |
