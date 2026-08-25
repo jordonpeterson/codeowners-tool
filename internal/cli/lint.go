@@ -456,7 +456,7 @@ func runLint(r lintRun, stdout, stderr io.Writer) int {
 	}
 
 	if !r.dryRun {
-		if err := apply.Apply(res.Plan, target); err != nil {
+		if _, err := apply.Apply(res.Plan, target); err != nil {
 			return errExit(err, stderr)
 		}
 	}

@@ -24,15 +24,29 @@ type ValidationError struct {
 
 func (e *ValidationError) Error() string { return e.Msg }
 
-// Apply writes a plan's after-content to filePath. Refuses if the file
-// drifted from the plan's pinned hash, re-checks the size cap, validates the
-// content BEFORE writing, and writes atomically (temp file + rename in the
-// same directory), so no failure mode leaves a truncated or half-written
-// CODEOWNERS file — a partial write would silently change ownership (found
-// in review: the previous in-place write could truncate on a full disk).
-// Symlinks are resolved first so the link itself is preserved and its target
-// is replaced.
-func Apply(p *plan.Plan, filePath string) error {
+// Written reports what the write actually moved, MEASURED from the bytes on
+// disk rather than repeated from the plan. The plan's own size_before and
+// size_after are claims made by the document being applied; echoing them let a
+// tampered plan produce a confirmation message that was measurably false.
+type Written struct {
+	Before int
+	After  int
+}
+
+// Apply writes a plan's after-content to filePath. Refuses if the file drifted
+// from the plan's pinned hash or if after_content does not match the plan's
+// own sha256_after, re-checks the size cap, validates the content BEFORE
+// writing, and writes atomically (temp file + rename in the same directory),
+// so no failure mode leaves a truncated or half-written CODEOWNERS file — a
+// partial write would silently change ownership (found in review: the previous
+// in-place write could truncate on a full disk). Symlinks are resolved first
+// so the link itself is preserved and its target is replaced.
+//
+// The sha256_after check is skipped when the field is empty, which is how an
+// in-process caller (sync, lint) that never serialises its plan reaches the
+// same code path. The window this closes belongs to a plan that TRAVELS, so
+// the verb that reads one off disk requires the field — see cmdApply.
+func Apply(p *plan.Plan, filePath string) (Written, error) {
 	target := filePath
 	if resolved, err := filepath.EvalSymlinks(filePath); err == nil {
 		target = resolved
@@ -40,22 +54,28 @@ func Apply(p *plan.Plan, filePath string) error {
 
 	current, err := os.ReadFile(target)
 	if err != nil {
-		return &plan.InvalidError{Msg: fmt.Sprintf("read %s: %v", filePath, err)}
+		return Written{}, &plan.InvalidError{Msg: fmt.Sprintf("read %s: %v", filePath, err)}
 	}
 	h := sha256.Sum256(current)
 	if hex.EncodeToString(h[:]) != p.HashBefore {
-		return &plan.InvalidError{Msg: fmt.Sprintf(
+		return Written{}, &plan.InvalidError{Msg: fmt.Sprintf(
 			"%s changed since the plan was computed (hash mismatch) — the plan's invariants are no longer proven; re-run plan", filePath)}
 	}
+	// The plan's own integrity. Everything below this line trusts
+	// after_content, and until here nothing established that the bytes under
+	// review are the bytes about to be written.
+	if p.HashAfter != "" && hashHex([]byte(p.AfterContent)) != p.HashAfter {
+		return Written{}, &plan.InvalidError{Msg: "plan integrity: after_content does not match the plan's own sha256_after — the plan was corrupted, truncated or edited since it was computed, so what it says it will write and what it would write are different things; nothing written, re-run plan"}
+	}
 	if len(p.AfterContent) > 3_000_000 {
-		return &plan.RefusalError{Msg: fmt.Sprintf(
+		return Written{}, &plan.RefusalError{Msg: fmt.Sprintf(
 			"refusing: plan content is %d bytes, over the 3 MB limit GitHub silently ignores (S-4)", len(p.AfterContent))}
 	}
 
 	// Validate BEFORE writing: only errors the plan would introduce count;
 	// pre-existing invalid lines are reported by audit, not blocked here.
 	if newErrs := newSyntaxErrors(current, []byte(p.AfterContent)); len(newErrs) > 0 {
-		return &ValidationError{
+		return Written{}, &ValidationError{
 			Msg:    fmt.Sprintf("plan content introduces %d syntax error(s); nothing written (R-10)", len(newErrs)),
 			Errors: newErrs,
 		}
@@ -63,34 +83,34 @@ func Apply(p *plan.Plan, filePath string) error {
 
 	info, err := os.Stat(target)
 	if err != nil {
-		return &plan.InvalidError{Msg: err.Error()}
+		return Written{}, &plan.InvalidError{Msg: err.Error()}
 	}
 
 	// Atomic write: temp file in the same directory, then rename. Any
 	// failure before the rename leaves the original untouched.
 	tmp, err := os.CreateTemp(filepath.Dir(target), ".codeowners-tool-*")
 	if err != nil {
-		return fmt.Errorf("create temp file: %w", err)
+		return Written{}, fmt.Errorf("create temp file: %w", err)
 	}
 	tmpName := tmp.Name()
 	cleanup := func() { _ = os.Remove(tmpName) }
 	if _, err := tmp.Write([]byte(p.AfterContent)); err != nil {
 		tmp.Close()
 		cleanup()
-		return fmt.Errorf("write temp file (original untouched): %w", err)
+		return Written{}, fmt.Errorf("write temp file (original untouched): %w", err)
 	}
 	if err := tmp.Chmod(info.Mode()); err != nil {
 		tmp.Close()
 		cleanup()
-		return fmt.Errorf("chmod temp file (original untouched): %w", err)
+		return Written{}, fmt.Errorf("chmod temp file (original untouched): %w", err)
 	}
 	if err := tmp.Close(); err != nil {
 		cleanup()
-		return fmt.Errorf("close temp file (original untouched): %w", err)
+		return Written{}, fmt.Errorf("close temp file (original untouched): %w", err)
 	}
 	if err := os.Rename(tmpName, target); err != nil {
 		cleanup()
-		return fmt.Errorf("rename into place (original untouched): %w", err)
+		return Written{}, fmt.Errorf("rename into place (original untouched): %w", err)
 	}
 
 	// Post-rename verification: read back and re-validate; restore on any
@@ -98,16 +118,23 @@ func Apply(p *plan.Plan, filePath string) error {
 	// success (found in review).
 	written, err := os.ReadFile(target)
 	if err != nil || !bytes.Equal(written, []byte(p.AfterContent)) {
-		return rollback(target, current, info.Mode(),
+		return Written{}, rollback(target, current, info.Mode(),
 			&ValidationError{Msg: "post-write readback mismatch (R-10)"})
 	}
 	if newErrs := newSyntaxErrors(current, written); len(newErrs) > 0 {
-		return rollback(target, current, info.Mode(), &ValidationError{
+		return Written{}, rollback(target, current, info.Mode(), &ValidationError{
 			Msg:    fmt.Sprintf("written file has %d new syntax error(s) (R-10)", len(newErrs)),
 			Errors: newErrs,
 		})
 	}
-	return nil
+	// Measured, not repeated: `current` is pinned by sha256_before, and
+	// `written` was just read back off disk.
+	return Written{Before: len(current), After: len(written)}, nil
+}
+
+func hashHex(b []byte) string {
+	h := sha256.Sum256(b)
+	return hex.EncodeToString(h[:])
 }
 
 // rollback restores the original bytes. If the restore itself fails, the

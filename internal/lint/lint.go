@@ -820,8 +820,7 @@ func Build(content []byte, tree []string, v Verifier, opts Options) (*Result, er
 		return nil, &plan.RefusalError{Msg: "refusing: the lint edits do not satisfy the invariants", Details: violations}
 	}
 
-	res.Plan.AfterContent = string(afterBytes)
-	res.Plan.SizeAfter = len(afterBytes)
+	res.Plan.SetAfterContent(afterBytes)
 	// Stage 1 appends ascending and stages 2/3 descending, so both lists are
 	// sorted before anyone sees them — an out-of-order diff makes a reviewer
 	// hunt for a reordering that never happened.

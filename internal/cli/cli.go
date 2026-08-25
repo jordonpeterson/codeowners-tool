@@ -189,9 +189,19 @@ const (
 // planFile is Plan plus the apply-time context the CLI adds.
 type planFile struct {
 	plan.Plan
+	// Repo is absolute. It used to be whatever string reached --repo, so a
+	// plan made with `--repo .` recorded "." and could not be applied from any
+	// other working directory — it died on raw git plumbing. A plan is an
+	// artifact that travels; a relative path in it names a different place
+	// depending on where it is read.
 	Repo           string `json:"repo"`
 	Ref            string `json:"ref"`
 	CodeownersPath string `json:"codeowners_path"`
+	// TreeSHA256 fingerprints the tracked tree the plan was computed against.
+	// sha256_before catches a CODEOWNERS that moved; nothing caught a TREE
+	// that moved, so ownership_rows -- the artifact a human reviews -- could
+	// understate the blast radius by the time apply ran.
+	TreeSHA256 string `json:"tree_sha256"`
 }
 
 // Run executes argv (without the program name) and returns the exit code.
@@ -480,6 +490,30 @@ func resolveExistingPrefix(dir string) string {
 // absent component (the --create case) has no link to refuse, and a --repo
 // reached through links above the root (macOS /var -> /private/var) stays
 // legitimate. The walk is bounded by the path's own depth.
+// absRepo makes a repository path absolute for the record. A plan travels, so
+// a relative path in it names a different place depending on where it is read.
+// Abs can only fail when the working directory is gone; degrading to the raw
+// spelling then is no worse than what was recorded before.
+func absRepo(dir string) string {
+	if abs, err := filepath.Abs(dir); err == nil {
+		return abs
+	}
+	return dir
+}
+
+// sameRepo compares two repository paths as LOCATIONS rather than as strings,
+// so /tmp/r, /tmp/./r and a symlinked spelling of the same clone all agree.
+func sameRepo(a, b string) bool {
+	ra, rb := absRepo(a), absRepo(b)
+	if resolved, err := filepath.EvalSymlinks(ra); err == nil {
+		ra = resolved
+	}
+	if resolved, err := filepath.EvalSymlinks(rb); err == nil {
+		rb = resolved
+	}
+	return ra == rb
+}
+
 func refuseSymlinkedTarget(target string) error {
 	// Abs can only fail when the CWD is gone; degrade to the raw spelling —
 	// the walk then covers the final component, the pre-walk behavior.
@@ -601,7 +635,7 @@ func cmdPlan(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		return errExit(err, stderr)
 	}
-	pf := planFile{Plan: *p, Repo: *repo, Ref: *branch, CodeownersPath: coPath}
+	pf := planFile{Plan: *p, Repo: absRepo(*repo), Ref: *branch, CodeownersPath: coPath, TreeSHA256: gittree.Digest(tree)}
 	b, _ := json.MarshalIndent(pf, "", "  ")
 	if *out != "" {
 		if err := os.WriteFile(*out, b, 0o644); err != nil {
@@ -649,6 +683,19 @@ func cmdApply(args []string, stdout, stderr io.Writer) int {
 	}
 	repoDir := pf.Repo
 	if *repo != "" {
+		// A plan is bound to the repository it was computed in. --repo used to
+		// override the plan's own repo field silently, so a plan computed
+		// against one clone was applied to another -- and because identical
+		// bootstrap CODEOWNERS across many repos is exactly what this tool is
+		// for, the sha256_before guard collided legitimately and let it
+		// through. The bytes-differ refusal also blamed "changed since the
+		// plan was computed", pointing the operator at an edit that never
+		// happened.
+		if pf.Repo != "" && !sameRepo(*repo, pf.Repo) {
+			return errExit(&plan.RefusalError{Msg: fmt.Sprintf(
+				"refusing: --repo %s is a different repository from the one this plan was computed against (%s). A plan's ownership rows are facts about ONE tree, so applying it elsewhere moves ownership nobody reviewed; re-run plan against this repository, or use `sync --policy` to roll one intent across a fleet — nothing was written",
+				*repo, pf.Repo)}, stderr)
+		}
 		repoDir = *repo
 	}
 	// The same repo-root guard `sync` enforces (checkRepoRoot), re-checked at
@@ -672,10 +719,40 @@ func cmdApply(args []string, stdout, stderr io.Writer) int {
 	if err := refuseSymlinkedTarget(target); err != nil {
 		return errExit(err, stderr)
 	}
-	if err := apply.Apply(&pf.Plan, target); err != nil {
+	// The tree the plan was reviewed against. sha256_before proves CODEOWNERS
+	// has not moved; this proves the thing it is resolved AGAINST has not
+	// either. Without it the documented plan-in-CI / apply-after-merge
+	// sequence let a colleague's merge widen the blast radius under a plan a
+	// human had already approved, silently and at exit 0.
+	if pf.TreeSHA256 != "" {
+		ref := pf.Ref
+		if ref == "" {
+			ref = "HEAD"
+		}
+		tree, err := gittree.ListTracked(repoDir, ref)
+		if err != nil {
+			return errExit(&plan.InvalidError{Msg: err.Error()}, stderr)
+		}
+		if got := gittree.Digest(tree); got != pf.TreeSHA256 {
+			return errExit(&plan.RefusalError{Msg: fmt.Sprintf(
+				"refusing: the tracked tree at %s has changed since this plan was computed, so the ownership rows that were reviewed are no longer what this plan would do — paths added under a reviewed scope gain its owners without appearing in the plan; re-run plan and review it again — nothing was written",
+				ref)}, stderr)
+		}
+	}
+	// A plan read off disk MUST carry its own integrity field. Treating a
+	// missing sha256_after as "no check requested" would make deleting one
+	// line of JSON the way past the check that exists to catch edited plans.
+	if pf.HashAfter == "" {
+		return errExit(&plan.InvalidError{Msg: fmt.Sprintf(
+			"%s has no sha256_after, so the plan's own contents cannot be verified; it was written by a version that predates the field — re-run plan", *planPath)}, stderr)
+	}
+	written, err := apply.Apply(&pf.Plan, target)
+	if err != nil {
 		return errExit(err, stderr)
 	}
-	fmt.Fprintf(stdout, "applied: %s (%d → %d bytes)\n", target, pf.SizeBefore, pf.SizeAfter)
+	// The plan's size_before/size_after are claims by the document being
+	// applied. These two numbers were measured on disk.
+	fmt.Fprintf(stdout, "applied: %s (%d → %d bytes)\n", target, written.Before, written.After)
 	return ExitOK
 }
 

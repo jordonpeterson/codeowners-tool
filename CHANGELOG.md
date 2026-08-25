@@ -79,6 +79,35 @@ changes to which class a failure lands in are called out explicitly.
 
 ### Security
 
+- **`apply` verifies the plan, not just the file the plan was computed against.**
+  `sha256_before` covers the CODEOWNERS a plan was planned over; nothing covered
+  the plan, so a plan corrupted, truncated or hand-edited between review and
+  apply was written verbatim at exit 0 — and the success line's byte counts came
+  from the plan's own `size_before`/`size_after`, so the confirmation reported
+  101 bytes for an 18-byte write. Plans now carry `sha256_after` over
+  `after_content`, `apply` checks it, and a plan without the field is refused
+  rather than treated as a waived check. The bytes reported are measured on
+  disk. A plan is explicitly a reviewable artifact that travels between
+  generation and application, which is the window this closes. **Schema change:**
+  `sha256_after` is a new required key in the plan document.
+- **A plan is bound to the repository and the tree it was computed in.**
+  `sha256_before` caught a CODEOWNERS that moved between `plan` and `apply`;
+  nothing caught a repository swap or a moved TREE. `apply --repo` took the flag
+  and ignored the plan's own `repo` field, so a plan computed against one clone
+  wrote into another — and because identical bootstrap CODEOWNERS across many
+  repos is exactly what this tool is for, the hash guard collided legitimately
+  and let it through, while the bytes-differ refusal blamed "changed since the
+  plan was computed" and sent the operator after an edit that never happened.
+  Separately, `ownership_rows` — the artifact a human approves — was computed at
+  plan time and never revalidated, so in the documented plan-in-CI /
+  apply-after-merge sequence a colleague's merge under the reviewed scope
+  widened the blast radius silently at exit 0 (3 paths where the plan declared
+  1). Plans now record `tree_sha256` and an absolute `repo`, and `apply` refuses
+  on either mismatch, naming the actual cause. Recording `repo` absolute also
+  fixes `plan --repo .`, whose plan could not be applied from any other working
+  directory: it died on `git rev-parse --show-toplevel: fatal: not a git
+  repository`. **Schema change:** `tree_sha256` is a new key in the plan
+  document, and `repo` is now always absolute.
 - **`install.sh` verifies build provenance, not just the checksum.** Releases
   already carried an attestation and nothing read it. `checksums.txt` ships on the
   same release from the same host, so it proves integrity in transit and nothing
