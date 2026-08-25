@@ -19,6 +19,7 @@ what a run is allowed to do. Commands and flags are in [COMMANDS.md](COMMANDS.md
 | `id` | per op | no | Short label used in JSON results and error messages. |
 | `on_zero_match` | per op | no | `require` (default) \| `skip` \| `declare` |
 | `on_except_zero_match` | per op | no | `require` (default) \| `allow` — only on ops whose scope carries an `except` clause; governs an except pattern that matches zero tracked files ([below](#except--carving-paths-out-of-a-scope-r-26r-32), R-28) |
+| `owners` | per op | no | The op's owners as a JSON array — `["@org/a", "@org/b"]` — on an op string naming only its scope, equivalent to the `(scope, [owners])` spelling and exit 3 alongside it (R-39). Not on `rename_owner`. |
 | `except` | per op | no | Carve-out as a JSON array — `["/.github/CODEOWNERS"]` — equivalent to the `<scope> except <pat> …` string spelling, and exit 3 alongside it (R-37). Array elements need no delimiter escaping, so a space is written plainly: `"my dir/"`. |
 | `note` | per op | no | Reaches the PR reviewer via `--summary-out`. |
 
@@ -80,6 +81,12 @@ Scope is a directory, file path, or glob — same syntax as CODEOWNERS patterns.
 | `set_owners(scope, [owners])` | Exact owner set for every path in scope, displacing prior owners. `[]` is legal: it deliberately un-owns the scope. |
 | `remove_owner(scope, owner)` | Owner — or a bracketed list (R-33) — stops owning every path in scope. If a rule's owner set would empty, an `--on-empty` policy is **required**. |
 | `rename_owner(old, new)` | Global identifier substitution — the only op safe as pure text replacement (it can't change any rule's match set). |
+
+`{"op": "add_owner(/services/api/)", "owners": ["@org/a", "@org/b"]}` is the same op as
+`add_owner(/services/api/, [@org/a, @org/b])`: the array is re-spelled as that list before
+anything else sees it, so one grammar validates both (a duplicate owner is exit 3 either
+way) and both are reported as the list. Owners in the op string *and* in an array is exit
+3 (R-39b), and an empty array is legal on `set_owners` alone, meaning what `[]` means.
 
 ### `except` — carving paths out of a scope (R-26…R-32)
 

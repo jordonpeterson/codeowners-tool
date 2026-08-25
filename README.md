@@ -98,9 +98,9 @@ CODEOWNERS pattern syntax; a space in a path is escaped with a backslash
 
 | Op | What it means |
 |---|---|
-| `add_owner(scope, owner)` | Owner (or `[owners]`) becomes a **co-owner**. Every pre-existing owner of every path in scope is kept. |
-| `set_owners(scope, [owners])` | This exact set owns every path in scope, displacing whoever owned it. `[]` is legal and deliberately un-owns the scope. |
-| `remove_owner(scope, owner)` | Owner (or `[owners]`) stops owning every path in scope. If that would empty a rule, you must say what happens — see [`on_empty`](docs/POLICY-FILE.md#--on-empty--on_empty-r-6). |
+| `add_owner(scope, owner)` | Owner — or `[owners]`, or an `owners` array in the policy — becomes a **co-owner**. Every pre-existing owner of every path in scope is kept. |
+| `set_owners(scope, [owners])` | This exact set — the list, or an `owners` array — owns every path in scope, displacing whoever owned it. `[]` is legal and deliberately un-owns the scope. |
+| `remove_owner(scope, owner)` | Owner — or `[owners]`, or an `owners` array — stops owning every path in scope. If that would empty a rule, you must say what happens — see [`on_empty`](docs/POLICY-FILE.md#--on-empty--on_empty-r-6). |
 | `rename_owner(old, new)` | Global identifier substitution — the only op that is safe as plain text replacement. |
 
 `add_owner` and `set_owners` are the two you'll use most, and picking the wrong one is

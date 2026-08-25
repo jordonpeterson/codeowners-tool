@@ -736,3 +736,125 @@ func containsOwner(list []string, s string) bool {
 	}
 	return false
 }
+
+// SpelledKind returns the verb an op string names, without validating anything
+// else about it. R-39 needs the verb BEFORE the op parses — `rename_owner`
+// takes no `owners` array (R-39c), and a scope-only op string does not parse at
+// all until the array has been folded into it — and reading the verb off the
+// text is the only thing available at that point.
+//
+// It reports Kind("") for text with no argument list, which no case below
+// treats as a verb.
+func SpelledKind(s string) Kind {
+	s = strings.TrimSpace(s)
+	open := strings.IndexByte(s, '(')
+	if open < 0 {
+		return ""
+	}
+	return Kind(strings.TrimSpace(s[:open]))
+}
+
+// NamesOwners reports whether an op string already carries an owner argument.
+//
+// This is the question R-39b turns on: owners stated in the op string AND in an
+// `owners` array is one intent in two places, and a policy whose two halves
+// might disagree must never reach a decision about which one wins. The test is
+// arity rather than a search for `[`, because the bare single-owner spelling
+// `add_owner(/x/, @a)` is exactly as much a statement of owners as the list is,
+// and an implementation that looked for a bracket would silently prefer one
+// half of that pair.
+func NamesOwners(s string) bool {
+	body, ok := opBody(s)
+	if !ok {
+		return false
+	}
+	return len(splitArgs(body)) > 1
+}
+
+// opBody returns the text between an op string's outer parentheses, split
+// exactly as Parse splits it — same trim, same open paren, same closing byte —
+// so a string these helpers accept is one Parse reads the same way.
+func opBody(s string) (string, bool) {
+	s = strings.TrimSpace(s)
+	open := strings.IndexByte(s, '(')
+	if open < 0 || !strings.HasSuffix(s, ")") {
+		return "", false
+	}
+	return s[open+1 : len(s)-1], true
+}
+
+// WithOwners returns the op string s — which must name a scope and no owners —
+// re-spelled with owners as its owner argument, and reports whether that list
+// survives the grammar's own splitting.
+//
+// R-39's `owners` array is validated, applied and REPORTED as the `(scope,
+// [owners])` string it is equivalent to (R-39a), so this is the one place that
+// writes that string. Re-spelling rather than decoding straight into Op.Owners
+// is the point: every refusal the list grammar makes — a duplicate owner, an
+// invalid token, an empty list on the wrong verb — then applies to the array
+// for free, and a second copy of those checks beside the array is exactly how
+// the two spellings would drift apart.
+//
+// The list is always spelled with brackets, including for one owner: R-33a
+// makes `[@a]` and `@a` the same op, so there is no case to special-case, and
+// one spelling means `results.jsonl` from an array-spelled wave is greppable
+// by the same tooling as a list-spelled one.
+//
+// ok is false when the op string cannot carry the list — it names no scope, or
+// it already names owners — and also when a token would not survive the split.
+// The round trip is the backstop for that second case, not the diagnosis: only
+// an email owner can hold a comma, a bracket or a space (a @handle cannot), and
+// "your address has a comma in it" is a sentence the caller has to say for
+// itself. A caller that reported a false return verbatim would tell an operator
+// their op string is broken when their owner is.
+func WithOwners(s string, owners []string) (string, bool) {
+	t := strings.TrimSpace(s)
+	open := strings.IndexByte(t, '(')
+	body, ok := opBody(t)
+	if !ok {
+		return "", false
+	}
+	args := splitArgs(body)
+	if len(args) != 1 || args[0] == "" {
+		return "", false
+	}
+	out := strings.TrimSpace(t[:open]) + "(" + args[0] + ", [" + strings.Join(owners, ", ") + "])"
+
+	// The round trip is the check, not a list of forbidden characters: the
+	// owner grammar is two regexps and one of them (email) admits far more than
+	// it looks like it does, so what matters is whether each element comes back
+	// as its own token, unchanged, beside the scope it started with.
+	gotBody, ok := opBody(out)
+	if !ok {
+		return "", false
+	}
+	gotArgs := splitArgs(gotBody)
+	if len(gotArgs) != 2 || gotArgs[0] != args[0] {
+		return "", false
+	}
+	list := gotArgs[1]
+	if !strings.HasPrefix(list, "[") || !strings.HasSuffix(list, "]") {
+		return "", false
+	}
+	inner := list[1 : len(list)-1]
+	// The same rule parseOwnerList applies: brackets do not nest. A token
+	// holding one survives the ARGUMENT split — `[a]b@x.com]` splits off the
+	// scope cleanly — and would then be read as a list that closed early, so
+	// the round trip has to ask this question itself rather than infer it from
+	// the token count.
+	if strings.ContainsAny(inner, "[]") {
+		return "", false
+	}
+	toks := strings.FieldsFunc(inner, func(r rune) bool {
+		return r == ',' || r == ' ' || r == '\t'
+	})
+	if len(toks) != len(owners) {
+		return "", false
+	}
+	for i := range owners {
+		if toks[i] != owners[i] {
+			return "", false
+		}
+	}
+	return out, true
+}
