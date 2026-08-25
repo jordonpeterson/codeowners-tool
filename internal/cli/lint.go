@@ -134,6 +134,10 @@ func cmdLint(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "error:", err)
 		return ExitInvalid
 	}
+	if err := rejectEmptyRepo(fs, *repo); err != nil {
+		fmt.Fprintln(stderr, "error:", err)
+		return ExitInvalid
+	}
 	removeStalePaths, onEmptyPolicy := *removeStale, *onEmpty
 	if len(policyPaths) > 0 {
 		var err error
@@ -452,7 +456,7 @@ func runLint(r lintRun, stdout, stderr io.Writer) int {
 	}
 
 	if !r.dryRun {
-		if err := apply.Apply(res.Plan, target); err != nil {
+		if _, err := apply.Apply(res.Plan, target); err != nil {
 			return errExit(err, stderr)
 		}
 	}

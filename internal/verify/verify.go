@@ -32,11 +32,16 @@ type Change struct {
 	After  []string `json:"owners_after"`
 }
 
-// Result of a comparison. Changed lists every difference; Violations lists
-// the subset outside the declared scopes (all of them, when no scope given).
+// Result of a comparison. Changed lists every path whose OWNERS differ
+// between the snapshots; Violations lists the subset outside the declared
+// scopes (all of them, when no scope given). Added and Removed carry the tree
+// deltas — paths present in only one snapshot — which are reported but never
+// violations, because INV-2 has nothing to say about them (see Compare).
 type Result struct {
 	Changed    []Change `json:"changed"`
 	Violations []Change `json:"violations"`
+	Added      []Change `json:"added"`
+	Removed    []Change `json:"removed"`
 }
 
 // OK reports whether the invariant holds: no out-of-scope change.
@@ -59,8 +64,10 @@ func Load(path string) (*Snapshot, error) {
 }
 
 // Compare diffs two snapshots. scopes, when non-empty, are CODEOWNERS
-// patterns declaring where change is allowed; every change outside them is a
-// violation (INV-2 from raw data). With no scopes, ANY change is a violation.
+// patterns declaring where change is allowed; every ownership change outside
+// them is a violation (INV-2 from raw data). With no scopes, ANY ownership
+// change is a violation. Paths present in only one snapshot are tree deltas,
+// reported separately and never violations.
 // A scope that fails to compile is a hard error — silently dropping it would
 // misreport which changes are in scope (found in review).
 //
@@ -106,10 +113,30 @@ func Compare(before, after *Snapshot, scopes []string) (*Result, error) {
 		b, bok := before.Ownership[p]
 		a, aok := after.Ownership[p]
 		b, a = resolve.CanonicalOwners(b), resolve.CanonicalOwners(a)
-		if bok && aok && resolve.OwnersEqual(b, a) {
+		c := Change{Path: p, Before: b, After: a}
+		// A path in only one snapshot is a TREE delta, not an ownership
+		// change. INV-2 preserves what a path resolved to before: an added
+		// path has no before and a removed one has no after, so neither can
+		// violate it. Both still surface — a tree that moved under a rollout
+		// is worth seeing — but neither fails the check. Snapshots come from
+		// different refs, so without this the documented CI recipe failed on
+		// every pull request that added a file, CODEOWNERS untouched.
+		//
+		// Presence of the KEY decides this, not the value: `null` (no rule
+		// matched) and `[]` (an explicit zero-owner match, S-9) are both
+		// present, and moving between them stays the real change R-18 says
+		// it is.
+		switch {
+		case !bok:
+			res.Added = append(res.Added, c)
+			continue
+		case !aok:
+			res.Removed = append(res.Removed, c)
 			continue
 		}
-		c := Change{Path: p, Before: b, After: a}
+		if resolve.OwnersEqual(b, a) {
+			continue
+		}
 		res.Changed = append(res.Changed, c)
 		if len(pats) == 0 || !inScope(p) {
 			res.Violations = append(res.Violations, c)

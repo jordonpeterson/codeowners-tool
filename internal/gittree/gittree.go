@@ -5,8 +5,11 @@ package gittree
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os/exec"
+	"sort"
 	"strings"
 )
 
@@ -95,6 +98,22 @@ var CodeownersLocations = []string{".github/CODEOWNERS", "CODEOWNERS", "docs/COD
 // FindCodeownersPaths returns every CODEOWNERS file present in the tree, in
 // precedence order. More than one entry is an error condition for callers
 // (A-10) — GitHub uses only the first and never merges.
+// Digest fingerprints a tracked tree. A plan's ownership_rows are computed
+// against the tree at plan time and are the artifact a human reviews, so the
+// tree is part of what was approved: two more files under the reviewed scope
+// mean the blast radius is no longer the one on the page.
+//
+// Sorted and NUL-joined, so the digest is a property of the path SET and not
+// of whatever order git happened to list it in. NUL is the separator because
+// it is the one byte a git path cannot contain, so no two distinct trees can
+// join to the same string.
+func Digest(tree []string) string {
+	sorted := append([]string(nil), tree...)
+	sort.Strings(sorted)
+	h := sha256.Sum256([]byte(strings.Join(sorted, "\x00")))
+	return hex.EncodeToString(h[:])
+}
+
 func FindCodeownersPaths(tree []string) []string {
 	present := make(map[string]bool, len(tree))
 	for _, p := range tree {

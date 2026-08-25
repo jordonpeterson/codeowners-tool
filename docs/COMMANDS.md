@@ -54,7 +54,7 @@ else (bad enum values, ops that can't carry the `on_zero_match` you gave them, a
 | Flag | Meaning |
 |---|---|
 | `--op` / `--policy` | Where the ops come from. Mutually exclusive; passing both or neither is exit 3. |
-| `--repo` | Local git repository. Default `.`. |
+| `--repo` | Local git repository. Default `.` when the flag is absent; an explicitly empty `--repo ""` is refused (exit 3), because that is what a shell produces from an unset variable. |
 | `--branch` | Ref whose tracked tree governs resolution (S-7). Default `HEAD`. |
 | `--file` | CODEOWNERS path override, repo-relative. |
 | `--on-empty` | Policy when `remove_owner` empties an owner set. Allowed only with `--op`; with `--policy`, set `on_empty` in the file instead. An unknown value is exit 3, checked before any repository is opened. |
@@ -91,10 +91,23 @@ codeowners-tool plan --op 'add_owner(/services/api/, @org/team-1)' --out plan.js
 codeowners-tool apply --plan plan.json
 ```
 
-A plan records `sha256_before`, `size_before`/`size_after`, `changes`, `ownership_rows`,
-`diff`, `after_content` and `op_results`. `sha256_before` is the drift gate (R-16):
-`apply` hashes the file it is about to write and refuses if it no longer matches, so a
-plan reviewed against one state cannot be applied to another.
+A plan records `sha256_before`, `sha256_after`, `size_before`/`size_after`, `changes`,
+`ownership_rows`, `diff`, `after_content` and `op_results`. Two hashes, two different
+jobs: `sha256_before` is the drift gate (R-16) — `apply` hashes the file it is about to
+write and refuses if it no longer matches, so a plan reviewed against one state cannot be
+applied to another. `sha256_after` pins `after_content` itself, so a plan corrupted,
+truncated or hand-edited between review and apply is refused rather than written. A plan
+carrying no `sha256_after` is refused too: a missing integrity field is not a waived
+check. The success line reports the bytes the write actually moved, measured on disk
+rather than read back out of the plan.
+
+A plan is also bound to the **repository and tree** it was computed in. `repo` is
+recorded absolute, so a plan applies from any working directory; passing `apply --repo` a
+different repository is refused rather than silently obeyed. `tree_sha256` fingerprints
+the tracked tree, and `apply` refuses when it has moved — the `ownership_rows` a human
+reviewed are facts about one tree, so a colleague's merge under a reviewed scope would
+otherwise widen the blast radius after approval. To roll one intent across many
+repositories, use `sync --policy`; a plan is per-repository by construction.
 
 A snapshot distinguishes the **two ways a path can have no owner**, and the difference is
 the point: `null` means no rule matched it — a gap nobody has addressed — while `[]` means
@@ -121,8 +134,9 @@ assigns no owners; `null` means no rule matches it at all.
 `verify` compares two snapshots and exits `0` when every ownership change falls inside
 a declared `--scope` (repeatable), `2` — printing each offending path — when any change
 falls outside them (with no `--scope`, any change at all violates), and `3` for a
-malformed snapshot. A path that enters or leaves the tracked tree counts as a change
-(R-18), so don't commit the snapshot files themselves between the two snapshots.
+malformed snapshot. A path present in only one snapshot is a **tree delta**, reported as
+`added:`/`removed:` and never a violation: INV-2 preserves what a path resolved to
+before, and an added path has no before (R-18).
 
 ## Exit codes
 

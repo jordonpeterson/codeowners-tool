@@ -166,10 +166,10 @@ codeowners-tool snapshot --branch feature --out after.json
 codeowners-tool verify --before before.json --after after.json --scope /services/api/
 ```
 
-Two hygiene rules make that proof trustworthy. `snapshot` reads the **committed**
-CODEOWNERS at `--branch`, so commit before taking the "after" snapshot; and leave the
-evidence files uncommitted, since a path entering the tracked tree counts as an ownership
-change and `verify` will rightly flag your own `before.json` as out of scope.
+One hygiene rule makes that proof trustworthy: `snapshot` reads the **committed**
+CODEOWNERS at `--branch`, so commit before taking the "after" snapshot. Files the two
+refs differ on — including the evidence files, if you commit them — surface as
+`added:`/`removed:` lines and do not fail the check.
 
 ## When it refuses
 

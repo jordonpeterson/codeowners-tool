@@ -221,6 +221,10 @@ func cmdSync(args []string, stdout, stderr io.Writer) int {
 	if err := rejectLeftoverArgs(fs); err != nil {
 		return exit3s(err)
 	}
+	if err := rejectEmptyRepo(fs, *repo); err != nil {
+		fmt.Fprintln(stderr, "error:", err)
+		return ExitInvalid
+	}
 	// Which flags were TYPED, as opposed to which hold a non-zero value. Every
 	// "not allowed with --policy" ban below is a ban on the flag being
 	// PRESENT: `--create=false` overrides a reviewed `"create": true` exactly
@@ -1136,7 +1140,7 @@ func (r *syncRun) write(rel string, p *plan.Plan, creating bool) error {
 			return err
 		}
 	}
-	if err := apply.Apply(p, target); err != nil {
+	if _, err := apply.Apply(p, target); err != nil {
 		if creating {
 			// Never leave the empty seed behind: a zero-byte CODEOWNERS is a file
 			// that governs nothing while making every later run think one exists.

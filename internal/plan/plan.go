@@ -117,8 +117,15 @@ type ExceptedPath struct {
 // Plan is the machine-readable output of `plan` and the sole input of
 // `apply` (R-16).
 type Plan struct {
-	Ops          []string `json:"ops"`
-	HashBefore   string   `json:"sha256_before"`
+	Ops        []string `json:"ops"`
+	HashBefore string   `json:"sha256_before"`
+	// HashAfter pins after_content itself. sha256_before covers the
+	// CODEOWNERS the plan was computed AGAINST; nothing covered the plan, so
+	// a plan corrupted, truncated or hand-edited between review and apply was
+	// written without complaint. A plan is explicitly a reviewable artifact
+	// that travels between generation and application, which is exactly the
+	// window this closes.
+	HashAfter    string   `json:"sha256_after"`
 	SizeBefore   int      `json:"size_before"`
 	SizeAfter    int      `json:"size_after"`
 	Warnings     []string `json:"warnings,omitempty"`
@@ -564,13 +571,11 @@ func Build(content []byte, tree []string, opList []ops.Op, opts Options) (*Plan,
 				pl.OpResults[k].Status = "unchanged"
 			}
 		}
-		pl.AfterContent = string(afterBytes)
-		pl.SizeAfter = len(afterBytes)
+		pl.SetAfterContent(afterBytes)
 		return pl, &NoOpError{Msg: "nothing to change: file already satisfies the requested ops"}
 	}
 
-	pl.AfterContent = string(afterBytes)
-	pl.SizeAfter = len(afterBytes)
+	pl.SetAfterContent(afterBytes)
 	if pl.SizeAfter > opts.MaxSize {
 		return nil, &RefusalError{Msg: fmt.Sprintf(
 			"refusing: result would be %d bytes, over the %d-byte limit — GitHub silently ignores CODEOWNERS files over 3 MB (S-4)",
@@ -1685,4 +1690,14 @@ func fmtOwners(o []string) string {
 func hashHex(b []byte) string {
 	h := sha256.Sum256(b)
 	return hex.EncodeToString(h[:])
+}
+
+// SetAfterContent records the after-content with its size and its hash, so the
+// three can never disagree. Every producer of a plan goes through it: three
+// fields describing one byte string, assigned separately, is how a plan ends
+// up reporting a size it never measured.
+func (p *Plan) SetAfterContent(b []byte) {
+	p.AfterContent = string(b)
+	p.SizeAfter = len(b)
+	p.HashAfter = hashHex(b)
 }
