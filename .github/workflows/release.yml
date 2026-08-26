@@ -37,9 +37,12 @@ on:
       - '.github/workflows/release.yml'
       # The composite action ships on the same tag as the binary, and the major
       # tag consumers pin to only moves when a release is cut — so a fix to the
-      # action that cut no release would reach nobody.
+      # action that cut no release would reach nobody. The two files that SHIP,
+      # not a glob over the package: its tests ship nothing, and cutting a release
+      # for them would advance the tag consumers resolve through onto a commit
+      # whose action is byte-identical.
       - 'action.yml'
-      - 'tools/action/**'
+      - 'tools/action/setup.sh'
   workflow_dispatch: {}
 
 permissions:

@@ -25,7 +25,7 @@ brew install jordonpeterson/tap/codeowners-tool
 
 ## GitHub Actions
 
-One step, and the binary is on the `PATH` for the rest of the job:
+Add one step and the binary is on the `PATH` for every step after it:
 
 ```yaml
 - uses: jordonpeterson/codeowners-tool@v0

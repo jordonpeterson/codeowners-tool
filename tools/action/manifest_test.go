@@ -182,10 +182,16 @@ func TestAction_ReleaseRunsWhenTheActionItselfChanges(t *testing.T) {
 	if paths == "" {
 		t.Fatal("release.yml has no `on:` block; this gate cannot read its triggers")
 	}
-	for _, want := range []string{"action.yml", "tools/action/"} {
+	for _, want := range []string{"action.yml", "tools/action/setup.sh"} {
 		if !strings.Contains(paths, want) {
 			t.Errorf("release.yml's paths filter does not include %q, so changing the action cuts no release — and the major tag consumers pin to never moves onto the fix", want)
 		}
+	}
+	// Only the two files that SHIP. A glob over the package would cut a release
+	// for a change to its tests, which ship nothing: a new tag, and the major tag
+	// consumers pin to advanced onto a commit whose action is byte-identical.
+	if strings.Contains(paths, "tools/action/**") {
+		t.Errorf("release.yml's paths filter globs tools/action/**, which includes the tests.\nEditing a _test.go file would cut a release and move the tag consumers resolve through, for a commit that ships nothing different.")
 	}
 }
 
