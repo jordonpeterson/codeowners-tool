@@ -637,7 +637,12 @@ func TestFix_FileInsideASubmoduleIsRefused(t *testing.T) {
 	fixMountSubmodule(t, parent, sub, "docs")
 	before := syncReadFile(t, filepath.Join(parent, "docs", "CODEOWNERS"))
 
-	code, stdout, stderr := runCLI(t, "sync", "--repo", parent, "--file", "docs/CODEOWNERS",
+	// `./docs/CODEOWNERS`, not `docs/CODEOWNERS`: the guard compares the write
+	// target against paths git reported, and git reports clean ones, so an
+	// unnormalized comparison matches nothing and this exact run writes into
+	// the submodule again at exit 0 (confirmed by mutating relClean out of the
+	// guard, which the whole suite otherwise cannot see).
+	code, stdout, stderr := runCLI(t, "sync", "--repo", parent, "--file", "./docs/CODEOWNERS",
 		"--op", "add_owner(/services/api/, @org/api)", "--format", "json")
 	if code != cli.ExitRefused {
 		t.Fatalf("--file inside a submodule: want exit 2, got %d\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
@@ -671,12 +676,19 @@ func TestFix_SubmoduleOffTheWritePathStaysIrrelevant(t *testing.T) {
 }
 
 // The ordinary shape the guard must leave alone: a real `.github` DIRECTORY
-// holding a tracked CODEOWNERS. `ls-tree -r` lists no directories, so `.github`
-// is not itself a tracked path here and there is no gitlink to find — the
-// distinction the whole guard rests on.
+// holding a tracked CODEOWNERS. `ls-tree -r` lists no directories, so nothing
+// in this tree is an ancestor path of the write target and there is nothing to
+// refuse.
+//
+// The stray `.github/CODEOWNER` (no S) is the near miss that pins the
+// component boundary: it is a tracked path and a string prefix of the file
+// being written, so a guard comparing prefixes without requiring a `/` after
+// them refuses this repo forever with "…: .github/CODEOWNER is a submodule",
+// and no other test in the suite notices.
 func TestFix_PlainCodeownersDirectoryStillSyncs(t *testing.T) {
 	repo := initRepo(t, map[string]string{
 		".github/CODEOWNERS":   "* @org/everyone\n",
+		".github/CODEOWNER":    "# a typo somebody committed\n",
 		"services/api/main.go": "m\n",
 	})
 	code, stdout, stderr := runCLI(t, "sync", "--repo", repo,
@@ -689,15 +701,111 @@ func TestFix_PlainCodeownersDirectoryStillSyncs(t *testing.T) {
 	}
 }
 
-// fixWantSubmoduleRefusal pins what a gitlink refusal has to say: the mount
-// point, the word an operator would search for, and the reason it is not a
-// syntax or ownership problem. The mount point is matched with its ` is a
-// submodule` suffix rather than bare, because ".github" is a substring of the
-// write path the same message names — a refusal that mentioned only the file
-// would otherwise satisfy the assertion and prove nothing.
+// fixWantSubmoduleRefusal pins what a gitlink refusal has to say: WHICH path
+// is the mount, that it is a submodule rather than some other awkward object,
+// and the consequence that makes it a refusal instead of a warning.
+//
+// The mount is matched as `records <mount> at `, not bare: ".github" is a
+// substring of the write path the same message names, so the bare spelling is
+// satisfied by a message that never identifies the mount at all — and the
+// sibling assertion below proves the boundary, since "records .github at "
+// does not match a message about ".github/CODEOWNER".
 func fixWantSubmoduleRefusal(t *testing.T, out, mount string) {
 	t.Helper()
-	for _, want := range []string{mount + " is a submodule", "cannot stage", "nothing was written"} {
+	for _, want := range []string{"records " + mount + " at ", "as a submodule", "cannot stage", "nothing was written"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("refusal must contain %q; got:\n%s", want, out)
+		}
+	}
+}
+
+// `plan` is where the submodule write has to die, because `plan` is what makes
+// the artifact: `--file` bypasses discovery, so the verb that refuses nothing
+// hands a human a plan whose codeowners_path is inside another repository's
+// checkout, and `apply` then writes it. The plan file must not exist
+// afterwards — a refused run produces no artifact to approve.
+func TestFix_PlanRefusesACodeownersInsideASubmodule(t *testing.T) {
+	sub := initRepo(t, map[string]string{"CODEOWNERS": "* @sub/owners\n"})
+	parent := initRepo(t, map[string]string{"services/api/main.go": "m\n"})
+	fixMountSubmodule(t, parent, sub, ".github")
+	planPath := filepath.Join(t.TempDir(), "plan.json")
+
+	code, stdout, stderr := runCLI(t, "plan", "--repo", parent, "--file", ".github/CODEOWNERS",
+		"--op", "add_owner(/services/api/, @org/api)", "--out", planPath)
+	if code != cli.ExitRefused {
+		t.Fatalf("plan into a submodule: want exit 2, got %d\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+	}
+	if _, err := os.Stat(planPath); err == nil {
+		t.Error("a plan was written for a write that can never be applied here")
+	}
+	if strings.Contains(stdout+stderr, "@sub/owners") {
+		t.Errorf("the plan quoted the submodule's owners — a fact about a different repository\noutput:\n%s%s", stdout, stderr)
+	}
+	fixWantSubmoduleRefusal(t, stdout+stderr, ".github")
+}
+
+// lint writes the same file the other verbs do, so it refuses the same shape —
+// and offline, before the token is used, like its symlink sibling above.
+func TestFix_LintRefusesACodeownersInsideASubmodule(t *testing.T) {
+	sub := initRepo(t, map[string]string{"CODEOWNERS": "* @sub/owners\n"})
+	parent := initRepo(t, map[string]string{"services/api/main.go": "m\n"})
+	fixMountSubmodule(t, parent, sub, ".github")
+	before := syncReadFile(t, filepath.Join(parent, ".github", "CODEOWNERS"))
+
+	// --file, because discovery finds nothing in a tree whose .github is a
+	// gitlink — which is what makes the working-tree file reachable at all.
+	code, stdout, stderr := runCLI(t, "lint", "--repo", parent, "--github-repo", "o/r", "--token", "t",
+		"--file", ".github/CODEOWNERS")
+	if code != cli.ExitRefused {
+		t.Fatalf("lint into a submodule: want exit 2, got %d\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+	}
+	if got := syncReadFile(t, filepath.Join(parent, ".github", "CODEOWNERS")); got != before {
+		t.Errorf("the submodule's own CODEOWNERS was repaired in place:\n%s", got)
+	}
+	fixWantSubmoduleRefusal(t, stdout+stderr, ".github")
+}
+
+// The refusal has to diagnose what git actually records, not what the common
+// case makes likely. A tracked symlink at `.github` that has been DELETED from
+// the working tree reaches the same guard — the symlink refusal is an Lstat, so
+// it finds nothing to refuse — and the tree evidence alone (".github is a path,
+// and paths are not directories") cannot tell a gitlink from a link blob.
+//
+// Refusing is right either way: `.github/CODEOWNERS` does not exist at the ref,
+// so the run would prove its invariants against a tree that has no CODEOWNERS.
+// Calling it a submodule is not: in THIS repo `git add .github/CODEOWNERS`
+// succeeds (exit 0, staged as `D .github` + `A .github/CODEOWNERS`), so a
+// message claiming it "fails with is in submodule" sends the operator looking
+// for a submodule that does not exist. The message is the only evidence a
+// refused fleet row carries.
+func TestFix_TrackedLinkAtACodeownersLocationIsDiagnosedAsALink(t *testing.T) {
+	repo := initRepo(t, map[string]string{
+		"real-gh/CODEOWNERS":   "* @org/everyone\n",
+		"services/api/main.go": "m\n",
+	})
+	if err := os.Symlink("real-gh", filepath.Join(repo, ".github")); err != nil {
+		t.Fatal(err)
+	}
+	gitRun(t, repo, "add", "-A")
+	gitRun(t, repo, "commit", "-qm", "link .github at a real directory")
+	if err := os.Remove(filepath.Join(repo, ".github")); err != nil {
+		t.Fatal(err)
+	}
+
+	code, stdout, stderr := runCLI(t, "sync", "--repo", repo, "--create",
+		"--op", "add_owner(/services/api/, @org/api)")
+	out := stdout + stderr
+	if code != cli.ExitRefused {
+		t.Fatalf("--create over a tracked link at .github: want exit 2, got %d\noutput:\n%s", code, out)
+	}
+	if _, err := os.Stat(filepath.Join(repo, ".github", "CODEOWNERS")); err == nil {
+		t.Error("a CODEOWNERS was created at a path the tracked tree records as a link")
+	}
+	if strings.Contains(out, "submodule") {
+		t.Errorf("the refusal calls a link blob a submodule; `git add .github/CODEOWNERS` succeeds in this repo,\n"+
+			"so the operator is sent looking for a submodule that does not exist\noutput:\n%s", out)
+	}
+	for _, want := range []string{"records .github at ", "as a symlink", "nothing was written"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("refusal must contain %q; got:\n%s", want, out)
 		}

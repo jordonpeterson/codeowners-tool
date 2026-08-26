@@ -1250,6 +1250,11 @@ location still does.
 `--file` names the path directly, so discovery is bypassed entirely — the
 same dead-on-arrival write with the operator's spelling on it.
 
+### `TestFix_LintRefusesACodeownersInsideASubmodule`
+
+lint writes the same file the other verbs do, so it refuses the same shape —
+and offline, before the token is used, like its symlink sibling above.
+
 ### `TestFix_LintRefusesSymlinkedCodeowners`
 
 lint shares the same write path, and its symlink refusal fires before any
@@ -1270,9 +1275,23 @@ note exists to disclose.
 ### `TestFix_PlainCodeownersDirectoryStillSyncs`
 
 The ordinary shape the guard must leave alone: a real `.github` DIRECTORY
-holding a tracked CODEOWNERS. `ls-tree -r` lists no directories, so `.github`
-is not itself a tracked path here and there is no gitlink to find — the
-distinction the whole guard rests on.
+holding a tracked CODEOWNERS. `ls-tree -r` lists no directories, so nothing
+in this tree is an ancestor path of the write target and there is nothing to
+refuse.
+
+The stray `.github/CODEOWNER` (no S) is the near miss that pins the
+component boundary: it is a tracked path and a string prefix of the file
+being written, so a guard comparing prefixes without requiring a `/` after
+them refuses this repo forever with "…: .github/CODEOWNER is a submodule",
+and no other test in the suite notices.
+
+### `TestFix_PlanRefusesACodeownersInsideASubmodule`
+
+`plan` is where the submodule write has to die, because `plan` is what makes
+the artifact: `--file` bypasses discovery, so the verb that refuses nothing
+hands a human a plan whose codeowners_path is inside another repository's
+checkout, and `apply` then writes it. The plan file must not exist
+afterwards — a refused run produces no artifact to approve.
 
 ### `TestFix_PolicyCreateWithAPinnedFileIsRefused`
 
@@ -1327,6 +1346,22 @@ not exist in the tree GitHub reads — yet Lstat'ing only the final component
 (a real file, reached through the link) let sync write through it at exit 0.
 The refusal must fire, name WHICH component is the link, and leave the
 link's target untouched.
+
+### `TestFix_TrackedLinkAtACodeownersLocationIsDiagnosedAsALink`
+
+The refusal has to diagnose what git actually records, not what the common
+case makes likely. A tracked symlink at `.github` that has been DELETED from
+the working tree reaches the same guard — the symlink refusal is an Lstat, so
+it finds nothing to refuse — and the tree evidence alone (".github is a path,
+and paths are not directories") cannot tell a gitlink from a link blob.
+
+Refusing is right either way: `.github/CODEOWNERS` does not exist at the ref,
+so the run would prove its invariants against a tree that has no CODEOWNERS.
+Calling it a submodule is not: in THIS repo `git add .github/CODEOWNERS`
+succeeds (exit 0, staged as `D .github` + `A .github/CODEOWNERS`), so a
+message claiming it "fails with is in submodule" sends the operator looking
+for a submodule that does not exist. The message is the only evidence a
+refused fleet row carries.
 
 ### `TestFleet_BrokenPolicyHaltsOnTheFirstRepo`
 
@@ -7662,4 +7697,4 @@ DIFFERENT states; transitioning between them is a real ownership change.
 
 ---
 
-710 documented test cases across 13 packages.
+713 documented test cases across 13 packages.

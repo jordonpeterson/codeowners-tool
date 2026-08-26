@@ -588,39 +588,76 @@ func writePathComponents(abs string) []string {
 	}
 }
 
-// refuseGitlinkedTarget refuses to write a CODEOWNERS that lives inside a
-// SUBMODULE mounted at one of the three locations — the shared-org-`.github`
-// layout is a real one.
+// refuseNonTreeAncestor refuses to write a CODEOWNERS whose path runs THROUGH
+// a tracked non-directory — a submodule mounted at one of the three locations
+// (the shared-org-`.github` layout is a real one), or a committed symlink
+// standing where a directory should be.
 //
-// The same defect refuseSymlinkedTarget catches, one object type over: git
-// records a submodule as a GITLINK, not a tree, so with `.github` mounted
-// there is no `.github/CODEOWNERS` in the tree GitHub reads, and the parent
-// cannot even stage the path (`fatal: Pathspec '.github/CODEOWNERS' is in
-// submodule '.github'`). Discovery is right to find nothing there; sync's
-// working-tree fallback (D5) then adopted the file inside the SUBMODULE's own
-// checkout, amended it, proved the change against the SUBMODULE's owners and
-// reported `applied (proven: tree)` at exit 0 — a change the parent can never
-// commit, justified by a different repository's rules.
+// The same defect refuseSymlinkedTarget catches, established from the tree
+// instead of from the filesystem: git records a submodule as a GITLINK and a
+// symlinked directory as a LINK BLOB, and neither is a tree, so with `.github`
+// mounted there is no `.github/CODEOWNERS` in the tree GitHub reads.
+// Discovery is right to find nothing there; sync's working-tree fallback (D5)
+// then adopted the file inside the SUBMODULE's own checkout, amended it, proved
+// the change against the SUBMODULE's owners and reported `applied (proven:
+// tree)` at exit 0 — a change the parent cannot even stage (`fatal: Pathspec
+// '.github/CODEOWNERS' is in submodule '.github'`), justified by a different
+// repository's rules.
 //
 // The evidence is in the tracked tree already: `ls-tree -r --name-only` lists
 // no directories, so a tree entry that is a strict path prefix of the write
-// target is not a directory — it is a gitlink or a symlink's link blob. The
-// link blob is refused earlier and by name, so callers run this AFTER
-// refuseSymlinkedTarget and what reaches here is a gitlink.
+// target is not a directory. Which non-directory it is decides the message and
+// nothing else, so the mode is fetched only once the refusal is certain: a
+// live symlink is refused earlier and by name, but a TRACKED link DELETED from
+// the working tree reaches here with nothing to Lstat, and in that repo `git
+// add .github/CODEOWNERS` succeeds — naming it a submodule would send the
+// operator after one that does not exist.
 //
 // Exit 2, not 3: which clone mounts a submodule where is a fact about THIS
 // repository, so the fleet loop records it and steps to the next.
-func refuseGitlinkedTarget(tree []string, rel string) error {
+func refuseNonTreeAncestor(repoDir, ref string, tree []string, rel string) error {
 	clean := relClean(rel)
 	for _, p := range tree {
 		if p == "" || !strings.HasPrefix(clean, p+"/") {
 			continue
 		}
-		return &plan.RefusalError{Msg: fmt.Sprintf(
-			"refusing to write %s: %s is a submodule, and git records one as a gitlink rather than a tree, so no %s exists in the tree GitHub reads and this repository cannot stage that path (`git add %s` fails with \"is in submodule\") — the write would edit a file in the submodule's own checkout and prove it against the submodule's owners while reporting applied; keep this repository's CODEOWNERS in a path it tracks itself — nothing was written",
-			clean, p, clean, clean)}
+		// The mode is fetched only now, once the refusal is certain.
+		return &plan.RefusalError{Msg: nonTreeRefusal(gitEntryMode(repoDir, ref, p), ref, p, clean)}
 	}
 	return nil
+}
+
+// nonTreeRefusal words the refusal for the object git actually records, since
+// the operator's next move differs entirely: a submodule mount is somebody
+// else's repository to leave alone, a stale link is this repository's own
+// commit to fix. A mode that could not be read falls back to what the tree
+// alone proved and no more — refusing on a vaguer noun beats refusing on a
+// wrong one.
+func nonTreeRefusal(mode, ref, p, clean string) string {
+	kind := "a file object"
+	consequence := "the write would be proven against a tree that has no CODEOWNERS at all, and land at a path the tracked entry still occupies"
+	fix := fmt.Sprintf("replace %s with a real directory in its own commit and re-run", p)
+	switch mode {
+	case "160000":
+		kind = "a submodule (gitlink)"
+		consequence = fmt.Sprintf("the write would land in the submodule's own checkout and be proven against the submodule's owners, and this repository cannot stage it (`git add %s` fails with \"is in submodule\")", clean)
+		fix = "keep this repository's CODEOWNERS at a path this repository tracks itself"
+	case "120000":
+		kind = "a symlink"
+	}
+	return fmt.Sprintf("refusing to write %s: git records %s at %s as %s, not a directory, so no %s exists in the tree GitHub reads — %s; %s — nothing was written",
+		clean, p, ref, kind, clean, consequence, fix)
+}
+
+// gitEntryMode is gittree.EntryMode with the error dropped: this decides
+// message wording only, so a failed lookup degrades to the generic noun rather
+// than turning a refusal the tree already justifies into an I/O error.
+func gitEntryMode(repoDir, ref, p string) string {
+	mode, err := gittree.EntryMode(repoDir, ref, p)
+	if err != nil {
+		return ""
+	}
+	return mode
 }
 
 type multiFlag []string
@@ -677,6 +714,16 @@ func cmdPlan(args []string, stdout, stderr io.Writer) int {
 	// pointing outside the clone describes an edit to a file GitHub never reads,
 	// and a human approves it before any downstream refusal fires.
 	if err := containedWritePath(*repo, filepath.Join(*repo, filepath.FromSlash(coPath))); err != nil {
+		return errExit(err, stderr)
+	}
+	// Same reasoning one object type over, and the only place it can be caught:
+	// with `.github` mounted as a submodule, `--file .github/CODEOWNERS` plans
+	// against the file in the SUBMODULE's checkout, a human approves owners
+	// that belong to another repository, and `apply` writes a change this clone
+	// cannot stage. apply's tree_sha256 check cannot be the backstop — mounting
+	// a submodule changes the digest, so the hole is only reachable when the
+	// plan itself was made against the mount. See refuseNonTreeAncestor.
+	if err := refuseNonTreeAncestor(*repo, *branch, tree, coPath); err != nil {
 		return errExit(err, stderr)
 	}
 	// File bytes come from the working tree — that is what apply mutates.

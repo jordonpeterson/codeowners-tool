@@ -377,10 +377,11 @@ func runLint(r lintRun, stdout, stderr io.Writer) int {
 	if err := refuseSymlinkedTarget(target); err != nil {
 		return errExit(err, stderr)
 	}
-	// And the gitlink the filesystem cannot show: --file can name a path inside
-	// a submodule mounted at a CODEOWNERS location, where a repair would land
-	// in another repository's checkout. See refuseGitlinkedTarget.
-	if err := refuseGitlinkedTarget(tree, coPath); err != nil {
+	// And the tracked non-directory the filesystem cannot show: --file can name
+	// a path inside a submodule mounted at a CODEOWNERS location, where a
+	// repair would land in another repository's checkout. See
+	// refuseNonTreeAncestor.
+	if err := refuseNonTreeAncestor(r.repo, r.branch, tree, coPath); err != nil {
 		return errExit(err, stderr)
 	}
 	content, err := os.ReadFile(target)

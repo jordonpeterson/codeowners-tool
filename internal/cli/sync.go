@@ -429,9 +429,10 @@ func (r *syncRun) execute() (SyncRecord, int) {
 	}
 	// And the one neither of those can see, because it is a fact about the
 	// TREE rather than about the filesystem: a submodule mounted at a
-	// CODEOWNERS location. See refuseGitlinkedTarget — ordered after the
-	// symlink guard, which names the link blob more precisely.
-	if err := refuseGitlinkedTarget(tree, rel); err != nil {
+	// CODEOWNERS location, or a tracked link no longer on disk. See
+	// refuseNonTreeAncestor — ordered after the symlink guard, which names a
+	// live link and the component it sits on more precisely.
+	if err := refuseNonTreeAncestor(r.repoArg, r.branch, tree, rel); err != nil {
 		rec.Status = StatusRefused
 		rec.Error = err.Error()
 		return rec, ExitRefused

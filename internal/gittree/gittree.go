@@ -77,6 +77,34 @@ func ListWorkTree(repoDir string) ([]string, error) {
 	return paths, nil
 }
 
+// EntryMode returns the mode git records for path at ref — "160000" for a
+// submodule gitlink, "120000" for a symlink's link blob, "100644"/"100755" for
+// an ordinary file, "040000" for a directory — or "" when ref's tree has no
+// entry at exactly that path.
+//
+// ListTracked's --name-only output cannot tell those apart, and a refusal that
+// guesses is worse than one that does not: "`.github` is a submodule" printed
+// over a stale link sends the operator hunting a submodule the repo does not
+// have. Only the refusal paths pay for this call.
+//
+// --end-of-options is unusable on ls-tree (see ValidateRef), so the ref is
+// validated instead and the path passed after `--`.
+func EntryMode(repoDir, ref, path string) (string, error) {
+	if err := ValidateRef(ref); err != nil {
+		return "", err
+	}
+	out, err := gitOutput(repoDir, "ls-tree", "-z", ref, "--", path)
+	if err != nil {
+		return "", err
+	}
+	first := bytes.SplitN(out, []byte{0}, 2)[0]
+	mode, _, found := strings.Cut(string(first), " ")
+	if !found {
+		return "", nil
+	}
+	return mode, nil
+}
+
 // ReadFileAtRef reads a file's content from a ref without touching the working
 // tree. cat-file has no separator to lose, so --end-of-options is safe here.
 func ReadFileAtRef(repoDir, ref, path string) ([]byte, error) {

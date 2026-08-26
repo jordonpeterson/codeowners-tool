@@ -12,6 +12,23 @@ changes to which class a failure lands in are called out explicitly.
 
 ### Fixed (from five user-test personas driving the shipped binary)
 
+- **A CODEOWNERS location occupied by a submodule is refused, not written
+  through.** The shared-org-`.github` layout mounts another repository at a
+  location GitHub reads, and `git ls-tree` reports it as a gitlink — so
+  discovery correctly found no CODEOWNERS, and `sync`'s working-tree fallback
+  (D5) then adopted the file inside the SUBMODULE's checkout: it amended it,
+  proved the change against the submodule's owners, and reported
+  `applied (proven: tree)` at exit 0, while the parent cannot even stage that
+  path (`fatal: Pathspec '.github/CODEOWNERS' is in submodule '.github'`).
+  `plan --file` into the mount produced a reviewable artifact for the same
+  write, which `apply` then performed. `sync`, `plan` and `lint` now refuse when
+  a tracked non-directory stands on the write path, naming the object git
+  actually records there — a submodule mount and a stale committed link need
+  different fixes. **Exit-code change:** what reported `status:"applied"` at
+  exit 0 in such a repo is now `status:"refused"` at exit 2, the per-repo class
+  a fleet loop records and steps past; no policy-level (exit 3) verdict moves.
+  A submodule anywhere else in the tree is unaffected.
+
 - **A `declare` batched with an op on one tracked file is no longer refused
   (R-22b).** R-8's zero-match guard exists because two `declare`d rules both land
   at EOF, where last-match-wins picks between them silently — but it fired
