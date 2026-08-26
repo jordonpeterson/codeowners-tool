@@ -1,0 +1,54 @@
+name: 'Set up codeowners-tool'
+description: 'Install a checksum- and provenance-verified codeowners-tool release and put it on the PATH.'
+branding:
+  icon: 'check-square'
+  color: 'purple'
+
+inputs:
+  version:
+    description: >-
+      Release to install, e.g. v0.0.28, or "latest". Defaults to the release
+      named by the tag this action is pinned at, so a full-version pin installs
+      exactly that release; any other ref takes the latest.
+    required: false
+    default: ''
+  provenance:
+    description: >-
+      Build-provenance verification: "auto" verifies whenever the runner's gh
+      can and warns when it cannot, "require" refuses to install without it,
+      "skip" does not attempt it. A check that runs and fails aborts the
+      install in every mode.
+    required: false
+    default: 'auto'
+  install-dir:
+    description: 'Directory to install into. Defaults to a directory under RUNNER_TEMP.'
+    required: false
+    default: ''
+
+outputs:
+  version:
+    description: 'The release tag that was installed, as the binary reports it.'
+    value: ${{ steps.setup.outputs.version }}
+  path:
+    description: 'Full path to the installed binary.'
+    value: ${{ steps.setup.outputs.path }}
+
+runs:
+  using: composite
+  steps:
+    # A composite action passes nothing to its steps implicitly — inputs reach a
+    # script only through env, and a missing mapping is silent rather than an
+    # error. tools/action's manifest test gates that.
+    - id: setup
+      shell: bash
+      run: sh "$GITHUB_ACTION_PATH/tools/action/setup.sh"
+      env:
+        INPUT_VERSION: ${{ inputs.version }}
+        INPUT_PROVENANCE: ${{ inputs.provenance }}
+        INPUT_INSTALL_DIR: ${{ inputs.install-dir }}
+        # The ref the caller pinned; there is no runner variable for it.
+        GITHUB_ACTION_REF: ${{ github.action_ref }}
+        # Provenance verification needs an authenticated gh. Hosted runners ship
+        # gh but no token, so without this "auto" would degrade to a warning on
+        # every runner — the one place the check can actually always run.
+        GH_TOKEN: ${{ github.token }}

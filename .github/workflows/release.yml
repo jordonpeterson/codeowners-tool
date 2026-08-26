@@ -12,9 +12,10 @@ name: Release
 #
 # Runs when a merge to main changes the binary — the command or its internal
 # packages, the module files, or the VERSION file (for a manual minor/major
-# bump) — or when it changes this file, since a merge that repairs the release
-# pipeline has to be able to publish the releases the broken pipeline dropped.
-# Docs- or CI-config-only merges don't cut a release. Can also be run on demand
+# bump) — when it changes the composite action, which ships on the same tag, or
+# when it changes this file, since a merge that repairs the release pipeline has
+# to be able to publish the releases the broken pipeline dropped. Docs- or
+# CI-config-only merges don't cut a release. Can also be run on demand
 # from the Actions tab (workflow_dispatch) to publish the next patch.
 #
 # Publishing the release is where this workflow's job ends. The Homebrew formula
@@ -34,6 +35,11 @@ on:
       - 'go.sum'
       - 'VERSION'
       - '.github/workflows/release.yml'
+      # The composite action ships on the same tag as the binary, and the major
+      # tag consumers pin to only moves when a release is cut — so a fix to the
+      # action that cut no release would reach nobody.
+      - 'action.yml'
+      - 'tools/action/**'
   workflow_dispatch: {}
 
 permissions:
@@ -170,3 +176,20 @@ jobs:
             --target "$GITHUB_SHA" \
             --title "${{ steps.ver.outputs.tag }}" \
             --generate-notes
+
+      # `uses: jordonpeterson/codeowners-tool@v0` resolves through the major tag,
+      # which is the pin the docs recommend and the only one that picks up fixes.
+      # Nothing else moves it: without this step every consumer on @v0 stays on
+      # whichever commit it first pointed at. Moved after the release is created,
+      # so a release that failed to publish does not advance the pin.
+      - name: Move the major tag onto this release
+        if: steps.guard.outputs.exists == 'false'
+        env:
+          TAG: ${{ steps.ver.outputs.tag }}
+        run: |
+          set -euo pipefail
+          major="v${TAG#v}"
+          major="${major%%.*}"
+          git tag -f "$major" "$GITHUB_SHA"
+          git push --force origin "refs/tags/$major"
+          echo "::notice::$major now points at $TAG ($GITHUB_SHA)"

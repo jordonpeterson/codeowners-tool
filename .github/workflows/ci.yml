@@ -86,7 +86,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: ShellCheck scripts
-        run: shellcheck install.sh tools/gen-formula.sh tools/fleet/co-own.sh
+        run: shellcheck install.sh tools/gen-formula.sh tools/fleet/co-own.sh tools/action/setup.sh
 
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -107,3 +107,52 @@ jobs:
 
       - name: actionlint
         run: actionlint -color
+
+  # tools/action drives setup.sh against a stub install.sh, which proves the
+  # handoff and nothing about the download. This job is the other half: the
+  # action as a consumer's workflow uses it, against real releases, on both
+  # platforms it claims to support.
+  action:
+    name: action installs a verified release
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+      attestations: read # `gh attestation verify` reads the release's signed statement
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # PROVENANCE=require, not the default: gh is on every hosted runner and the
+      # action hands it a token, so this is the one place the check can always
+      # run — and an unverifiable release is a release-integrity failure worth
+      # going red for.
+      - name: Install the latest release
+        id: latest
+        uses: ./
+        with:
+          provenance: require
+
+      - name: The binary on the PATH is the build the action reported
+        run: |
+          set -euo pipefail
+          test -n "${{ steps.latest.outputs.version }}"
+          test "$(codeowners-tool version)" = "${{ steps.latest.outputs.version }}"
+          test "$(command -v codeowners-tool)" = "${{ steps.latest.outputs.path }}"
+          codeowners-tool --help >/dev/null
+
+      # A pinned version has to install that exact build, not the newest one.
+      # v0.0.9 is a published release and releases are immutable, so this asserts
+      # a constant rather than whatever main happens to be at.
+      - name: A pinned version installs that build
+        uses: ./
+        with:
+          version: v0.0.9
+
+      - name: The pin was honored
+        run: |
+          set -euo pipefail
+          test "$(codeowners-tool version)" = v0.0.9
