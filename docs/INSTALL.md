@@ -36,7 +36,7 @@ One step, and the binary is on the `PATH` for the rest of the job:
 
 | Input | Effect |
 |---|---|
-| `version` | Release to install. Defaults to the tag the action is pinned at: a full-version pin installs exactly that release, `@v0` takes the latest. |
+| `version` | Release to install. Defaults to the tag the action is pinned at: a full-version pin installs exactly that release, `@v0` takes the newest. Set it to `latest` to float regardless of the pin. |
 | `provenance` | `auto` (default), `require`, or `skip` — see [below](#verifying-a-download). |
 | `install-dir` | Where to put the binary. Defaults to a directory under `RUNNER_TEMP`. |
 

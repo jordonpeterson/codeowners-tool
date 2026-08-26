@@ -44,6 +44,21 @@ func TestAction_ADefaultedVersionFollowsThePinnedActionTag(t *testing.T) {
 	}
 }
 
+// `latest` is an explicit request to float, so it has to beat the action-ref
+// default too. Pinning the action at @v0.0.9 for stable behavior while taking
+// the newest tool is a coherent thing to ask for, and answering it with v0.0.9 —
+// silently, because the ref happened to name a release — answers a question
+// nobody asked.
+func TestAction_AnExplicitLatestFloatsPastThePinnedActionTag(t *testing.T) {
+	r := run{version: "latest", actionRef: "v0.0.9", withGH: true, ghTag: "v0.0.28", stubVersion: "v0.0.28"}.exec(t)
+	if r.exitCode != 0 {
+		t.Fatalf("setup.sh exited %d, want 0\n%s", r.exitCode, r)
+	}
+	if got := r.installed["VERSION"]; got != "v0.0.28" {
+		t.Errorf("action pinned at v0.0.9 with `version: latest` installed %q, want the newest release v0.0.28.\nAn explicit latest must not resolve to the tag the action is pinned at.", got)
+	}
+}
+
 // The action ref is a default, not an override: a workflow that pins the action
 // at one tag and asks for another version means the version it asked for.
 func TestAction_AnExplicitVersionOverridesTheActionTag(t *testing.T) {

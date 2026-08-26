@@ -41,8 +41,15 @@ esac
 # silently isn't one is worse than none, because it is the version people write
 # down during an incident.
 requested="${INPUT_VERSION:-}"
+# `latest` is an explicit request to float, so it beats the ref default rather
+# than falling through to it: pinning the action at @v0.0.9 for stable behavior
+# while taking the newest tool is a coherent thing to ask for, and answering it
+# with v0.0.9 because the ref happened to name a release answers a different
+# question than the one the workflow asked.
 version=""
-if [ -n "$requested" ] && [ "$requested" != latest ]; then
+if [ "$requested" = latest ]; then
+  version=""
+elif [ -n "$requested" ]; then
   case "$requested" in
   v*) version="$requested" ;;
   *) version="v$requested" ;;

@@ -7,9 +7,10 @@ branding:
 inputs:
   version:
     description: >-
-      Release to install, e.g. v0.0.28, or "latest". Defaults to the release
-      named by the tag this action is pinned at, so a full-version pin installs
-      exactly that release; any other ref takes the latest.
+      Release to install, e.g. v0.0.28. "latest" always takes the newest
+      release, whatever the action is pinned at. Left empty (the default), a
+      full-version pin installs exactly that release and any other ref takes
+      the newest.
     required: false
     default: ''
   provenance:
