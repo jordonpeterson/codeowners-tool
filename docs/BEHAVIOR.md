@@ -4570,6 +4570,19 @@ Pre-release finding, fixed: `audit --format json` on a clean repo prints the lit
 to jq — the healthy repo — is the one case the output isn't parseable.
 Under `--format json`, stdout is data.
 
+### `TestAuditKeepsCaseAndDeliberateDeadPatternsDistinctFromNormalization`
+
+The neighbours the normalization branch must not swallow: a genuine
+case-only miss is still reported AS a case miss, an ordinary forward-looking
+dead pattern is still report-only A-4, and two names that differ by a real
+accent are still two different names.
+
+### `TestAuditLeavesAPlainCodeownersAlone`
+
+The neighbour: an ordinary CODEOWNERS is never called a symlink, and its
+content checks still run. A mode test that fired on a regular blob would
+silence every finding in every repository.
+
 ### `TestAuditNamesASymlinkedCodeowners`
 
 FINDING: for a committed SYMLINKED CODEOWNERS, `sync` refuses with a precise
@@ -4590,6 +4603,28 @@ parsed as a rule. The operator is left to infer the real defect from "100% of
 tracked paths have no owner". The condition is already known to the tool;
 audit is where it belongs, since audit's job is to report rot and this repo's
 entire ownership is inert.
+
+### `TestAuditNestedCodeownersIsAWarningAndRootLevelStaysAnError`
+
+A nested CODEOWNERS is a `warning`, and a second ROOT-LEVEL one stays an
+`error` — the two are different defects and `--fail-on` must tell them apart.
+
+A second root-level file is ambiguity in the document that governs: two files
+GitHub itself searches, one of them silently losing. A `packages/foo/`
+CODEOWNERS is never searched at all, so nothing about what governs is in
+doubt, and it is routinely a deliberate artifact of a Bazel/Gerrit OWNERS
+migration that some other tool still consumes. Ranking it `error` would turn
+`--fail-on error` — documented as the tier for "GitHub is doing something
+other than what the file says" — red on every such monorepo, over a condition
+no edit to the governing file resolves. It is still rot (review is routed by
+it in people's heads and nothing enforces that), so it must clear `info`.
+
+### `TestAuditNormalizationMismatchIsDiagnosedUnderA5`
+
+A dead pattern that differs from a tracked path ONLY by Unicode
+normalization is diagnosed under A-5 — the check that already exists for the
+other invisible spelling mismatch — and names both the tracked path it
+collides with and the codepoints, since the two strings render identically.
 
 ### `TestAuditRejectsUnknownFormat`
 
@@ -4615,6 +4650,24 @@ people's heads, and GitHub honors not one line of them.
 `audit clean`, exit 0, is the CI gate asserting this repository has no
 ownership rot. Here it asserts it over two files' worth of owner
 assignments that do nothing.
+
+### `TestAuditReportsNoA10WhenTheOnlyCodeownersIsTheGoverningOne`
+
+The control for the check above: a repository whose only CODEOWNERS is the
+governing one reports no A-10 at all. A scan that counted the governing file
+itself, or any nearby ownership file, would make every healthy monorepo in a
+fleet report rot it does not have.
+
+### `TestAuditSymlinkedCodeownersIsAnErrorAndSuppressesTheBogusParse`
+
+A symlinked governing CODEOWNERS is severity `error`: GitHub does not follow
+it, so no rule in the repository takes effect and every path is unowned.
+That is A-12-over-the-cliff's situation — "ownership is silently off" — and
+it has to fail `--fail-on error`, the gate a fleet blocks rollouts on.
+
+The content-derived checks go with it, because `cat-file` hands back the link
+TARGET: A-4 was reporting "../OWNERS.real" as a dead pattern, and A-9/A-11
+were describing a document that does not exist.
 
 ### `TestBranchMismatchErrorNamesHeadCleanly`
 
@@ -7892,4 +7945,4 @@ twice and one tracked file vanished from the gate.
 
 ---
 
-735 documented test cases across 13 packages.
+741 documented test cases across 13 packages.
