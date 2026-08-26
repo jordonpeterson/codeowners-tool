@@ -107,7 +107,10 @@ func TestAction_WithoutGHTheLatestResolutionIsLeftToTheInstallScript(t *testing.
 // vMAJOR.MINOR.PATCH. Catching a malformed one before the download makes the
 // error say what is wrong with the workflow, instead of a 404 on an asset URL.
 func TestAction_RefusesAVersionThatIsNotAReleaseTag(t *testing.T) {
-	for _, bad := range []string{"0.0", "v0.0", "main", "v0.0.9-rc1", "latest; rm -rf /"} {
+	// "v0.0.9\nevil" is in the table because the guard is a grep, and grep matches
+	// per LINE: a value whose first line is a release tag satisfies an anchored
+	// pattern while carrying anything after it.
+	for _, bad := range []string{"0.0", "v0.0", "main", "v0.0.9-rc1", "latest; rm -rf /", "v0.0.9\nevil"} {
 		r := run{version: bad}.exec(t)
 		if r.exitCode == 0 {
 			t.Errorf("version %q was accepted; it is not a release tag", bad)
@@ -218,6 +221,29 @@ func TestAction_RefusesWindowsRunnersWithTheRouteThatWorks(t *testing.T) {
 	}
 	if !strings.Contains(r.output, ".zip") {
 		t.Errorf("the refusal does not point at the .zip on the release, which is the route that does work:\n%s", r)
+	}
+}
+
+// $GITHUB_PATH and $GITHUB_OUTPUT are line-delimited files, so a directory whose
+// name spans lines writes entries nobody asked for — a second PATH entry pointing
+// wherever the extra line says, ahead of everything the job runs afterwards. A
+// workflow passing install-dir through from an untrusted value (a reusable
+// workflow input, anything off github.event) is where that stops being theoretical.
+// No directory legitimately contains a newline, so this costs nothing to refuse.
+func TestAction_RefusesAnInstallDirThatWouldForgeAPathEntry(t *testing.T) {
+	for _, bad := range []string{"/tmp/ok\n/evil", "/tmp/ok\r/evil"} {
+		r := run{version: "v0.0.9", installDir: bad}.exec(t)
+		if r.exitCode == 0 {
+			t.Errorf("install-dir %q was accepted\n%s", bad, r)
+		}
+		if r.ranInstall {
+			t.Errorf("install-dir %q reached install.sh; it must be refused before anything is installed", bad)
+		}
+		for _, line := range r.pathAdds {
+			if strings.Contains(line, "evil") {
+				t.Errorf("$GITHUB_PATH got a forged entry %q", line)
+			}
+		}
 	}
 }
 

@@ -13,7 +13,21 @@ BIN="codeowners-tool"
 
 err() { echo "$BIN setup: $*" >&2; exit 1; }
 have() { command -v "$1" >/dev/null 2>&1; }
-is_tag() { printf '%s' "${1:-}" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; }
+
+# $GITHUB_PATH and $GITHUB_OUTPUT are line-delimited files, and grep matches per
+# LINE — so a value whose first line is a release tag satisfies the anchored
+# pattern below while carrying anything after it. Neither a release tag nor a
+# directory legitimately spans lines, so both are refused outright.
+NL='
+'
+CR=$(printf '\r')
+
+is_tag() {
+  case "${1:-}" in
+  *"$NL"* | *"$CR"*) return 1 ;;
+  esac
+  printf '%s' "${1:-}" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'
+}
 
 # Releases ship Windows builds, but as .zip archives install.sh does not unpack.
 # Saying so here beats a Git Bash `uname` failing partway through a download.
@@ -73,6 +87,13 @@ fi
 
 bindir="${INPUT_INSTALL_DIR:-}"
 [ -n "$bindir" ] || bindir="${RUNNER_TEMP:-/tmp}/$BIN"
+# A directory spanning lines would append entries nobody asked for to the
+# line-delimited exports below — a second PATH entry, pointing wherever the extra
+# line says, ahead of everything the job runs afterwards.
+case "$bindir" in
+*"$NL"* | *"$CR"*)
+  err "the install directory must not span lines: \$GITHUB_PATH and \$GITHUB_OUTPUT are line-delimited, so a newline in it would export PATH entries and outputs this action did not produce" ;;
+esac
 mkdir -p "$bindir" || err "cannot create the install directory $bindir"
 
 # The working directory in a consumer's job is THEIR repository; install.sh only
