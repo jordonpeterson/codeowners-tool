@@ -396,6 +396,17 @@ a bare line deletion.
 > intent inexpressible. The fleet is the unit under test — no single repo's
 > outcome may change any other repo's outcome.
 
+**`helpdocs_test.go`**
+
+> `--help` against the pages it summarizes.
+>
+> The help text is the only reference an operator reads without leaving the
+> terminal, so a flag it omits or a rule it overstates is a doc that has
+> drifted — checked here the same way docexamples_test.go checks the console
+> blocks. Every test below was written as a failing repro of a confirmed
+> mismatch between `--help` and docs/COMMANDS.md, docs/AUDIT.md or
+> docs/LINTING.md.
+
 **`lint_guards_test.go`**
 
 > The two repository guards `audit --lint` shares with `sync`, found by
@@ -4778,6 +4789,18 @@ the block still matches, so this is one path, and it is a real difference to
 anyone diffing rollout logs — the repo-relative name is stable across
 machines and the absolute one is not.
 
+### `TestApplyUsageNamesAFileNotTheVerb`
+
+FINDING: `apply --help` renders --plan's value placeholder as "plan".
+
+	-plan plan
+	    	plan JSON produced by plan
+
+The flag package takes the back-quoted word in a usage string as the name of
+the value, and the usage back-quoted the verb. COMMANDS.md spells the flag
+`--plan plan.json` — a path — so the help names a value the reader has no way
+to supply.
+
 ### `TestAuditDiagnosesAUnicodeNormalizationMismatch`
 
 FINDING: a pattern and a path that differ only in Unicode normalization get
@@ -4796,6 +4819,14 @@ files ONLY because of case — CODEOWNERS is case-sensitive (S-6); correct the
 pattern to the tree's actual casing". Normalization is not mentioned
 anywhere in the code or the docs, so the reader is left staring at two
 identical-looking strings and concluding the tool is broken.
+
+### `TestAuditDocNamesEveryLintFlag`
+
+FINDING: AUDIT.md's `lint` flag table — the page REFERENCE.md routes every
+"a lint flag" lookup to — never names `--policy`, so the flag that decides
+where the repair preferences come from (R-36's `lint` block) is documented
+only in COMMANDS.md's synopsis and POLICY-FILE.md's field table, neither of
+which a reader following that route opens.
 
 ### `TestAuditJSONCleanIsPureJSON`
 
@@ -5099,6 +5130,45 @@ The fixture is the four files the section's prose describes, so every number
 in the block — `4 path(s) change owners` included — is the real one for the
 repo a reader following along would have.
 
+### `TestHelpDisclosesTheOfflineLintMode`
+
+FINDING: `--help` and `lint --help` both call the credentials unconditional —
+"it needs a token and --github-repo", "required: owner existence is not
+decidable offline" — but the offline tree-only mode is real and documented:
+with --remove-stale-paths and NEITHER credential, lint runs stage 3 alone
+(LINTING.md, "Errors you will actually hit"; AUDIT.md, "Offline tree-only
+mode"). An operator with no token reads the help and concludes the run below
+is impossible.
+
+### `TestHelpDoesNotGiveCheckAnExitCodeItCannotReturn`
+
+FINDING: `--help` gives `check` a code it cannot return.
+
+	sync/check use a coarser contract and return only:
+	            0 converged · 2 this repo needs a human · 3 the policy is broken
+
+`check` opens no repository at all (R-22), so "this repo needs a human" is
+not a verdict it can reach: it returns 0 or 3. COMMANDS.md says so —
+"It exits 0 for a valid policy, 3 for a broken one, and never 1" — and a CI
+gate written off the help's table has a branch that never runs.
+
+### `TestHelpSynopsesCarryEveryFlagCommandsDocDocuments`
+
+FINDING: `--help`'s synopses omit flags COMMANDS.md documents, so a flag that
+can refuse a run or redirect it at a different file is invisible to anyone
+who never opens the docs.
+
+	plan     … [--repo DIR] [--branch REF] [--file PATH] [--out plan.json]
+	audit    … [--cache-dir D] [--cache-ttl DUR] [--repo DIR] [--branch REF] [--file PATH]
+	snapshot [--repo DIR] [--branch REF] [--out snap.json]
+
+`plan` also takes `--max-size` (the S-4 cliff — over it the run is refused)
+and `--warn-size`; `snapshot` also takes `--file`, the one flag that makes it
+answer about a CODEOWNERS GitHub does not read; `audit` also takes the
+`--lint` cluster the help's own prose goes on to describe. COMMANDS.md names
+all four, and the same omission in that page is already pinned by
+TestCommandsDocListsEveryFlagThatChangesBehavior — the help kept it.
+
 ### `TestLeadingHashScopeIsRefusedAtCheckTime`
 
 FINDING: a scope whose written line would start with `#` passes `check` and
@@ -5373,6 +5443,12 @@ GitHub does not follow a symlinked CODEOWNERS, so the run edited a file
 that governs nothing while reporting success. An out-of-repo symlink target
 is already refused (containedWritePath); the in-repo case must at minimum
 not be a silent success.
+
+### `TestSyncCreateUsageSaysItIsOpOnly`
+
+FINDING: `sync --help` marks two of the three op-only flags "(only with
+--op)" and leaves `--create` unmarked, though passing it with `--policy` is
+exit 3 — the R-34 rule COMMANDS.md states for all three.
 
 ### `TestSyncWarnsWhenGoverningCodeownersIsUntracked`
 
@@ -8293,4 +8369,4 @@ twice and one tracked file vanished from the gate.
 
 ---
 
-780 documented test cases across 13 packages.
+786 documented test cases across 13 packages.

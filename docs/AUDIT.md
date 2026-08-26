@@ -101,6 +101,7 @@ rejected, because a subset of a whole-file repair is ambiguous rather than small
 | `--remove-stale-paths` | Stage 3. Deletes rules matching nothing tracked **and** nothing on disk. |
 | `--on-empty error\|inherit\|unowned` | R-6, required only when a removal would empty a rule. `inherit` deletes the line. |
 | `--file PATH` | The path is discovered from `--branch`'s tree, so an uncommitted CODEOWNERS needs this. |
+| `--policy FILE` | Takes the repair preferences (`remove_stale_paths`, `on_empty`) from the file's `lint` block (R-36), so they are reviewed in git rather than typed per run; its `ops` are validated and never applied. |
 | `--repo`, `--branch`, `--api-url`, `--format` | As elsewhere. |
 
 `--cache-dir` and `--cache-ttl` are rejected (exit 3): a cached negative is served without
