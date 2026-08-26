@@ -224,3 +224,27 @@ func TestApplyUsageNamesAFileNotTheVerb(t *testing.T) {
 		t.Errorf("apply --help calls --plan's value \"plan\"; COMMANDS.md documents it as a path, `--plan plan.json`:\n%s", usage)
 	}
 }
+
+// FINDING: AUDIT.md's `lint` flag table — the page REFERENCE.md routes every
+// "a lint flag" lookup to — never names `--policy`, so the flag that decides
+// where the repair preferences come from (R-36's `lint` block) is documented
+// only in COMMANDS.md's synopsis and POLICY-FILE.md's field table, neither of
+// which a reader following that route opens.
+func TestAuditDocNamesEveryLintFlag(t *testing.T) {
+	b, err := os.ReadFile(filepath.Join("..", "..", "docs", "AUDIT.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	section := string(b)
+	if i := strings.Index(section, "\n## `lint`"); i >= 0 {
+		section = section[i:]
+	} else {
+		t.Fatal("AUDIT.md no longer has a `lint` section")
+	}
+	flagRe := regexp.MustCompile(`(?m)^\s+-([a-z-]+)`)
+	for _, m := range flagRe.FindAllStringSubmatch(usageText(t, "lint"), -1) {
+		if !strings.Contains(section, "--"+m[1]) {
+			t.Errorf("lint defines --%s; AUDIT.md's lint section never names it", m[1])
+		}
+	}
+}

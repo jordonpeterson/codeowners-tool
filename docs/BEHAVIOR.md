@@ -4820,6 +4820,14 @@ pattern to the tree's actual casing". Normalization is not mentioned
 anywhere in the code or the docs, so the reader is left staring at two
 identical-looking strings and concluding the tool is broken.
 
+### `TestAuditDocNamesEveryLintFlag`
+
+FINDING: AUDIT.md's `lint` flag table — the page REFERENCE.md routes every
+"a lint flag" lookup to — never names `--policy`, so the flag that decides
+where the repair preferences come from (R-36's `lint` block) is documented
+only in COMMANDS.md's synopsis and POLICY-FILE.md's field table, neither of
+which a reader following that route opens.
+
 ### `TestAuditJSONCleanIsPureJSON`
 
 Pre-release finding, fixed: `audit --format json` on a clean repo prints the literal line
@@ -8361,4 +8369,4 @@ twice and one tracked file vanished from the gate.
 
 ---
 
-785 documented test cases across 13 packages.
+786 documented test cases across 13 packages.
