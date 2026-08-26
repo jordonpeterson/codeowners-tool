@@ -330,6 +330,11 @@ a bare line deletion.
 > they freeze current behavior the spec promises to preserve, rather than
 > specify new behavior. Everything else fails until the feature lands.
 
+**`fixes_ops_test.go`**
+
+> Neighbours of the four op/pattern fixes: the cases each fix must NOT take
+> with it, end to end through the CLI.
+
 **`fleet_idempotence_test.go`**
 
 > R-19 — convergence and idempotence at fleet scale.
@@ -4523,6 +4528,12 @@ preserves, so not a violation — but still reported.
 Absent is not empty. Omitting --repo still means the working directory,
 which is the documented default and what every one-repo invocation relies on.
 
+### `TestAdjacentDoubleStarScopesStillApply`
+
+SPEC: the `**` spellings that are alive still work as scopes. `x/**/**` and
+`foo/**/` hold two adjacent `**` segments and match real paths; refusing them
+alongside the leading `**/**` family would take a live pattern with it.
+
 ### `TestApplyEmptyRepoDistinguishesPassedFromAbsent`
 
 apply's --repo defaults to "" meaning "use the plan's repo", so the rejection
@@ -4698,6 +4709,12 @@ escape README documents is for spaces only, and no spelling reaches such a
 path. Nothing is written wrongly; the cost is that the last message sends
 the reader looking for an owners array they did not write.
 
+### `TestCommaScopeWorksFromAPolicyFile`
+
+SPEC: a path holding a comma is reachable from the policy file too, in both
+owner spellings, and the line it writes reads back as the rule that was
+planned.
+
 ### `TestCommandsDocListsEveryFlagThatChangesBehavior`
 
 FINDING: docs/COMMANDS.md's synopses omit flags that change what the command
@@ -4777,6 +4794,13 @@ alone was refused") rather than exit 3 ("broken everywhere; fix it, don't
 retry"), so a fleet triaging on exit codes sends a human to all N repos for
 one policy typo — and `check`, "the cheapest way to catch a broken policy
 before repo #1", passes it.
+
+### `TestDeclareStillWritesADeliberatelyDeadScope`
+
+SPEC: a scope that is dead HERE and alive elsewhere still declares. R-5's
+refusal is a fact about this repository, and `on_zero_match: declare` is the
+documented way to overrule it; only a scope no repository can ever satisfy is
+refused as a policy error.
 
 ### `TestEmptyRepoFlagRejected`
 
@@ -4947,6 +4971,11 @@ requires the PAGE to show what the tool really prints. Asserting the reverse
 mistake: that form can only ever be satisfied by changing the tool, and here
 the tool is right.
 
+### `TestOrdinaryOpStringsAreUnchangedByTheCommaEscape`
+
+SPEC: the op-string grammar is unchanged where no escape is involved — a
+bare owner, a bracketed list, and the arity refusal for two bare owners.
+
 ### `TestPlanApplyAndLintWarnWhenTheyWriteAFileGitHubWillNotRead`
 
 FINDING: R-24's "every time" warning is emitted only by `sync`. `plan`,
@@ -4986,6 +5015,12 @@ after them with them. `audit ../other-repo --checks a999` (note the missing
 `--checks a999`, which the parser would reject loudly, is never seen. A
 tool this strict about flag values must not swallow whole arguments.
 
+### `TestSetOwnersByteEqualDuplicateKeepsTheR7Disclosure`
+
+SPEC: the byte-equal duplicate an insert strands keeps R-7's disclosure and
+only that one. The narrower-rule disclosure is a second finding, not a
+replacement, and two warnings for one line would double-report it.
+
 ### `TestSetOwnersDisclosesAuthoredDuplicate`
 
 Pre-release finding, fixed: set_owners on a scope whose pattern already exists earlier in
@@ -5020,6 +5055,12 @@ disclosure exists: "without this, the run creating the dead line is the one
 run that says nothing about it (pre-release finding)". A narrower pattern is
 exactly that case. Amending `/docs/x/` instead of stranding it would leave
 audit clean.
+
+### `TestSetOwnersIsQuietWhenItStrandsNothing`
+
+SPEC: an op that strands nothing says nothing. The stranded-rule disclosure
+must fire on the run that authors the dead line and on no other, or a fleet
+learns to ignore it.
 
 ### `TestSnapshotIsLosslessForNonUTF8Paths`
 
@@ -6274,6 +6315,44 @@ both strings parse to the same scope. Escaped whitespace INSIDE the scope is
 a different matter and is preserved exactly — `/x\ y/` names a path with a
 space in it, and losing that escape names a different path.
 
+### `TestDanglingBackslashSwallowingTheSeparatorIsNamed`
+
+SPEC: a scope's dangling backslash eats the comma that ends the argument, and
+the refusal says so. Under the escape this is no longer an arity accident —
+it is one argument swallowing the rest of the op.
+
+### `TestEscapedCommaKeepsTheScopeWhole`
+
+SPEC: a backslash escapes a comma in an op string exactly as it escapes a
+space, so a path holding a comma is reachable. The backslash stays in the
+scope text: it is the pattern language's own escape, and stripping it would
+hand the planner a pattern for a different path.
+
+### `TestLeadingHashScopeIsRefusedByParse`
+
+SPEC: a scope whose written line would read back as a comment is refused at
+parse time, in the words of the defect — the same standard `!` and `\#`
+already meet.
+
+### `TestNamesOwnersAsksWhetherTheTextCouldBeAnOwner`
+
+SPEC: NamesOwners answers R-39b's question — does this op string STATE
+owners — and text that cannot be an owner states none. Reading `b/` as an
+owner is how an op naming one scope came to be refused for naming owners
+twice.
+
+### `TestScopeThatCanNeverMatchIsRefused`
+
+SPEC: a scope no path can ever match is refused where the verdict belongs —
+in the op string, with no repository open, so `check` catches it once instead
+of every repo refusing it separately at exit 2 (or `declare` writing it).
+
+### `TestUnescapedCommaInAScopeIsNamedForWhatItIs`
+
+SPEC: an UNESCAPED comma still separates arguments, and the refusal names the
+text that landed where an owner belongs plus the escape that would have kept
+it in the scope — rather than an argument count the operator did not write.
+
 ## internal/pattern
 
 **`pattern_test.go`**
@@ -6336,6 +6415,12 @@ compile error surfaced to the caller, never a silent negation.
 SPEC S-6: paths are case-sensitive. `/Src/` on a tree containing `src/` is a
 dead rule that looks fine on a case-insensitive filesystem.
 
+### `TestCompileRefusesLeadingHash`
+
+SPEC: Compile refuses a bare leading `#` for the reason it already refuses
+`\#` — the line would read back as a comment, so the rule is dead there and a
+mutation tool must never emit one (S-2/S-6).
+
 ### `TestContainsIsReflexive`
 
 Reflexivity: a pattern always contains itself, whatever its shape.
@@ -6375,6 +6460,20 @@ and hand its owner every file the inner rule will ever match.
 ### `TestContainsRejectsInvalid`
 
 Contains must not blow up or report true on patterns Compile rejects.
+
+### `TestNeverMatchesAgreesWithTheMatcher`
+
+SPEC: NeverMatches agrees with the matcher on a generated corpus — every
+pattern it calls dead has no witness, and every pattern it calls alive has
+one. The corpus is the cross product of segment shapes and candidate paths,
+so a divergence in either direction fails here rather than in a repository.
+
+### `TestNeverMatchesNamesTheDeadFamilies`
+
+SPEC: NeverMatches names exactly the patterns whose language is empty. It is
+the write-side guard behind an exit-3 refusal, so an over-broad answer would
+halt a rollout over a live pattern, and an under-broad one would let a rule
+that owns nothing forever be written and called proven.
 
 ## internal/plan
 
@@ -7318,6 +7417,27 @@ treat these two spellings as selecting different files. If this ever fails,
 TestR2_NarrowingIsIndependentOfScopeSpelling is asserting the wrong thing and
 the spelling-sensitivity finding needs rereading, not the matcher fixing.
 
+### `TestSetOwnersDisclosesTheNarrowerRuleItStrands`
+
+SPEC: a set_owners insert that leaves a NARROWER pre-existing rule unable to
+win any path discloses it. Resolved ownership is right and the invariants
+hold — the defect is the rot the write authors: the repo audits clean before
+and fails A-6 ("fully shadowed", exit 4) after, with nothing in the run's own
+output naming the line.
+
+### `TestStrandDisclosureIgnoresAnAlreadyDeadRule`
+
+SPEC: the disclosure is about lines this run kills, not about lines that were
+already dead. A rule shadowed before the run is audit's finding and has
+always been; repeating it here would make the new warning noise.
+
+### `TestStrandDisclosureSparesARuleThatStillWinsSomewhere`
+
+SPEC: a rule the insert only partly covers is not stranded and is not
+reported. "**/*.md" loses docs/a.md to the new line and keeps src/b.md, so it
+still takes effect — calling that dead would send a reader to delete a live
+rule.
+
 ## internal/policy
 
 **`bounds_test.go`**
@@ -7945,4 +8065,4 @@ twice and one tracked file vanished from the gate.
 
 ---
 
-741 documented test cases across 13 packages.
+759 documented test cases across 13 packages.
