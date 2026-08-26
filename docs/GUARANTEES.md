@@ -34,6 +34,10 @@ error: refusing: rule "infra/" also governs paths outside scope "**/*.tf", and n
   putting the rule at the end of the file. When someone later adds a matching file, this
   rule takes it. If that wasn't what you wanted, nothing will have caught it.
 
+  A scope that *no* repository can satisfy — `/`, `**/`, `**/**` — is the one case this
+  trade is void rather than weaker, so it is refused as a policy error (exit 3) before any
+  repo is opened, `declare` or not.
+
 Ops that took this path report `"proven": "structural"` in the JSON and are called out in
 `--summary-out`, so a reviewer can find them without reading the diff.
 

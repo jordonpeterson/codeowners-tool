@@ -400,10 +400,19 @@ func (r *syncRun) execute() (SyncRecord, int) {
 		rec.Error = err.Error()
 		return rec, ExitRefused
 	}
+	// Ahead of the warnings, alone among the guards below: the untracked
+	// warning tells the operator to commit the file, and this is the one
+	// repository where they cannot. Reporting both would put contradictory
+	// advice in one record. See refuseIgnoredCodeowners.
+	if err := refuseIgnoredCodeowners(r.repoArg, r.branch, tree, rel); err != nil {
+		rec.Status = StatusRefused
+		rec.Error = err.Error()
+		return rec, ExitRefused
+	}
 	// Warnings about the FILE, gathered before anything is planned so a repo
-	// that goes on to refuse still reports them: the two conditions below are
+	// that goes on to refuse still reports them: the conditions below are
 	// exactly the ones an operator wants listed across the fleet afterwards.
-	fileWarnings := governingWarnings(tree, rel, content)
+	fileWarnings := governingWarnings(tree, r.branch, rel, creating, content)
 	rec.Warnings = fileWarnings
 
 	// Where the write would actually land, decided before anything is planned.
@@ -423,6 +432,33 @@ func (r *syncRun) execute() (SyncRecord, int) {
 	// through it is the same dead-on-arrival outcome with a live-looking path.
 	// See refuseSymlinkedTarget.
 	if err := refuseSymlinkedTarget(target); err != nil {
+		rec.Status = StatusRefused
+		rec.Error = err.Error()
+		return rec, ExitRefused
+	}
+	// And the one neither of those can see, because it is a fact about the
+	// TREE rather than about the filesystem: a submodule mounted at a
+	// CODEOWNERS location, or a tracked link no longer on disk. See
+	// refuseNonTreeAncestor — ordered after the symlink guard, which names a
+	// live link and the component it sits on more precisely.
+	if err := refuseNonTreeAncestor(r.repoArg, r.branch, tree, rel); err != nil {
+		rec.Status = StatusRefused
+		rec.Error = err.Error()
+		return rec, ExitRefused
+	}
+	// And the one about WHICH file governs a repository mid-migration: a
+	// higher-precedence CODEOWNERS sitting in the working tree makes the
+	// tracked file this run discovered the outgoing one. See
+	// refuseWorkTreeSupersede.
+	if err := r.refuseWorkTreeSupersede(tree); err != nil {
+		rec.Status = StatusRefused
+		rec.Error = err.Error()
+		return rec, ExitRefused
+	}
+	// And the one that is about the BYTES just read rather than the path they
+	// came from: a CODEOWNERS git still reports as unmerged is both sides of a
+	// conflict, not any commit's rules. See refuseUnmergedCodeowners.
+	if err := refuseUnmergedCodeowners(r.repoArg, rel); err != nil {
 		rec.Status = StatusRefused
 		rec.Error = err.Error()
 		return rec, ExitRefused
@@ -609,7 +645,12 @@ func checkRepoRoot(repoDir string) error {
 // failure than the one being fixed, and it is invisible until someone opens a
 // PR that is not there. --dry-run remains fully available; it just has to be
 // asked for. `plan` is unaffected: it emits an artifact and writes no
-// CODEOWNERS, so proving against another ref is exactly its job.
+// CODEOWNERS, so proving against another ref is exactly its job — which is
+// why `apply`, the verb that turns that artifact into a write, carries this
+// same guard against the plan's own ref. Without it the refusal above was an
+// instruction to route around itself: `sync --branch main` on a clone standing
+// elsewhere refused and offered `plan`, and plan → apply then performed the
+// very write it had refused, against `.github` mounted as a submodule.
 //
 // Refs are compared by resolved commit, not by name, so the ordinary fleet
 // invocation `--branch main` on a clone checked out at main writes as it always
@@ -617,6 +658,17 @@ func checkRepoRoot(repoDir string) error {
 // tree is the same tree.
 func (r *syncRun) checkBranchIsWritable() error {
 	return checkBranchIsWritable(r.repoArg, r.branch, "sync", r.dryRun)
+}
+
+// refPhrase names a ref the way the verb's operator set it, so both refusals
+// below agree on wording. `apply` has neither --branch nor --dry-run — its ref
+// came from the plan file — so naming a flag its operator never typed would
+// send them looking for one that does not exist.
+func refPhrase(branch, verb string) string {
+	if verb == "apply" {
+		return "the ref this plan was computed against, " + branch + ","
+	}
+	return "--branch " + branch
 }
 
 // checkBranchIsWritable is the free function behind it, shared with
@@ -636,21 +688,220 @@ func checkBranchIsWritable(repoDir, branch, verb string, dryRun bool) error {
 	}
 	want, err := gitLine(repoDir, "rev-parse", "--verify", "--end-of-options", branch+"^{commit}")
 	if err != nil {
-		return err
+		// A ref that does not resolve here is a fact about this clone — the
+		// branch was deleted or renamed since the plan was written, or was
+		// never fetched — so it is exit 2 like the mismatch below, not an
+		// internal error. It reaches an operator, so it says that rather
+		// than echoing `git rev-parse ... fatal: Needed a single revision`,
+		// which names a plumbing command nobody ran.
+		return &plan.RefusalError{Msg: fmt.Sprintf(
+			"%s does not resolve in this clone, so %s cannot prove the change against its tree — fetch it, or re-run `plan` against a ref this clone has (S-7)",
+			refPhrase(branch, verb), verb)}
 	}
 	if head != want {
-		// The `plan` escape hatch is offered only to sync, whose intent is a
-		// set of ops and so can be expressed as an artifact for another ref.
-		// A lint pass is not expressible that way, and pointing someone at a
-		// verb that cannot do what they asked is worse than saying nothing.
-		alt := ""
-		if verb == "sync" {
-			alt = ", or use `plan` to produce an artifact for that ref"
+		// Each verb names the ref the way ITS operator set it and offers only
+		// advice it can act on. The `plan` escape hatch is offered only to
+		// sync, whose intent is a set of ops and so can be expressed as an
+		// artifact for another ref; a lint pass is not expressible that way,
+		// and pointing someone at a verb that cannot do what they asked is
+		// worse than saying nothing. `apply` has neither --branch nor
+		// --dry-run — the ref came from the plan file — so the sync wording
+		// would send its operator to two flags that do not exist.
+		named := "--branch " + branch
+		advice := fmt.Sprintf("re-run with --dry-run to preview it, or check out %s first", branch)
+		switch verb {
+		case "sync":
+			advice += ", or use `plan` to produce an artifact for that ref"
+		case "apply":
+			named = "this plan was computed against " + branch + ", which"
+			advice = fmt.Sprintf("check out %s and re-run, or re-run `plan` against the ref this clone is on", branch)
 		}
-		return fmt.Errorf("--branch %s is not what this clone has checked out (HEAD is %s): %s proves the change against %s's tree but writes the working tree, so the rule would be justified by one tree and land in another; re-run with --dry-run to preview it, or check out %s first%s (S-7)",
-			branch, headLabel(repoDir, head), verb, branch, branch, alt)
+		return fmt.Errorf("%s is not what this clone has checked out (HEAD is %s): %s proves the change against %s's tree but writes the working tree, so the rule would be justified by one tree and land in another; %s (S-7)",
+			named, headLabel(repoDir, head), verb, branch, advice)
 	}
 	return nil
+}
+
+// refuseUnmergedCodeowners refuses to read a CODEOWNERS that git reports as
+// unmerged — the file a conflicted merge, rebase or cherry-pick left with both
+// sides still in it.
+//
+// Every invariant is proven against the working-tree bytes, and for an
+// unmerged path those bytes are a merge artifact rather than any commit's
+// rules. `sync` saw only S-3 syntax errors in the markers, kept BOTH sides'
+// conflicting rules live — `=======` is not even invalid, it parses as a
+// zero-owner rule (S-9) — and reported `applied (proven: tree)` at exit 0,
+// having rewritten a file that is still `UU` and cannot be committed as it
+// stands. The "before" ownership it proved against is a state no commit has
+// ever had and GitHub will never see; `git add` afterwards would resolve
+// somebody's merge with content the tool synthesized from that state.
+//
+// Scoped to the governing file by pathspec, deliberately: a conflict in some
+// OTHER file changes neither these bytes nor the tree the proof resolves
+// against, and refusing there would block the CODEOWNERS edit exactly when
+// someone is reconciling a merge. A rebase merely in progress is not the
+// condition either — the question is what git says about this FILE.
+//
+// Not lifted by --dry-run, unlike checkBranchIsWritable: there the bytes are
+// real and only the ref is wrong, while here a preview reports ownership
+// derived from text that is not any version of the file.
+//
+// Exit 2, not 3: an unmerged index is a fact about THIS clone, so the fleet
+// loop records it and steps to the next repo.
+func refuseUnmergedCodeowners(repoDir, rel string) error {
+	clean := relClean(rel)
+	// :(literal) because rel can come from --file, and a path beginning with
+	// `:` is pathspec MAGIC to git, not a path: without it, `--file
+	// ':weird/CODEOWNERS'` on a repo where that file is unmerged comes back
+	// with no matching entry at all, and the run rewrites the conflicted file
+	// reporting `applied (proven: tree)` — the very bug this guard exists for.
+	// A glob metacharacter cannot cause that: the loop below already compares
+	// the whole path exactly, so a wider match would be filtered out.
+	//
+	// It is load-bearing a second time, in the loop: a single literal path
+	// makes rename detection impossible, so git never emits the two-record
+	// `R  <to>\0<from>\0` form whose second record carries no status code.
+	out, err := gitBytes(repoDir, "status", "--porcelain", "-z", "--untracked-files=no", "--", ":(literal)"+clean)
+	if err != nil {
+		// Refusal, not an error: `ls-tree` already succeeded here, so a status
+		// that fails is this checkout being unreadable in a way the run cannot
+		// prove anything through — and exit 3 is reserved for facts that hold
+		// in every repo.
+		return &plan.RefusalError{Msg: fmt.Sprintf("refusing: cannot tell whether %s is unmerged (%v) — a conflicted CODEOWNERS would be proven against both sides of a merge at once, so this run stops rather than guess; nothing was written", clean, err)}
+	}
+	if code, ok := unmergedCodeIn(out, clean); ok {
+		// `git rm` for a modify/delete conflict (UD/DU), where the resolution
+		// may be to keep the deletion rather than a merged file.
+		return &plan.RefusalError{Msg: fmt.Sprintf(
+			"refusing: %s is unmerged in this checkout (git status --short: %s) — a conflicted merge, rebase or cherry-pick left both sides in the file, and `=======` parses as a valid zero-owner rule (S-9), so the ownership this run would prove against is a conflict-mangled state no commit has ever had and GitHub will never see; resolve the conflict, then `git add %s` (or `git rm` it, for a modify/delete conflict), then re-run — nothing was written",
+			clean, code, clean)}
+	}
+	return nil
+}
+
+// unmergedCodeIn reports the status code `git status --porcelain -z` gives
+// path, when that code is an unmerged one.
+//
+// Split out to be testable. Every record git can emit for a single literal
+// pathspec is reachable from a repository, but the two malformed shapes this
+// guards against are not: the pathspec makes rename detection impossible, so
+// the codeless second record of an `R  <to>\0<from>\0` pair never arrives, and
+// a decoy path is filtered by the pathspec before the parser sees it. Both
+// would be reachable the moment the pathspec changed, and a parser whose
+// correctness rests on its caller's argument is one refactor from refusing a
+// repository that is perfectly merged.
+func unmergedCodeIn(out []byte, path string) (string, bool) {
+	for _, entry := range bytes.Split(out, []byte{0}) {
+		// A record is "XY<space>path". Requiring the space keeps a PATH that
+		// merely begins with two status letters from being read as a code:
+		// `UUx.github/CODEOWNERS` would otherwise parse as XY="UU" with
+		// path=".github/CODEOWNERS", refusing a fully merged repository.
+		if len(entry) < 4 || entry[2] != ' ' || string(entry[3:]) != path {
+			continue
+		}
+		if code := string(entry[:2]); unmergedStatus(code) {
+			return code, true
+		}
+	}
+	return "", false
+}
+
+// refuseIgnoredCodeowners refuses to write a CODEOWNERS that is untracked AND
+// matched by this repository's own ignore rules.
+//
+// governingWarnings discloses the untracked case and tells the operator to
+// commit the file, which is exactly right for D5's nightly-convergence case.
+// It is advice nobody can follow here: with `.github/CODEOWNERS` in
+// `.gitignore`, `git add` refuses it, so no re-run of any kind can make this
+// the file GitHub reads. That is the "applied, dead on arrival" outcome the
+// write path already refuses for a symlinked target, a submodule mount and a
+// path under `.git` — the write governs nothing BY CONSTRUCTION rather than
+// merely governing nothing yet — so it is refused on the same grounds.
+//
+// Only for a file the ref does not carry: check-ignore consults the index and
+// answers "not ignored" for a tracked path, and the tree check makes that
+// explicit rather than relying on it.
+//
+// Exit 2, not 3: what this repository ignores is a fact about THIS repository,
+// so the fleet loop records it and steps to the next.
+func refuseIgnoredCodeowners(repoDir, ref string, tree []string, rel string) error {
+	clean := relClean(rel)
+	if trackedAt(tree, clean) || !gitIgnored(repoDir, clean) {
+		return nil
+	}
+	return &plan.RefusalError{Msg: fmt.Sprintf(
+		"refusing: %s is not tracked at %s and this repository's ignore rules match it, so `git add %s` refuses it and no re-run can ever make it the CODEOWNERS GitHub reads — the change would be proven against bytes no commit can hold. Drop the ignore rule (or `git add -f %s`) and re-run, or point --file at a path this repository can track — nothing was written",
+		clean, ref, clean, clean)}
+}
+
+// gitIgnored reports whether git's ignore rules match rel in this checkout.
+// `check-ignore -q` exits 0 for an ignored path and 1 for one that is not, and
+// consults the index, so a tracked file never reads as ignored. Any other
+// failure answers "not ignored": this is a refusal's evidence, and refusing on
+// a lookup that never happened would stop runs the tool has nothing against.
+func gitIgnored(repoDir, rel string) bool {
+	cmd := exec.Command("git", "-C", repoDir, "check-ignore", "-q", "--", rel)
+	cmd.Stdout, cmd.Stderr = io.Discard, io.Discard
+	return cmd.Run() == nil
+}
+
+// refuseWorkTreeSupersede refuses a run whose discovered CODEOWNERS is already
+// being replaced: the tracked file governs today, and a higher-precedence one
+// is sitting in the working tree.
+//
+// Mid-migration from root `CODEOWNERS` to `.github/CODEOWNERS`, with the new
+// file staged and not yet committed, discovery saw only the ref — governing()'s
+// working-tree fallback fires only when the TREE has zero CODEOWNERS — so
+// `sync` amended the OUTGOING file, reported `applied (proven: tree)` at exit
+// 0, and put that path in `codeowners_path` for the fleet loop to stage. Under
+// S-8 the edit is dead the moment the migration commit lands.
+//
+// Neither file can be edited soundly: the tracked one governs a state that is
+// ending, and the staged one governs nothing yet, so a proof against either is
+// a proof about ownership that is not the repository's. Refusal over a warning,
+// matching the tool's posture for a write that is dead on arrival — and --file
+// is the escape hatch for an operator who knows which half of the migration
+// they are in.
+//
+// Only on the DISCOVERY path: with --file the operator named the file, and
+// naming it is precisely the decision this refusal asks for.
+//
+// Exit 2, not 3: which files a clone has staged is a fact about THIS
+// repository, so the fleet loop records it and steps to the next.
+func (r *syncRun) refuseWorkTreeSupersede(tree []string) error {
+	if r.filePath != "" {
+		return nil
+	}
+	present := gittree.FindCodeownersPaths(tree)
+	if len(present) == 0 {
+		return nil
+	}
+	onDisk := r.findOnDisk()
+	if !outranksCodeowners(onDisk, present[0]) {
+		return nil
+	}
+	// A file git is told never to track can never supersede anything, so it is
+	// not a migration — it is a stray. findOnDisk is a bare os.Stat walk and
+	// honours no ignore rules, while audit's half of this check runs over
+	// `ls-files --exclude-standard`; without this the two disagreed about one
+	// repository, and the refusal's own advice ("commit the migration first")
+	// was something `git add` declines.
+	if gitIgnored(r.repoArg, onDisk) {
+		return nil
+	}
+	return &plan.RefusalError{Msg: fmt.Sprintf(
+		"refusing: this repository is governed by %s at %s, but %s is in the working tree and outranks it — GitHub loads only the first of .github/ > root > docs/ (S-8), so an edit to %s stops applying the moment %s is committed, while %s governs nothing until then. Commit the migration first, or pass --file to say which of the two this run should edit — nothing was written",
+		present[0], r.branch, onDisk, present[0], onDisk, onDisk)}
+}
+
+// unmergedStatus reports whether a `git status --porcelain` code marks a path
+// as unmerged: either side U, both added, or both deleted (git-status(1)).
+func unmergedStatus(code string) bool {
+	switch code {
+	case "DD", "AU", "UD", "UA", "DU", "AA", "UU":
+		return true
+	}
+	return false
 }
 
 // headLabel names what HEAD actually is — "main (f800559)" rather than a bare
@@ -677,14 +928,24 @@ func headLabel(repoDir, head string) string {
 
 // gitLine runs a git command that answers with a single line.
 func gitLine(repoDir string, args ...string) (string, error) {
+	out, err := gitBytes(repoDir, args...)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+// gitBytes runs a git command whose output is read verbatim — NUL-separated
+// records, where trimming would eat the separator the parse depends on.
+func gitBytes(repoDir string, args ...string) ([]byte, error) {
 	cmd := exec.Command("git", append([]string{"-C", repoDir}, args...)...)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
 	if err != nil {
-		return "", fmt.Errorf("git %s: %v: %s", strings.Join(args, " "), err, strings.TrimSpace(stderr.String()))
+		return nil, fmt.Errorf("git %s: %v: %s", strings.Join(args, " "), err, strings.TrimSpace(stderr.String()))
 	}
-	return strings.TrimSpace(string(out)), nil
+	return out, nil
 }
 
 // sameDir reports whether two paths name one directory, symlinks resolved.
@@ -719,7 +980,8 @@ func resolveDir(p string) (string, error) {
 // because --create is off by default; an I/O failure is one it never got to read.
 // A file tracked in the ref but absent from the working tree is the first kind:
 // the repository was read, the disagreement between the two was noticed, and the
-// tool declined to write over a file it could not read.
+// tool declined to write over a file it could not read. So is a create that
+// would supersede the file this repo is governed by.
 func statusForReadFailure(err error) string {
 	var missing *noCodeownersError
 	if errors.As(err, &missing) {
@@ -727,6 +989,10 @@ func statusForReadFailure(err error) string {
 	}
 	var absent *trackedButAbsentError
 	if errors.As(err, &absent) {
+		return StatusRefused
+	}
+	var superseding *supersedingCreateError
+	if errors.As(err, &superseding) {
 		return StatusRefused
 	}
 	return StatusError
@@ -823,15 +1089,50 @@ type noCodeownersError struct {
 	// Advising it there costs the operator a second and worse failure at the
 	// moment they can least tell a broken policy from an awkward repo.
 	policy bool
+	// file is the --file argument when one was given, and existing the
+	// CODEOWNERS this repository is governed by, "" when it has none.
+	//
+	// Without them the refusal was built from a fixed head and was false three
+	// times over on `sync --file OWNERS` in a repo carrying all three files:
+	// it claimed the repo has no CODEOWNERS, it offered `--create` at
+	// .github/CODEOWNERS when --create would write OWNERS, and it advised
+	// `--file` to somebody who had just passed it. That text is what a fleet's
+	// `--out` record carries, so a `needs-human` pile reading those rows
+	// concluded those repos had no CODEOWNERS at all.
+	file     string
+	existing string
 }
 
 func (e *noCodeownersError) Error() string {
+	if e.file != "" {
+		return e.fileError()
+	}
 	const head = "no CODEOWNERS file found in .github/, root, or docs/ at "
 	if e.policy {
 		return head + e.ref + `; set "create": true in the policy file to write one at .github/CODEOWNERS, or --file to name a path (R-23/R-34)`
 	}
 	return head + e.ref +
 		"; re-run with --create to write one at .github/CODEOWNERS, or --file to name a path (R-23)"
+}
+
+// fileError is the same refusal about the path --file actually named: the
+// create remedy points at that path, because that is where --create would
+// write, and the alternative offered is the one the operator does not already
+// have — amend the governing file, when there is one.
+func (e *noCodeownersError) fileError() string {
+	rel := relClean(e.file)
+	create := fmt.Sprintf("re-run with --create to write one at %s", rel)
+	tag := "(R-23)"
+	if e.policy {
+		create = fmt.Sprintf(`set "create": true in the policy file to write one at %s`, rel)
+		tag = "(R-23/R-34)"
+	}
+	head := fmt.Sprintf("no CODEOWNERS at %s, the path --file names: it is not tracked at %s and not in the working tree", rel, e.ref)
+	if e.existing != "" {
+		return fmt.Sprintf("%s, while this repository IS governed by %s — drop --file to amend that file, or %s %s", head, e.existing, create, tag)
+	}
+	return fmt.Sprintf("%s, and this repository has none at %s either — %s %s",
+		head, strings.Join(gittree.CodeownersLocations, ", "), create, tag)
 }
 
 // governing finds the CODEOWNERS this run edits and reads its current bytes.
@@ -853,11 +1154,9 @@ func (r *syncRun) governing(tree []string) (rel string, content []byte, creating
 	case r.filePath != "":
 		rel = r.filePath
 	default:
-		if all := gittree.FindCodeownersPaths(tree); len(all) > 0 {
-			rel = all[0]
-		} else if onDisk := r.findOnDisk(); onDisk != "" {
-			rel = onDisk
-		} else {
+		rel = r.existingGoverning(tree)
+		if rel == "" {
+			// Nothing governs yet, so --create writes where GitHub looks first.
 			rel = gittree.CodeownersLocations[0]
 		}
 	}
@@ -878,12 +1177,67 @@ func (r *syncRun) governing(tree []string) (rel string, content []byte, creating
 		_, lstatErr := os.Lstat(filepath.Join(r.repoArg, filepath.FromSlash(rel)))
 		return "", nil, false, &trackedButAbsentError{rel: rel, ref: r.branch, dangling: lstatErr == nil}
 	case !r.create:
-		return "", nil, false, &noCodeownersError{ref: r.branch, policy: r.policy != nil}
+		miss := &noCodeownersError{ref: r.branch, policy: r.policy != nil}
+		if r.filePath != "" {
+			// The head sentence ("no CODEOWNERS file found in .github/, root,
+			// or docs/") is a claim about DISCOVERY, and discovery did not
+			// run: --file named the path, and the repo may well have all
+			// three files.
+			miss.file, miss.existing = r.filePath, r.existingGoverning(tree)
+		}
+		return "", nil, false, miss
 	default:
+		// Creating from nothing is only true when nothing governs yet. A
+		// higher-precedence location is not nothing: see supersedingCreateError.
+		if existing := r.existingGoverning(tree); existing != "" && outranksCodeowners(rel, existing) {
+			return "", nil, false, &supersedingCreateError{rel: rel, existing: existing}
+		}
 		// Creating from nothing: the "before" state is an empty file, which is
 		// what INV-2 is proven against.
 		return rel, nil, true, nil
 	}
+}
+
+// existingGoverning is the CODEOWNERS this repo resolves from today, or "" if
+// it has none: the ref's tree first, then the working tree (D5). One copy of
+// that order, because discovery and the superseding-create guard below have to
+// agree on which file governs — two spellings of it drift the day D5 changes.
+func (r *syncRun) existingGoverning(tree []string) string {
+	if present := gittree.FindCodeownersPaths(tree); len(present) > 0 {
+		return present[0]
+	}
+	return r.findOnDisk()
+}
+
+// supersedingCreateError is `--create` at a location that OUTRANKS the
+// CODEOWNERS this repo already has.
+//
+// The old file is left untouched, which satisfies "create never overwrites",
+// and under S-8 it is also never read again: `--file .github/CODEOWNERS
+// --create` on a repo governed by docs/CODEOWNERS made one op's worth of rules
+// the entire repository's ownership. It reported `applied (proven: tree)`,
+// exit 0, because both invariants were proven against the empty bytes of a
+// file that governs everything the moment it exists — services/api/main.go
+// lost @org/api-team (INV-2) and /docs/ lost @org/everyone (INV-1), and the
+// tool's own `verify` calls the same change INVARIANT VIOLATED.
+//
+// Discovery cannot reach this: it selects the governing file, so `creating` is
+// never true where one exists. `--file` names the path directly, which is why
+// the guard belongs here rather than in the discovery branch (R-34d).
+//
+// Exit 2, not 3: which location this clone keeps its CODEOWNERS at is a fact
+// about THIS repository, so the fleet loop records it and steps to the next.
+type supersedingCreateError struct {
+	rel      string
+	existing string
+}
+
+func (e *supersedingCreateError) Error() string {
+	// relClean so the refusal names the file GitHub would load, not the
+	// operator's spelling of it: `--file .github//CODEOWNERS` read as
+	// "creating .github//CODEOWNERS", a path that appears nowhere else.
+	return fmt.Sprintf("refusing: this repository is governed by %s, and creating %s would supersede it — GitHub loads only the first of .github/ > root > docs/ (S-8), so every rule in %s would stop applying and this run's ops would become the repository's entire ownership. Drop --file to amend it where it is, or move it in its own commit first",
+		e.existing, relClean(e.rel), e.existing)
 }
 
 // governingWarnings reports what is wrong with the FILE this run is about to
@@ -892,8 +1246,30 @@ func (r *syncRun) governing(tree []string) (rel string, content []byte, creating
 // Every condition below exits 0 and reports "applied" — none is a reason to
 // refuse an otherwise correct edit — and every one of them is invisible at
 // fleet scale unless the run that touched the file says so.
-func governingWarnings(tree []string, rel string, content []byte) []string {
+func governingWarnings(tree []string, ref, rel string, creating bool, content []byte) []string {
 	var out []string
+	// A file git has never recorded. sync's D5 fallback searches the WORKING
+	// TREE when the ref has no CODEOWNERS, so a template a provisioning script
+	// dropped in, or a half-finished manual edit, became the baseline INV-1 and
+	// INV-2 were proven against — while `plan`, `snapshot` and `audit` all exit
+	// 3 on the same repository at the same moment, because GitHub reads no
+	// CODEOWNERS from it. The run reported `applied (proven: tree)`, exit 0,
+	// and R-23's --create gate was never consulted.
+	//
+	// A warning rather than a refusal, and D5's rationale is the reason: a
+	// nightly job that created the file in pass 1 has to converge in pass 2,
+	// and refusing every uncommitted file would make that impossible. What was
+	// missing is the disclosure — the case where the operator has to commit
+	// something before any of this reaches GitHub. The one shape no re-run can
+	// fix is refused instead: see refuseIgnoredCodeowners.
+	//
+	// Skipped while CREATING: the file does not exist anywhere yet, "not
+	// tracked" is not news about it, and the record already says created.
+	if !creating && !trackedAt(tree, rel) {
+		out = append(out, fmt.Sprintf(
+			"%s is not tracked at %s — git does not record it at that ref, so GitHub reads nothing from it today and the before-state this run proved against is one GitHub has never seen; commit the file for this change to take effect",
+			relClean(rel), ref))
+	}
 	// Independent facts, deliberately not an either/or: a repo can be in both,
 	// and that is the one where the operator most needs both halves.
 	// A path GitHub never loads. The tree check below cannot catch this on a
@@ -932,14 +1308,26 @@ func governingWarnings(tree []string, rel string, content []byte) []string {
 // trackedAt: `./.github/CODEOWNERS` governs exactly what `.github/CODEOWNERS`
 // governs, and classifying the raw string drew the false "governs nothing"
 // warning for an alternate spelling of a governing file.
-func isCodeownersLocation(rel string) bool {
+func isCodeownersLocation(rel string) bool { return codeownersRank(rel) >= 0 }
+
+// codeownersRank is a path's position in GitHub's search order, or -1 for a
+// path GitHub never loads (S-8). Cleaned before comparison, like trackedAt.
+func codeownersRank(rel string) int {
 	clean := relClean(rel)
-	for _, loc := range gittree.CodeownersLocations {
+	for i, loc := range gittree.CodeownersLocations {
 		if clean == loc {
-			return true
+			return i
 		}
 	}
-	return false
+	return -1
+}
+
+// outranksCodeowners reports whether a file at rel would take precedence over
+// one at other, i.e. whether writing rel demotes other to a file GitHub never
+// reads. A path outside the three locations outranks nothing.
+func outranksCodeowners(rel, other string) bool {
+	r, o := codeownersRank(rel), codeownersRank(other)
+	return r >= 0 && o >= 0 && r < o
 }
 
 // withGoverningFile appends the CODEOWNERS a refusal was about. A refused

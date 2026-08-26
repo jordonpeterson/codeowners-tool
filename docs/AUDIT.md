@@ -16,14 +16,39 @@ remains the system's single writer path.
 | A-2 | Owner exists but isn't in the org | yes | proposes `remove_owner` |
 | A-3 | Owner lacks **explicit write access** (org membership isn't enough) | yes | proposes `remove_owner` |
 | A-4 | Rule matches zero tracked files | no | report only by default — a dead pattern may be deliberate intent; deleted only by `--lint --remove-stale-paths` |
-| A-5 | Rule dead **only because of case** (`/Src/` vs `src/`) | no | suggests corrected pattern |
+| A-5 | Rule dead **only by an invisible spelling difference** — case (`/Src/` vs `src/`, S-6) or Unicode normalization (NFC `é` vs NFD `é`) | no | suggests corrected pattern |
 | A-6 | Rule fully shadowed by later rules | no | report only |
 | A-7 | Duplicate pattern | no | report only |
 | A-8 | Syntax errors | optional | no |
 | A-9 | Unowned path coverage | no | n/a |
-| A-10 | Multiple CODEOWNERS files present | no | error — GitHub uses only the first |
+| A-10 | A CODEOWNERS file GitHub does not load, or is about to stop loading the one it does | no | error for a second **root-level** file, a **symlinked** governing one, or an uncommitted **higher-precedence** one; warning for a **nested** one |
 | A-11 | CODEOWNERS file itself unowned | no | report only |
 | A-12 | File size approaching 3 MB | no | n/a |
+
+**A-10's four shapes.** A second *root-level* file and a *symlinked* governing file are
+`error`: what governs is wrong or absent, and with a symlink GitHub loads no rules at all,
+so the rest of the report is suppressed — `cat-file` returns the link target, not a
+document. A *nested* `packages/foo/CODEOWNERS` is `warning`: GitHub never searches it, so
+what governs is not in doubt, and it is often a deliberate leftover another tool consumes.
+Under `--checks` without `a10`, a symlinked file is exit 5, never a clean run.
+
+The fourth is *mid-migration*: a higher-precedence CODEOWNERS sitting in the working tree,
+uncommitted — `.github/CODEOWNERS` staged in a repo still governed by root `CODEOWNERS`.
+`error`, because every rule in the file this report describes stops applying the moment
+that commit lands. It is the one thing `audit` reads off disk, and it changes nothing else:
+ownership still resolves against `--branch`, because that is what GitHub sees. Reported
+only when `--branch` is the commit this clone is standing on — on any other ref the files
+on disk belong to a different tree — and ignored files never count.
+
+**A-5 and normalization.** NFC and NFD spellings of an accented name render identically and
+CODEOWNERS matches bytes, so the pattern is dead with nothing on screen to show why. The
+comparison is a partial NFD over Latin-1 accented letters — not a full Unicode
+normalization, and the finding says so — and it prints the codepoints of both spellings.
+A different accent (`é` vs `è`) is a different name and stays A-4.
+
+**A-6 is disclosed by the run that causes it.** Where an inserted line leaves a
+pre-existing narrower rule unable to win any path, `plan`/`sync` warn and name it, so the
+run that authors the finding is not the one run silent about it.
 
 Run a subset with `--checks a1,a3,a6` (`a4`, `A4`, `a-4` and `A-4` are all accepted; an
 unrecognized name is a hard error, because silently matching nothing would make audits
@@ -37,7 +62,7 @@ setting; the flag decides which of them make the run exit 4.
 |---|---|
 | `any` *(default)* | any severity — the behavior this flag was added under |
 | `warning` | `warning` or `error`; `info` reports only — A-9 unowned-path coverage, and A-1's `unverifiable` email owners (R-13) |
-| `error` | `error` only — A-1, A-3, A-8, A-10, and A-12 over the cliff |
+| `error` | `error` only — A-1, A-3, A-8, A-10 (root-level or symlinked), and A-12 over the cliff |
 | `never` | never; findings are reported and the run exits 0 |
 
 The case it exists for: a fleet baseline uses `on_zero_match: declare`, a declared rule
@@ -105,10 +130,12 @@ token: a secret team returns the same 404 as a deleted one, and only an owner se
 teams. Email owners are `unverifiable`, never dead (R-13), and never make a run
 inconclusive.
 
-**Repository guards**, both exit 2: `--branch` must be the ref the clone has checked out
-(lifted by `--dry-run`), and `--repo` must be the repository root (not lifted). Both exist
-because lint proves against a tree and writes a file, and those are only the same document
-when the two agree.
+**Repository guards**, all exit 2: `--branch` must be the ref the clone has checked out
+(lifted by `--dry-run`), `--repo` must be the repository root (not lifted), and the
+governing CODEOWNERS must not be left unmerged by a conflict — a rule judged against both
+sides of a merge at once is judged against text no commit has ever had. They exist because
+lint proves against a tree and writes a file, and those are only the same document when
+the two agree.
 
 | Exit | When |
 |---|---|

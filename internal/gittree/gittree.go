@@ -77,6 +77,34 @@ func ListWorkTree(repoDir string) ([]string, error) {
 	return paths, nil
 }
 
+// EntryMode returns the mode git records for path at ref — "160000" for a
+// submodule gitlink, "120000" for a symlink's link blob, "100644"/"100755" for
+// an ordinary file, "040000" for a directory — or "" when ref's tree has no
+// entry at exactly that path.
+//
+// ListTracked's --name-only output cannot tell those apart, and a refusal that
+// guesses is worse than one that does not: "`.github` is a submodule" printed
+// over a stale link sends the operator hunting a submodule the repo does not
+// have. Only the refusal paths pay for this call.
+//
+// --end-of-options is unusable on ls-tree (see ValidateRef), so the ref is
+// validated instead and the path passed after `--`.
+func EntryMode(repoDir, ref, path string) (string, error) {
+	if err := ValidateRef(ref); err != nil {
+		return "", err
+	}
+	out, err := gitOutput(repoDir, "ls-tree", "-z", ref, "--", path)
+	if err != nil {
+		return "", err
+	}
+	first := bytes.SplitN(out, []byte{0}, 2)[0]
+	mode, _, found := strings.Cut(string(first), " ")
+	if !found {
+		return "", nil
+	}
+	return mode, nil
+}
+
 // ReadFileAtRef reads a file's content from a ref without touching the working
 // tree. cat-file has no separator to lose, so --end-of-options is safe here.
 func ReadFileAtRef(repoDir, ref, path string) ([]byte, error) {
@@ -138,4 +166,33 @@ func gitOutput(repoDir string, args ...string) ([]byte, error) {
 		return nil, fmt.Errorf("git %s: %v: %s", strings.Join(args, " "), err, msg)
 	}
 	return out, nil
+}
+
+// FindNestedCodeownersPaths returns every tracked file named CODEOWNERS that is
+// NOT one of the three locations S-8 names — `packages/foo/.github/CODEOWNERS`,
+// `services/api/CODEOWNERS`. GitHub searches only the repository root's
+// `.github/`, root and `docs/`, so it loads none of them.
+//
+// Deliberately a SEPARATE list from FindCodeownersPaths: that one is a
+// precedence order whose first entry GOVERNS, and a nested file must never
+// enter it — it would be adopted as the governing file in any repo that has no
+// root-level one, and every verb would then read, prove and rewrite a document
+// GitHub does not consult.
+//
+// The name is matched exactly. `OWNERS`, `CODEOWNERS.bak` and `codeowners` are
+// other tools' files or backups; calling them ownership rot would report a
+// finding on the monorepos this check exists to help.
+func FindNestedCodeownersPaths(tree []string) []string {
+	root := make(map[string]bool, len(CodeownersLocations))
+	for _, loc := range CodeownersLocations {
+		root[loc] = true
+	}
+	var found []string
+	for _, p := range tree {
+		if !root[p] && strings.HasSuffix(p, "/CODEOWNERS") {
+			found = append(found, p)
+		}
+	}
+	sort.Strings(found)
+	return found
 }

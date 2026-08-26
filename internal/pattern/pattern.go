@@ -47,6 +47,9 @@ func Compile(patternStr string) (*Pattern, error) {
 	if strings.HasPrefix(patternStr, `\#`) {
 		return nil, fmt.Errorf(`pattern %q needs a \# escape GitHub does not honor (S-2/S-6): a line starting with '#' is always a comment there`, patternStr)
 	}
+	if patternStr[0] == '#' {
+		return nil, fmt.Errorf(`pattern %q starts with '#': the line written for it reads back as a comment, not as a rule for that pattern (S-2/S-6) — the same standard as `+"`!`"+` and `+"`\\#`"+`, the rule would be dead there and a mutation tool must never accept or emit one`, patternStr)
+	}
 	p := &Pattern{raw: patternStr}
 	if !strings.ContainsAny(patternStr, "*?\\") && patternStr[0] == '/' {
 		p.leftAnchoredLiteral = true

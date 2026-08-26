@@ -277,6 +277,17 @@ a bare line deletion.
 > deleting the guard. The positive cases fail today with the R-8 refusal
 > quoted in TestR22b_ExactTrackedFileAgainstADeclareApplies.
 
+**`docexamples_test.go`**
+
+> The documented console blocks, executed. Each test below rebuilds the repo a
+> doc page describes, runs the command it prints, and compares against the
+> output the page claims — so a doc that has drifted from the tool fails here
+> rather than in a reader's terminal.
+>
+> Every test is a FAILING repro of a confirmed drift, written first per
+> CONTRIBUTING.md. Where the doc is the wrong half, the doc comment says so:
+> these pin the mismatch, not a preferred side.
+
 **`except_roundtrip_test.go`**
 
 > R-37's round trip, end to end: the `except` array is validated, applied and
@@ -318,6 +329,29 @@ a bare line deletion.
 > and the escaped-scope subtest of TestR26_EscapedSpaceIsNotAnExceptDelimiter):
 > they freeze current behavior the spec promises to preserve, rather than
 > specify new behavior. Everything else fails until the feature lands.
+
+**`fixes_cli_test.go`**
+
+> Neighbours of the seven CLI fixes in this change: the cases each fix must
+> NOT sweep up. Every test here passes before the fix as well as after — that
+> is the point. What each one holds is written above it, together with the
+> mutation of the product code that makes it fail, because a guard nobody has
+> broken on purpose is a guard nobody knows works.
+
+**`fixes_ops_test.go`**
+
+> Neighbours of the four op/pattern fixes: the cases each fix must NOT take
+> with it, end to end through the CLI.
+
+**`fixes_parse_internal_test.go`**
+
+> Package cli internal test: the `git status --porcelain -z` record parser,
+> which no end-to-end test can reach in its interesting cases.
+>
+> The pathspec the caller passes filters out both malformed shapes before the
+> parser sees them, so an e2e assertion about them passes whether the parser
+> is right or wrong — the vacuous pass CONTRIBUTING singles out. Testing the
+> function directly is the only honest way to pin it.
 
 **`fleet_idempotence_test.go`**
 
@@ -504,6 +538,18 @@ a bare line deletion.
 > reworded refusal in internal/lint would silently stop matching and hand the
 > operator back the illegal advice with nothing failing. Pinning the flag-mode
 > bytes is what turns that drift into a red test.
+
+**`opsemantics_bugs_test.go`**
+
+> Findings in the op/pattern layer: rules the tool writes or refuses where the
+> outcome, or the explanation for it, does not survive contact with a real
+> tree. Nothing here is a matcher bug — 300k differential cases against the
+> vendored oracle and 1.2M Contains pairs came back clean, and no INV-2
+> violation got past the prover for a tracked path. These are the edges around
+> it.
+>
+> Each test is a FAILING repro of a confirmed defect, written first per
+> CONTRIBUTING.md.
 
 **`ownerarray_test.go`**
 
@@ -772,6 +818,17 @@ a bare line deletion.
 
 > ---------- R-36e: every command validates the whole file ----------
 
+**`precedence_bugs_test.go`**
+
+> Findings about WHICH CODEOWNERS file a run governs, in repositories that
+> have more than one — or one somewhere other than where discovery looks.
+> S-8 gives GitHub's order (.github/ > root > docs/, first found wins, never
+> merged), and every test here is a case where the tool and that order come
+> apart while the run reports success.
+>
+> Each test is a FAILING repro of a confirmed defect, written first per
+> CONTRIBUTING.md.
+
 **`prerelease_bugs_test.go`**
 
 > Regression guards from the pre-release review: each test began life as a
@@ -784,6 +841,17 @@ a bare line deletion.
 > the KnownBug test that motivated the fix does not — the same behavior on the
 > verbs the bug report only implied, and the neighboring cases the fix must
 > NOT have broken.
+
+**`repostate_bugs_test.go`**
+
+> Findings about the STATE of the checkout a run is pointed at — a CODEOWNERS
+> location occupied by a submodule, a file left unmerged by a conflict, a
+> migration staged but not committed, a symlink the reporting verbs do not
+> recognize. In each case the tool's model of the repository and git's differ,
+> and the run reports success or "clean" anyway.
+>
+> Each test is a FAILING repro of a confirmed defect, written first per
+> CONTRIBUTING.md.
 
 **`rollout_test.go`**
 
@@ -825,6 +893,17 @@ a bare line deletion.
 > document. Like those, they assert the key SET, never the key ORDER —
 > encoding/json emits fields in declaration order, but that ordering is not
 > part of the contract and pinning it would fail on a harmless reshuffle.
+
+**`structural_bugs_test.go`**
+
+> Bug-hunt findings from a review aimed at complex repository structures:
+> monorepos, repos whose CODEOWNERS is not where the tool assumes, trees
+> carrying bytes Go's JSON encoder cannot represent, and fleet scripts that
+> pair the wrong two files.
+>
+> Each test below is a FAILING repro of a confirmed defect, written first per
+> CONTRIBUTING.md. The doc comment on each states the finding, what the tool
+> does today, and which existing guarantee or sibling guard it contradicts.
 
 **`token_redaction_test.go`**
 
@@ -1111,11 +1190,88 @@ SPEC R-17: exit 1 no-op, exit 3 invalid input.
 Review finding: a typo'd --scope must be a loud exit-3 error, not silently
 dropped (which turned every change into an inexplicable violation).
 
+### `TestFix_AnIgnoredSupersedingCodeownersIsNotAMigration`
+
+SPEC R-24 (S-8): a superseding CODEOWNERS that git is told never to track is
+not a migration, so it does not refuse the run — and `sync` and `audit` agree
+about that.
+
+Review finding. `stagedHigherCodeowners` reads the work tree through
+`ls-files --exclude-standard` and its comment states the rule outright: a
+file git will never track can never supersede anything. `findOnDisk`, which
+the sync half used, is a bare os.Stat walk that honours no ignore rules. So
+a repo governed by a tracked docs/CODEOWNERS, with an IGNORED root
+CODEOWNERS on disk, was refused at exit 2 — banked by a fleet loop as
+needs-human — while `audit` on the same repo said clean and `plan` exited 0.
+The refusal even advised committing the migration, which `git add` declines
+for an ignored path.
+
+### `TestFix_ApplyAcceptsAnotherNameForTheSameCommit`
+
+SPEC S-7: the branch guard compares RESOLVED COMMITS, not ref names, so a
+second name for the commit the clone is on still applies.
+
+checkBranchIsWritable's contract has always been the commit, and `apply`
+is now a third verb relying on it — but nothing pinned it: adding a
+name-equality requirement passed the entire suite while breaking every
+alias and tag. An `apply` that refused a plan naming `release` while the
+clone sat on `main` at the same commit would fail a rollout over a
+difference no tree reflects.
+
 ### `TestFix_ApplyBelowRepoRootRefused`
 
 The repo-root guard reaches `apply` too: --repo can point the apply at a
 different clone than the plan's, and pointed below the root the joined
 codeowners_path names a file GitHub never reads (checkRepoRoot).
+
+### `TestFix_ApplyNamesThePlansOwnPathNotAFixedOne`
+
+apply's success line names the plan's own repo-relative path, whatever that
+path is and wherever the command is run from. `.github/CODEOWNERS` is the
+common case and would also match a hardcoded string, so this uses a repo
+governed by docs/CODEOWNERS and additionally requires the absolute repo path
+to be absent.
+
+MUTATION: print `target` (the absolute join) again and this fails on the
+absolute-path clause; hardcode ".github/CODEOWNERS" and it fails on the
+first.
+
+### `TestFix_ApplyRefusesAPlanFromARefThisCloneIsNotOn`
+
+The submodule finding, still live through the one verb that had no guard:
+`apply` writes the WORKING TREE but validates only the tree at the plan's
+ref, and never checks the clone is standing on it. With `.github` a real
+directory on `main` and a submodule mount on `subm`, a plan made
+`--branch main` from a clone on `subm` is internally consistent — main's
+tree holds `.github/CODEOWNERS`, so nothing is a non-tree ancestor there,
+and the tree digest still matches at apply time because main never changed
+— while the bytes it planned against, and the file it writes, are the
+SUBMODULE's.
+
+sync and lint both refuse this shape (S-7, checkBranchIsWritable) and sync's
+refusal points the operator at `plan`, so the tool routed people into the
+unguarded path. The defect is wider than submodules: any ref whose tree
+differs from the checkout lands a change justified by a tree nobody wrote to.
+
+### `TestFix_ApplyRefusesAPlanWhoseRefIsGoneWithoutGitPlumbing`
+
+SPEC S-7: a plan whose ref no longer resolves is refused in words, not in
+git plumbing.
+
+The branch was deleted or renamed since the plan was written — a fact about
+THIS clone, so exit 2 like the mismatch it sits beside. Before this, the
+error was `git rev-parse --verify --end-of-options release^{commit}: exit
+status 128: fatal: Needed a single revision`, which names a command nobody
+ran and a flag this tool passes on the operator's behalf.
+
+### `TestFix_ApplyRefusesAnUnmergedCodeowners`
+
+`apply` carries the guard too, because its integrity checks cannot reach
+this: `git checkout --ours .github/CODEOWNERS` leaves the file UNMERGED with
+exactly the bytes the plan was computed from, so sha256_before matches and
+the tracked tree at HEAD never moved. Pre-guard, apply wrote at exit 0 and
+the operator's `git add` would then have resolved somebody's merge with
+content the tool synthesized against one side of it.
 
 ### `TestFix_ApplyRefusesSymlinkedCodeowners`
 
@@ -1134,6 +1290,17 @@ existing guard pins.
 The pure-JSON fix must not have taken the human verdict with it: under the
 default text format a clean audit still says so on stdout.
 
+### `TestFix_AuditDoesNotReadTheWorkTreeAgainstAnotherRef`
+
+audit reads the ref, and the working tree belongs to HEAD. Auditing a ref
+this clone is not standing on must not report files on disk against it —
+those files are a different commit's, and the finding would be an assertion
+about a tree nobody looked at.
+
+MUTATION: make refIsCheckedOut return true unconditionally and this fails —
+.github/CODEOWNERS, committed on main and absent from `release`, is reported
+as staged against release.
+
 ### `TestFix_AuditJSONWithFindingsIsPureJSON`
 
 `audit --format json` stdout is one JSON document in the findings case too,
@@ -1145,6 +1312,52 @@ R-25's refusal names only the ops that would have APPLIED: an op whose rule
 was already satisfied changed zero paths, so naming it sent the operator
 narrowing an op that was never behind the number.
 
+### `TestFix_ConflictInAnotherFileDoesNotBlockACodeownersEdit`
+
+A conflict in some OTHER file must not block a CODEOWNERS edit. The bytes
+the invariants are proven against are this file's, and the tree they are
+resolved against is the ref's — an unmerged main.go changes neither. Blocking
+it would refuse exactly when someone is reconciling a merge, which is when
+ownership most often needs a line.
+
+### `TestFix_CreateAtRootOverDocsIsRefused`
+
+SPEC R-23 (S-8): the superseding-create refusal is about PRECEDENCE, not
+about .github/ — `--file CODEOWNERS --create` over a docs/-governed repo is
+refused on the same rule.
+
+Root outranks docs/ exactly as .github/ does, so a guard narrowed to the
+one location the finding happened to use would leave this spelling writing
+a file that silently takes the whole repository's ownership.
+
+### `TestFix_CreateBelowTheGoverningFileStillWrites`
+
+SPEC R-23/R-24 (S-8): `--create` at a location BELOW the one this repo is
+governed from still writes, and still says the rules govern nothing.
+
+The direction that is refused (superseding the governing file) and the one
+that is allowed differ only in which way the precedence runs, so a guard
+written as "--file plus an existing CODEOWNERS" would take this case with
+it. Nothing is lost by writing here — .github/CODEOWNERS keeps governing —
+and the R-24 warning is what tells the operator that.
+
+### `TestFix_CreateDoesNotWarnAboutTheFileItIsCreating`
+
+`--create` writes a file that is untracked by definition, and saying so is
+noise: the record already reports `created`, and there is no earlier state
+to have committed.
+
+MUTATION: drop the `!creating` guard in governingWarnings and this fails.
+
+### `TestFix_CreateIntoASubmoduleIsRefused`
+
+`--create` reaches the submodule by a different route than discovery does:
+the mount holds no CODEOWNERS at all, so D5 finds nothing on disk and the
+default location is chosen from scratch. Creating there puts a brand new
+file inside the submodule's checkout — a path the parent cannot stage —
+and reports created:true at exit 0. The refusal must fire before the file
+exists, since --create never overwrites and so would never fix it up.
+
 ### `TestFix_DetachedHeadLabelIsBareSHA`
 
 headLabel's contract: on a detached HEAD the label is the bare abbreviated
@@ -1152,12 +1365,85 @@ SHA — the honest answer, since there is no branch name to offer. Before the
 fix the echoed `--end-of-options` line meant the name never equalled "HEAD"
 and the detached path could not fire.
 
+### `TestFix_DirtyButMergedWorkingTreeStillSyncs`
+
+The neighbour the guard must not take with it: an ordinary DIRTY working
+tree. Uncommitted edits to CODEOWNERS are the normal state of a repo the
+tool has just written to — a second `sync` in the same fleet pass sees them
+— and nothing about them is ambiguous, so the run proceeds.
+
+### `TestFix_DryRunDoesNotLiftTheUnmergedGuard`
+
+SPEC R-23: --dry-run does NOT lift the unmerged guard, unlike the S-7 branch
+guard it sits beside.
+
+There the bytes are real and only the ref is wrong, so a preview is honest.
+Here the preview would report ownership derived from text that is no version
+of the file, which is the defect itself rather than a safe rehearsal of it.
+
 ### `TestFix_FileFlagSpellingsClassifyByCleanPath`
 
 The other uncleaned spellings of a governing location: `.github//CODEOWNERS`
 and `docs/../CODEOWNERS` name the S-8 files they clean to, so neither draws
 the "governs nothing" warning — while a path that genuinely is not an S-8
 location still does.
+
+### `TestFix_FileInsideASubmoduleIsRefused`
+
+`--file` names the path directly, so discovery is bypassed entirely — the
+same dead-on-arrival write with the operator's spelling on it.
+
+### `TestFix_FileNamesWhichHalfOfAMigrationToEdit`
+
+--file is the migration guard's escape hatch, and it has to actually open.
+The refusal's own advice is "pass --file to say which of the two this run
+should edit", so a --file run that still refused would be advice into a
+wall.
+
+MUTATION: drop the `r.filePath != ""` early return in
+refuseWorkTreeSupersede and this fails at exit 2.
+
+### `TestFix_FileNamingATrackedCodeownersStillReads`
+
+--file naming a path the ref DOES carry is the ordinary use of the flag and
+must keep working: the new refusal is about absence from the ref, not about
+the flag.
+
+MUTATION: invert the trackedAt test in codeownersAtRef and this fails at
+exit 3 for both verbs.
+
+### `TestFix_FileNotInRefKeepsItsExitClass`
+
+The missing-target refusal stays in the exit class its sibling is in.
+locate's "no CODEOWNERS file found … use --file to specify one" is exit 3 on
+these two verbs, and splitting one "which file does this ref carry?"
+question across two exit classes costs a script more than either class does.
+
+MUTATION: return a plan.RefusalError from codeownersAtRef and this fails at
+exit 2.
+
+### `TestFix_IgnoreRulesAboutOtherPathsDoNotRefuseTheRun`
+
+The ignore refusal is about the CODEOWNERS, not about the repository having
+a .gitignore. Refusing on the presence of ignore rules would stop nearly
+every real repository in a fleet.
+
+MUTATION: make refuseIgnoredCodeowners fire whenever `.gitignore` exists
+(rather than when check-ignore matches rel) and this fails at exit 2.
+
+### `TestFix_LintRefusesACodeownersInsideASubmodule`
+
+lint writes the same file the other verbs do, so it refuses the same shape —
+and offline, before the token is used, like its symlink sibling above.
+
+### `TestFix_LintRefusesCacheTTLWithTheDocumentedReason`
+
+The other half of what AUDIT.md documents as rejected: `--cache-ttl` is a
+TTL over a disk cache lint does not use, so it governs nothing. It was
+reachable only through `audit --lint` for the same reason --cache-dir was.
+
+MUTATION: remove the cache-ttl flag from lint's flagset and this fails with
+the flag package's `flag provided but not defined: -cache-ttl`.
 
 ### `TestFix_LintRefusesSymlinkedCodeowners`
 
@@ -1169,12 +1455,110 @@ API call — so it is decidable, and tested, offline.
 lint shares the helper, so the parent-directory case refuses there too —
 offline, before any API call, like its final-component sibling above.
 
+### `TestFix_LintWithoutCacheFlagsStillRuns`
+
+Defining --cache-dir on lint's flagset must not make lint act as though it
+were passed. The refusal is conditioned on a non-empty value, and --cache-ttl
+on the flag having been TYPED — its default is 24h, so its value cannot
+answer "did you ask for this?".
+
+MUTATION: refuse whenever the flags are defined (drop the `r.cacheDir != ""`
+and `r.cacheTTLSet` tests) and this fails at exit 3.
+
+### `TestFix_LowerPrecedenceWorkTreeCodeownersIsNotAMigration`
+
+The migration guard is directional. A LOWER-precedence CODEOWNERS in the
+working tree changes nothing when it lands — `.github/CODEOWNERS` still
+wins under S-8 — so neither `sync` nor `audit` has anything to say about it.
+
+MUTATION: drop the outranksCodeowners test in refuseWorkTreeSupersede (and
+in stagedHigherCodeowners), leaving "present on disk and not tracked", and
+both halves of this fail.
+
+### `TestFix_MidRebaseWithoutAConflictStillSyncs`
+
+Mid-rebase is not by itself a refusal: an interrupted rebase with nothing
+unmerged leaves CODEOWNERS exactly as some commit wrote it, which is a state
+the invariants can be proven against. The guard asks git what the FILE is,
+not what the repository is in the middle of.
+
+### `TestFix_MissingFileTargetWithNoGoverningFileClaimsNone`
+
+A missing --file target in a repo that has no CODEOWNERS either must not
+claim a governing file it does not have — the "drop --file to amend that
+file" advice would point at nothing.
+
+The path deliberately does not end in `OWNERS`: every message in this area
+contains the word CODEOWNERS, so asserting on `OWNERS` alone passes without
+the fix and proves nothing.
+
+MUTATION: hardcode the existing-file clause (drop the `e.existing != ""`
+test in fileError) and this fails.
+
+### `TestFix_NoCodeownersAnywhereKeepsItsRefusal`
+
+The discovery-path refusal keeps its original sentence. A repo that really
+has no CODEOWNERS anywhere is the case that head was written for, and every
+fleet script and triage note that greps for it predates this change.
+
+MUTATION: route every noCodeownersError through fileError and this fails.
+
 ### `TestFix_NoRecordNoteCoversEverySyncExit3`
 
 Every sync exit-3 verdict asked for a sink discloses that no record was
 written — not only the two paths the first fix covered. A fleet aggregating
 --out records otherwise loses these repos silently, the exact hazard the
 note exists to disclose.
+
+### `TestFix_PlainCodeownersDirectoryStillSyncs`
+
+The ordinary shape the guard must leave alone: a real `.github` DIRECTORY
+holding a tracked CODEOWNERS. `ls-tree -r` lists no directories, so nothing
+in this tree is an ancestor path of the write target and there is nothing to
+refuse.
+
+The stray `.github/CODEOWNER` (no S) is the near miss that pins the
+component boundary: it is a tracked path and a string prefix of the file
+being written, so a guard comparing prefixes without requiring a `/` after
+them refuses this repo forever with "…: .github/CODEOWNER is a submodule",
+and no other test in the suite notices.
+
+### `TestFix_PlanApplyAndLintAreSilentOnTheGoverningFile`
+
+R-24's disclosure must stay a disclosure. plan, apply and lint pointed at
+the file that DOES govern have nothing to report, and a warning on every
+ordinary run is a warning nobody reads.
+
+MUTATION: drop the `relClean(rel) != present[0]` test in governingWarnings
+and all three clauses fail.
+
+### `TestFix_PlanCarriesTheDisclosureInTheArtifact`
+
+R-24 says the record says so "on stderr and in `warnings`". For `plan` the
+record is the plan file, which is the artifact a human reviews — stderr
+scrolls past in CI and the JSON is what gets attached to the PR.
+
+MUTATION: print the warnings to stderr only, without appending them to
+p.Warnings, and this fails while the target test still passes.
+
+### `TestFix_PlanRefusesACodeownersInsideASubmodule`
+
+`plan` is where the submodule write has to die, because `plan` is what makes
+the artifact: `--file` bypasses discovery, so the verb that refuses nothing
+hands a human a plan whose codeowners_path is inside another repository's
+checkout, and `apply` then writes it. The plan file must not exist
+afterwards — a refused run produces no artifact to approve.
+
+### `TestFix_PolicyCreateWithAPinnedFileIsRefused`
+
+SPEC R-23/R-34d (S-8): the policy spelling is refused identically —
+`"create": true` with a pinned `--file` is the fleet-scale shape of this
+hazard, set once and run against a hundred clones.
+
+The record is the whole assertion. A refused repo carries no
+codeowners_path, so `.error` is all a `needs-human` pile has to triage on,
+and `created: false` is what keeps a commit step from staging a file that
+was never written.
 
 ### `TestFix_PositionalArgsRejectedOnEveryVerb`
 
@@ -1190,6 +1574,13 @@ The stale-comment warning needs a LEADING token boundary too: a rename of
 @old-team must stay quiet about `someone@old-team`, where the match is the
 tail of an email, while a real mention — space-separated or glued to the
 comment glyph — still warns.
+
+### `TestFix_SubmoduleOffTheWritePathStaysIrrelevant`
+
+A submodule that is nowhere near a CODEOWNERS location is an ordinary part
+of the tree: the gitlink guard looks only at the components of the write
+path, exactly like its symlink sibling, so a vendored dependency must not
+cost this repo its run.
 
 ### `TestFix_SymlinkElsewhereStaysIrrelevant`
 
@@ -1211,6 +1602,84 @@ not exist in the tree GitHub reads — yet Lstat'ing only the final component
 (a real file, reached through the link) let sync write through it at exit 0.
 The refusal must fire, name WHICH component is the link, and leave the
 link's target untouched.
+
+### `TestFix_TheCreateRemedyWritesWhereItSays`
+
+And the remedy that refusal prints has to be true: --create with the same
+--file writes exactly there, and nowhere else.
+
+MUTATION: make governing()'s create branch fall back to
+gittree.CodeownersLocations[0] when --create is set, and this fails — the
+remedy would then be advertising a path the run does not write.
+
+### `TestFix_TrackedCodeownersIsNotCalledUntracked`
+
+A CODEOWNERS git tracks must not be called untracked.
+
+The D5 disclosure is conditioned on `!trackedAt(tree, rel)`; without that
+condition every ordinary repository in a fleet would carry a warning saying
+GitHub reads nothing from its CODEOWNERS, which is both false and the
+fastest way to teach an operator to stop reading warnings.
+
+MUTATION: drop the `!trackedAt(tree, rel)` guard in governingWarnings and
+this fails — the warning fires on the committed file.
+
+### `TestFix_TrackedFileAtACodeownersLocationIsNamedNeutrally`
+
+The fallback noun, which no other test reaches: a tracked REGULAR FILE at
+`.github` is neither a gitlink nor a link, so the refusal must not guess at
+either. Naming it "a submodule" here would be the same falsifiable diagnosis
+the link case was fixed for, and the whole suite passes with that mutation.
+
+### `TestFix_TrackedLinkAtACodeownersLocationIsDiagnosedAsALink`
+
+The refusal has to diagnose what git actually records, not what the common
+case makes likely. A tracked symlink at `.github` that has been DELETED from
+the working tree reaches the same guard — the symlink refusal is an Lstat, so
+it finds nothing to refuse — and the tree evidence alone (".github is a path,
+and paths are not directories") cannot tell a gitlink from a link blob.
+
+Refusing is right either way: `.github/CODEOWNERS` does not exist at the ref,
+so the run would prove its invariants against a tree that has no CODEOWNERS.
+Calling it a submodule is not: in THIS repo `git add .github/CODEOWNERS`
+succeeds (exit 0, staged as `D .github` + `A .github/CODEOWNERS`), so a
+message claiming it "fails with is in submodule" sends the operator looking
+for a submodule that does not exist. The message is the only evidence a
+refused fleet row carries.
+
+### `TestFix_UnmergedCodeownersIsRefusedByEveryVerbThatReadsIt`
+
+An unmerged CODEOWNERS is refused by every verb that reads its bytes to
+decide an edit, not only by the `sync` the finding was reported against.
+
+The bytes on disk are both sides of a conflict, so the "before" ownership is
+a state no commit has ever had: `=======` parses as a zero-owner rule (S-9)
+and both sides' rules stay live. `plan` is in the list because the artifact
+it emits is what a human approves — a plan computed from conflict-mangled
+bytes should not exist to be approved. Exit 2: an unmerged index is a fact
+about THIS clone, so a fleet loop records it and steps to the next repo.
+
+### `TestFix_UnmergedGuardReachesAPathThatLooksLikePathspecMagic`
+
+SPEC R-23 (S-7): the unmerged guard reaches a CODEOWNERS whose path begins
+with `:`, which git reads as pathspec MAGIC rather than as a path.
+
+The review of the original fix disproved its own justification: dropping
+`:(literal)` broke no test, because the loop already compares the whole path
+exactly, so a glob metacharacter could never mis-select a record. The case
+it does prevent is this one — without the prefix `git status` matches
+nothing, the guard sees a clean tree, and the run rewrites the conflicted
+file reporting `applied (proven: tree)`.
+
+### `TestFix_UntrackedButCommittableCodeownersStillConverges`
+
+D5 still converges. An untracked CODEOWNERS the operator can commit is
+DISCLOSED, not refused: the fallback exists so a nightly job that created
+the file in pass 1 can amend it in pass 2, and a refusal would make that
+sequence impossible for every repo the job bootstraps.
+
+MUTATION: turn the governingWarnings case into a refusal (return an error
+from execute instead of appending a warning) and this fails at exit 2.
 
 ### `TestFleet_BrokenPolicyHaltsOnTheFirstRepo`
 
@@ -4282,12 +4751,51 @@ preserves, so not a violation — but still reported.
 Absent is not empty. Omitting --repo still means the working directory,
 which is the documented default and what every one-repo invocation relies on.
 
+### `TestAdjacentDoubleStarScopesStillApply`
+
+SPEC: the `**` spellings that are alive still work as scopes. `x/**/**` and
+`foo/**/` hold two adjacent `**` segments and match real paths; refusing them
+alongside the leading `**/**` family would take a live pattern with it.
+
 ### `TestApplyEmptyRepoDistinguishesPassedFromAbsent`
 
 apply's --repo defaults to "" meaning "use the plan's repo", so the rejection
 cannot be read off the VALUE — it has to ask whether the flag was passed.
 Both readings are pinned here: passing it empty is an error, omitting it is
 how the plan's own repo field gets used.
+
+### `TestApplyPrintsTheDocumentedCodeownersPath`
+
+FINDING: docs/GUIDE.md documents `apply` as naming the CODEOWNERS
+repo-relative; it prints an absolute path.
+
+	documented: applied: .github/CODEOWNERS (58 → 101 bytes)
+	actual:     applied: /home/me/clones/api-service/.github/CODEOWNERS (58 → 101 bytes)
+
+The documented form is unreachable: apply joins the plan's `repo`, and
+COMMANDS.md states that field is recorded absolute. Every other number in
+the block still matches, so this is one path, and it is a real difference to
+anyone diffing rollout logs — the repo-relative name is stable across
+machines and the absolute one is not.
+
+### `TestAuditDiagnosesAUnicodeNormalizationMismatch`
+
+FINDING: a pattern and a path that differ only in Unicode normalization get
+the generic "may be deliberate" A-4, while the exactly analogous case
+mismatch gets A-5 and a fix.
+
+A monorepo touched by both macOS and Linux carries NFD and NFC spellings of
+the same name. CODEOWNERS matches bytes, so the NFC pattern is dead against
+the NFD path — correctly — but every string the reader can see is
+identical:
+
+	[A-4/warning] (line 2) pattern "/docs/réunion/" matches zero tracked files (report-only: may be deliberate, R-11)
+
+A-5 exists precisely to diagnose the other invisible mismatch: "matches zero
+files ONLY because of case — CODEOWNERS is case-sensitive (S-6); correct the
+pattern to the tree's actual casing". Normalization is not mentioned
+anywhere in the code or the docs, so the reader is left staring at two
+identical-looking strings and concluding the tool is broken.
 
 ### `TestAuditJSONCleanIsPureJSON`
 
@@ -4296,6 +4804,62 @@ Pre-release finding, fixed: `audit --format json` on a clean repo prints the lit
 to jq — the healthy repo — is the one case the output isn't parseable.
 Under `--format json`, stdout is data.
 
+### `TestAuditKeepsCaseAndDeliberateDeadPatternsDistinctFromNormalization`
+
+The neighbours the normalization branch must not swallow: a genuine
+case-only miss is still reported AS a case miss, an ordinary forward-looking
+dead pattern is still report-only A-4, and two names that differ by a real
+accent are still two different names.
+
+### `TestAuditLeavesAPlainCodeownersAlone`
+
+The neighbour: an ordinary CODEOWNERS is never called a symlink, and its
+content checks still run. A mode test that fired on a regular blob would
+silence every finding in every repository.
+
+### `TestAuditNamesASymlinkedCodeowners`
+
+FINDING: for a committed SYMLINKED CODEOWNERS, `sync` refuses with a precise
+explanation while `audit` — the documented CI gate — invents a finding about
+a pattern that is really a filesystem path, and never says "symlink".
+
+	$ codeowners-tool audit
+	[A-4/warning] (line 1) pattern "../OWNERS.real" matches zero tracked files …
+	[A-9/info] 3 of 3 tracked paths (100%) have no owner …
+	[A-11/warning] .github/CODEOWNERS itself has no owner …
+	$ codeowners-tool sync --op 'add_owner(/services/api/, @org/x)'
+	error: refusing to write .github/CODEOWNERS: it is a symlink to ../OWNERS.real,
+	       and GitHub does not follow a symlinked CODEOWNERS …
+
+The read-only verbs fetch the blob with `cat-file`, which hands back the link
+TARGET as content, and nothing checks the tree mode — so the target string is
+parsed as a rule. The operator is left to infer the real defect from "100% of
+tracked paths have no owner". The condition is already known to the tool;
+audit is where it belongs, since audit's job is to report rot and this repo's
+entire ownership is inert.
+
+### `TestAuditNestedCodeownersIsAWarningAndRootLevelStaysAnError`
+
+A nested CODEOWNERS is a `warning`, and a second ROOT-LEVEL one stays an
+`error` — the two are different defects and `--fail-on` must tell them apart.
+
+A second root-level file is ambiguity in the document that governs: two files
+GitHub itself searches, one of them silently losing. A `packages/foo/`
+CODEOWNERS is never searched at all, so nothing about what governs is in
+doubt, and it is routinely a deliberate artifact of a Bazel/Gerrit OWNERS
+migration that some other tool still consumes. Ranking it `error` would turn
+`--fail-on error` — documented as the tier for "GitHub is doing something
+other than what the file says" — red on every such monorepo, over a condition
+no edit to the governing file resolves. It is still rot (review is routed by
+it in people's heads and nothing enforces that), so it must clear `info`.
+
+### `TestAuditNormalizationMismatchIsDiagnosedUnderA5`
+
+A dead pattern that differs from a tracked path ONLY by Unicode
+normalization is diagnosed under A-5 — the check that already exists for the
+other invisible spelling mismatch — and names both the tracked path it
+collides with and the codepoints, since the two strings render identically.
+
 ### `TestAuditRejectsUnknownFormat`
 
 Pre-release finding, fixed: `audit` silently accepts an unknown `--format` and falls back to
@@ -4303,12 +4867,163 @@ text. sync, check, and lint all reject unknown formats at exit 3 — "never a
 silent fallback to text" — and audit is documented with the same
 `--format json|text` contract.
 
+### `TestAuditReportsNestedCodeownersFilesThatGovernNothing`
+
+FINDING: `audit` reports "clean" on a monorepo carrying package-level
+CODEOWNERS files that GitHub never loads.
+
+A-10 is the check for "a CODEOWNERS file that governs nothing", and it fires
+for `docs/CODEOWNERS` sitting beside `.github/CODEOWNERS`. It is built on
+gittree.FindCodeownersPaths, which tests only the three root-level locations
+S-8 names, so `packages/foo/.github/CODEOWNERS` and `packages/bar/CODEOWNERS`
+are invisible to it. Those are the files most likely to mislead: a monorepo
+migrated from Bazel/Gerrit OWNERS or from split repos keeps per-package
+ownership files that look authoritative, review is routed by them in
+people's heads, and GitHub honors not one line of them.
+
+`audit clean`, exit 0, is the CI gate asserting this repository has no
+ownership rot. Here it asserts it over two files' worth of owner
+assignments that do nothing.
+
+### `TestAuditReportsNoA10WhenTheOnlyCodeownersIsTheGoverningOne`
+
+The control for the check above: a repository whose only CODEOWNERS is the
+governing one reports no A-10 at all. A scan that counted the governing file
+itself, or any nearby ownership file, would make every healthy monorepo in a
+fleet report rot it does not have.
+
+### `TestAuditSymlinkedCodeownersIsAnErrorAndSuppressesTheBogusParse`
+
+A symlinked governing CODEOWNERS is severity `error`: GitHub does not follow
+it, so no rule in the repository takes effect and every path is unowned.
+That is A-12-over-the-cliff's situation — "ownership is silently off" — and
+it has to fail `--fail-on error`, the gate a fleet blocks rollouts on.
+
+The content-derived checks go with it, because `cat-file` hands back the link
+TARGET: A-4 was reporting "../OWNERS.real" as a dead pattern, and A-9/A-11
+were describing a document that does not exist.
+
 ### `TestBranchMismatchErrorNamesHeadCleanly`
 
 Pre-release finding, fixed: the S-7 branch-mismatch refusal interpolates raw `git rev-parse
 --abbrev-ref --end-of-options HEAD` output, and rev-parse echoes the
 `--end-of-options` operator as an output line — so the one-line error (and
 the JSON record's error field) reads "HEAD is --end-of-options\nmain (…)".
+
+### `TestCommaInScopeIsReachableOrHonestlyRefused`
+
+FINDING: a tracked path containing a comma is unreachable by every op
+spelling, and the policy-file spelling blames the operator for a mistake
+they did not make.
+
+	$ … --op 'add_owner(/a,b/, @org/x)'
+	error: add_owner takes (scope, owner) or (scope, [owners]), got 3 args
+	$ … --op 'add_owner(/a\,b/, @org/x)'
+	error: scope "/a\\" ends with a dangling backslash — it would silently match a different path
+	$ … policy {"op":"add_owner(/a,b/)","owners":["@org/x"]}
+	error: ops[0]: this op names owners in its op string AND in an "owners" array;
+	       one intent, one place (R-39b) — keep either the `(scope, [owners])` spelling or the array
+
+The op string names no owners at all: splitArgs splits on top-level commas
+with no escape awareness, so `b/` became the second "owner". A comma is a
+legal git path byte and `[`/`]` are legal too (S-2 makes them literal, and
+the matcher handles them), so this is a real path a monorepo can hold. The
+escape README documents is for spaces only, and no spelling reaches such a
+path. Nothing is written wrongly; the cost is that the last message sends
+the reader looking for an owners array they did not write.
+
+### `TestCommaScopeWorksFromAPolicyFile`
+
+SPEC: a path holding a comma is reachable from the policy file too, in both
+owner spellings, and the line it writes reads back as the rule that was
+planned.
+
+### `TestCommandsDocListsEveryFlagThatChangesBehavior`
+
+FINDING: docs/COMMANDS.md's synopses omit flags that change what the command
+does, and REFERENCE.md routes every flag lookup there — so the flags are
+documented nowhere.
+
+	plan     … [--repo DIR] [--branch REF] [--file PATH] [--out plan.json]
+	snapshot [--repo DIR] [--branch REF] [--out snap.json]
+
+`plan` also accepts `--max-size` (default 3,000,000 — the S-4 cliff) and
+`--warn-size` (2,500,000), both of which can turn a run into a refusal or a
+warning. `snapshot` also accepts `--file`, which decides which CODEOWNERS
+the ownership map is derived from — the one flag that can make `snapshot`
+answer about a file GitHub does not read.
+
+### `TestCreateWithFileMustNotSupersedeTheGoverningCodeowners`
+
+FINDING: `--create` with a `--file` that OUTRANKS the repository's real
+CODEOWNERS supersedes it — every rule in the governing file stops applying,
+and the run reports `applied (proven: tree)`, exit 0.
+
+A repo whose ownership lives in `docs/CODEOWNERS`:
+
+	$ codeowners-tool sync --file .github/CODEOWNERS --create --op 'add_owner(/docs/, @org/docs-team)'
+	applied: 1 op(s) applied, 0 skipped; 1 line change(s), 2 path(s) change owners
+	  ops[0]  applied (proven: tree)
+	  created a new CODEOWNERS file
+	$ cat .github/CODEOWNERS
+	/docs/ @org/docs-team
+
+Under S-8 that one line is now the whole repository's ownership. Both
+invariants are broken by the run that called itself proven:
+
+  - INV-2: services/api/main.go silently loses @org/api-team. The tool's own
+    `verify` says INVARIANT VIOLATED on the same change, exit 2.
+  - INV-1: `add_owner` promises "every pre-existing owner of every path in
+    scope is kept" (README) and @org/everyone is gone from /docs/.
+
+BEHAVIOR.md names this precise failure as the thing the spec forbids:
+"'Never overwrites' is also satisfied by writing a SECOND file at
+.github/CODEOWNERS, which leaves the original untouched and, under S-8,
+silently demotes it to a file GitHub never loads — the whole repo's
+ownership replaced by one op's worth of rules." The guard enforcing it sits
+on the DISCOVERY path; an explicit `--file` walks around it, because
+governing() takes rel from --file and proves against empty bytes.
+
+It is reachable from a policy (`"create": true` plus a pinned `--file`), so
+it is a fleet-scale hazard, and POLICY-FILE.md's "Never overwrites, so it is
+safe to leave set for a fleet where only some repos have a file" is false
+for exactly the repos that have one somewhere other than .github/.
+
+### `TestDeclareRefusesAPatternThatCanNeverMatch`
+
+FINDING: `on_zero_match: declare` writes patterns that can never match
+anything in any repo, and reports them `applied (proven: structural)`.
+
+	$ codeowners-tool check --policy p.json      # {"op":"add_owner(**/, @org/security)","on_zero_match":"declare"}
+	ok: p.json — 1 op(s), no policy errors
+	$ codeowners-tool sync --policy p.json
+	applied: 1 op(s) applied, 0 skipped; 1 line change(s), 0 path(s) change owners
+	  ops[0]  applied (proven: structural)
+	$ cat CODEOWNERS
+	*  @org/everyone
+	**/ @org/security
+
+The codebase already knows this pattern is dead by construction:
+contains.go says `**/` "compiles to `\A(?:.+/)?/.*\z` — no repo-relative
+path can ever match it", and pattern.go has `case pattern == "/": // "/"
+doesn't match anything`. So the guarantee `declare` trades down to —
+GUARANTEES.md: "When someone later adds a matching file, this rule takes
+it" — is not weaker here, it is void. R-5 exists to refuse "creating a dead
+rule"; declare bypasses it for exactly the patterns that are dead
+everywhere rather than merely dead here.
+
+The same policy WITHOUT declare is refused per repo at exit 2 ("this repo
+alone was refused") rather than exit 3 ("broken everywhere; fix it, don't
+retry"), so a fleet triaging on exit codes sends a human to all N repos for
+one policy typo — and `check`, "the cheapest way to catch a broken policy
+before repo #1", passes it.
+
+### `TestDeclareStillWritesADeliberatelyDeadScope`
+
+SPEC: a scope that is dead HERE and alive elsewhere still declares. R-5's
+refusal is a fact about this repository, and `on_zero_match: declare` is the
+documented way to overrule it; only a scope no repository can ever satisfy is
+refused as a policy error.
 
 ### `TestEmptyRepoFlagRejected`
 
@@ -4348,6 +5063,101 @@ cleans the spelling before matching the tracked file; the S-8 location
 check compares the raw string, so a live change is reported as dead in the
 warning, the --out record, and the --summary-out PR body.
 
+### `TestFileNotInRefErrorNamesThePathCleanly`
+
+FINDING: `--file` naming a path that is not in the ref hands the operator
+raw git plumbing, `--end-of-options` and all.
+
+	$ codeowners-tool snapshot --repo r --file docs/CODEOWNERS
+	error: git cat-file --end-of-options blob HEAD:docs/CODEOWNERS: exit status 128: fatal: path 'docs/CODEOWNERS' does not exist in 'HEAD'
+
+This is the failure mode TestBranchMismatchErrorNamesHeadCleanly already
+pinned for the S-7 refusal: `--end-of-options` is an operator this tool
+passes to git, never something the reader typed, and echoing it sends them
+hunting for a flag that does not exist. `plan` reports the same condition
+cleanly, so the three commands disagree about the same mistake.
+
+### `TestGuideBootstrapExample`
+
+FINDING: docs/GUIDE.md's bootstrap example drops the per-op lines from both
+blocks it prints — including the one line the prose then tells the reader to
+go and look for.
+
+	$ codeowners-tool check --policy bootstrap.json
+	ok: bootstrap.json — 4 op(s), no policy errors
+	$ codeowners-tool sync --policy bootstrap.json
+	applied: 4 op(s) applied, 0 skipped; 4 line change(s), 4 path(s) change owners
+	  created a new CODEOWNERS file
+
+`check` also echoes each op's resolved `on_zero_match` (this policy has a
+`declare`, so the echo fires), and `sync` also prints `ops[0..3]`, the last
+of them `applied (proven: structural)` — which GUIDE.md's own next paragraph
+says to look for. FLEET.md shows both echoes and reproduces exactly, so
+GUIDE was the outlier.
+
+The fixture is the four files the section's prose describes, so every number
+in the block — `4 path(s) change owners` included — is the real one for the
+repo a reader following along would have.
+
+### `TestLeadingHashScopeIsRefusedAtCheckTime`
+
+FINDING: a scope whose written line would start with `#` passes `check` and
+then fails at write time with a refusal that never names the cause.
+
+	$ codeowners-tool check --op 'add_owner(#hash/, @org/x)'
+	ok: ops — 1 op(s), no policy errors
+	$ codeowners-tool sync --dry-run --op 'add_owner(#hash/, @org/x)'
+	error: refusing: synthesized edits do not satisfy the invariants
+	  INV-1 (in-scope result wrong): #hash/a.md — want {…, @org/x}, would get {…}
+
+The real reason is that the synthesized line `#hash/ @org/x` reads back as a
+COMMENT, and it appears nowhere in the message. pattern.go rejects `!` and
+`\#` at compile time with the standard this case fails too — such a rule
+"would be dead there … a mutation tool must never accept or emit one" — so
+the bare leading `#` should be the same exit-3 refusal as its two siblings
+rather than an opaque invariant failure at write time. `declare` already
+gets this right: "the line written for scope \"#future/\" does not read back
+as a rule for that pattern (INV-6)". Nothing wrong is written; the cost is a
+debugging session.
+
+### `TestLintRefusesCacheDirWithTheDocumentedReason`
+
+FINDING: docs/LINTING.md documents an error the `lint` verb cannot produce.
+
+Under "every error lint can print", the page lists:
+
+	**`--cache-dir is not available with --lint`** (exit 3). A cached "this
+	owner does not exist" is served without revalidation … here it deletes an
+	owner.
+
+`lint`'s flagset never defines `--cache-dir`, so the run dies in the flag
+package with `flag provided but not defined: -cache-dir` and a usage dump —
+no mention of caching, revalidation, or why the combination is refused. The
+documented message is reachable only through the older `audit --lint`
+spelling. The reasoning is worth keeping, so the fix is to make `lint`
+recognise the flag and refuse it with that sentence.
+
+### `TestMissingFileTargetIsNotReportedAsNoCodeownersAnywhere`
+
+FINDING: `--file` naming a path that is not in the ref is refused with a
+message that is false three times over, and that false text is what lands in
+the fleet's JSON record.
+
+In a repo carrying all three CODEOWNERS files:
+
+		$ codeowners-tool sync --file OWNERS --op 'add_owner(/services/api/, @org/p)'
+		error: no CODEOWNERS file found in .github/, root, or docs/ at HEAD;
+		       re-run with --create to write one at .github/CODEOWNERS, or --file to name a path (R-23)
+
+	 1. the repo has CODEOWNERS in all three locations;
+	 2. `--create` would write at OWNERS, not at .github/CODEOWNERS;
+	 3. "or --file to name a path" is offered to someone who just passed --file.
+
+noCodeownersError is built from a fixed head with no knowledge that
+filePath was set, and governing() reaches it for any missing --file target.
+A `needs-human` triage pile reading these records concludes those repos have
+no CODEOWNERS.
+
 ### `TestOfflineStaleRuleRemovalReportable`
 
 Pre-release finding (UAT), fixed: a tree-provably-dead rule cannot be repaired
@@ -4358,6 +5168,58 @@ pattern matches zero tracked files is a git-tree fact the offline audit
 requested repair, the dry run should report the pending dead-rule removal
 (exit 4) instead of demanding a token; today the only offline remedy is the
 hand edit the tool exists to prevent.
+
+### `TestOperationsDocOwnerListExample`
+
+FINDING: docs/OPERATIONS.md's only worked example of naming several owners in
+one op prints the output of a DIFFERENT, one-op policy.
+
+The policy shown has two ops — the bracketed-list spelling and the `owners`
+array spelling, which the page is there to introduce — and the block under
+it reads:
+
+	$ codeowners-tool sync --policy ownership.json
+	applied: 1 op(s) applied, 0 skipped; 1 line change(s), 1 path(s) change owners
+	$ cat CODEOWNERS
+	/services/api/   @org/api-team @org/platform @org/sre
+
+The real run reports 2 ops / 2 line changes / 2 paths, prints a per-op line
+for each, and writes a `/docs/` rule the block did not show. A reader
+comparing the two concludes the `owners`-array op wrote nothing — the exact
+misreading the page exists to prevent.
+
+The assertion runs the documented policy against the documented tree and
+requires the PAGE to show what the tool really prints. Asserting the reverse
+— that the tool prints what the page claims — was this test's own first
+mistake: that form can only ever be satisfied by changing the tool, and here
+the tool is right.
+
+### `TestOrdinaryOpStringsAreUnchangedByTheCommaEscape`
+
+SPEC: the op-string grammar is unchanged where no escape is involved — a
+bare owner, a bracketed list, and the arity refusal for two bare owners.
+
+### `TestPlanApplyAndLintWarnWhenTheyWriteAFileGitHubWillNotRead`
+
+FINDING: R-24's "every time" warning is emitted only by `sync`. `plan`,
+`apply` and `lint` — the other three verbs that touch the file — write a
+CODEOWNERS GitHub does not read, in total silence.
+
+BEHAVIOR.md, TestRollout_WritingAFileGitHubWillNotReadIsWarned: "SPEC R-24
+(S-8/A-10): when the file this run writes is not the file GitHub will read,
+the record says so — every time, on stderr and in `warnings`." That test
+covers `sync`. governingWarnings() has exactly one call site, in sync.go, so
+plan and apply skip it:
+
+	$ codeowners-tool plan --file docs/CODEOWNERS --op 'add_owner(/services/api/, @org/p)' --out p.json
+	plan written to p.json
+	$ codeowners-tool apply --plan p.json
+	applied: docs/CODEOWNERS (5 → 30 bytes)
+
+.github/CODEOWNERS governs this repo. The plan is the artifact a human
+reviews before the write, which is exactly where "this file governs
+nothing" needs to appear, and it is the one place it never does. `lint`,
+which writes without a plan at all, is the same.
 
 ### `TestPlanBelowRepoRootRefused`
 
@@ -4376,6 +5238,12 @@ after them with them. `audit ../other-repo --checks a999` (note the missing
 `--checks a999`, which the parser would reject loudly, is never seen. A
 tool this strict about flag values must not swallow whole arguments.
 
+### `TestSetOwnersByteEqualDuplicateKeepsTheR7Disclosure`
+
+SPEC: the byte-equal duplicate an insert strands keeps R-7's disclosure and
+only that one. The narrower-rule disclosure is a second finding, not a
+replacement, and two warnings for one line would double-report it.
+
 ### `TestSetOwnersDisclosesAuthoredDuplicate`
 
 Pre-release finding, fixed: set_owners on a scope whose pattern already exists earlier in
@@ -4385,6 +5253,118 @@ that creates it says nothing. The R-7 duplicate warning fires only on the
 NEXT run that touches the file. The run creating the duplicate must
 disclose it.
 
+### `TestSetOwnersDisclosesTheRuleItStrands`
+
+FINDING: `set_owners` strands a pre-existing narrower rule as permanently
+dead and says nothing, turning a repo that audits clean into one that
+fails its own CI gate.
+
+	$ codeowners-tool audit            → audit clean (exit 0)
+	$ codeowners-tool sync --op 'set_owners(/docs/, [@org/new])'
+	applied: 1 op(s) applied, 0 skipped; 1 line change(s), 2 path(s) change owners
+	  ops[0]  applied (proven: tree)          ← no warning of any kind
+	$ cat CODEOWNERS
+	*         @org/everyone
+	/docs/x/  @org/x-team                     ← dead now; still names an owner
+	/docs/ @org/new
+	$ codeowners-tool audit
+	[A-6/warning] (line 2) rule "/docs/x/" is fully shadowed by line 3 … (S-1)   → exit 4
+
+The resolved ownership is right — those paths are in scope — so the
+invariants hold; the defect is the undisclosed rot the write authors.
+plan.go discloses this hazard only when the stranded rule's pattern is
+BYTE-EQUAL to the op's scope, and its own comment gives the reason the
+disclosure exists: "without this, the run creating the dead line is the one
+run that says nothing about it (pre-release finding)". A narrower pattern is
+exactly that case. Amending `/docs/x/` instead of stranding it would leave
+audit clean.
+
+### `TestSetOwnersIsQuietWhenItStrandsNothing`
+
+SPEC: an op that strands nothing says nothing. The stranded-rule disclosure
+must fire on the run that authors the dead line and on no other, or a fleet
+learns to ignore it.
+
+### `TestSnapshotIsLosslessForNonUTF8Paths`
+
+FINDING: `snapshot` emits an ownership object with DUPLICATE keys when the
+tree holds paths that are not valid UTF-8, so the snapshot loses tracked
+paths on the round-trip and `verify` stops checking them.
+
+git stores path bytes verbatim and `ls-tree -z` returns them unquoted, so a
+legacy latin-1 filename reaches the snapshot as an invalid-UTF-8 Go string.
+encoding/json replaces every such byte with U+FFFD, so `a\xe9.md` and
+`a\xff.md` — two distinct tracked files — are written as the same JSON key
+twice. Any decoder keeps one. verify.Load decodes into a map, so one path
+vanishes before Compare ever runs: an ownership change on it is neither a
+change, an addition, nor a removal — it is invisible, and the gate that
+exists to prove INV-2 over "raw data" reports ok.
+
+The snapshot also stops being true on its own terms: it names a path that
+is not in the repository, so anyone grepping it for their file finds
+nothing.
+
+### `TestSnapshotOfAnAsciiTreeIsByteIdentical`
+
+An ordinary snapshot is byte-for-byte what it has always been. The escape
+for non-UTF-8 paths must be invisible here: a literal `a%E9.md`, a
+multi-byte rune and the encoder's own HTML escaping all keep their exact
+spelling, so no existing consumer of the documented format breaks.
+
+### `TestStagedHigherPrecedenceCodeownersIsNotIgnored`
+
+FINDING: discovery can only ADD a CODEOWNERS from the working tree, never
+let one OUTRANK the tracked file — so a repo mid-migration from root
+`CODEOWNERS` to `.github/CODEOWNERS` gets its outgoing file edited, and
+`audit` calls the repo clean.
+
+	$ git status --short
+	A  .github/CODEOWNERS          # staged, not yet committed
+	$ codeowners-tool audit
+	audit clean
+	$ codeowners-tool sync --op 'add_owner(/services/api/, @org/api)' --format json
+	{"codeowners_path":"CODEOWNERS","status":"applied", …}
+
+The edit is dead the moment the migration commit lands: under S-8 the staged
+`.github/CODEOWNERS` wins outright. `codeowners_path` then tells the fleet
+loop to stage the file that is about to stop governing.
+
+governing()'s working-tree fallback fires only when the TREE has zero
+CODEOWNERS, and A-10's AllPresent is tree-only as well — so the check whose
+severity is `error` ("GitHub uses only the first") is blind to the working
+tree that sync is about to write into. D5's own comment argues the working
+tree must inform discovery; it informs it in one direction only.
+
+### `TestSubmoduleAtCodeownersLocationIsRefused`
+
+FINDING: when a SUBMODULE is mounted at one of the three CODEOWNERS
+locations, `sync` writes into the submodule's checkout, proves the change
+against the submodule's rules, and reports `applied (proven: tree)` — and
+the parent repository can never track the file it wrote.
+
+The shared-org-`.github` submodule is a real layout. `git ls-tree` reports
+`.github` as a gitlink (`160000 commit`), so FindCodeownersPaths correctly
+finds no CODEOWNERS, and governing()'s working-tree fallback then adopts the
+file inside the submodule's own checkout:
+
+	$ codeowners-tool sync --op 'add_owner(/services/api/, @org/api)' --format json
+	{"codeowners_path":".github/CODEOWNERS","status":"applied",
+	 "changes":[{"old_owners":["@sub/owners"],"new_owners":["@sub/owners","@org/api"]}]}
+	$ git add .github/CODEOWNERS
+	fatal: Pathspec '.github/CODEOWNERS' is in submodule '.github'
+
+`@sub/owners` is a fact about a DIFFERENT repository; the parent has no
+CODEOWNERS at all, so its true INV-2 baseline is "everything unowned".
+`snapshot` and `plan` both exit 3 on this repo, agreeing with git.
+
+refuseSymlinkedTarget refuses the exactly-analogous case and says why: "git
+commits a symlinked directory as a link BLOB, not a tree, so with
+`.github -> real-gh` there is no `.github/CODEOWNERS` in the tree GitHub
+reads … the write would edit a file that governs nothing while reporting
+applied." A gitlink is not a tree either, and there is no guard for it —
+"submodule" does not appear in the write path at all. The evidence needed to
+refuse is already in hand: `.github` is itself a path in the tracked tree.
+
 ### `TestSymlinkedCodeownersNotSilentSuccess`
 
 Pre-release finding, fixed: a symlinked .github/CODEOWNERS inside the clone is written
@@ -4393,6 +5373,130 @@ GitHub does not follow a symlinked CODEOWNERS, so the run edited a file
 that governs nothing while reporting success. An out-of-repo symlink target
 is already refused (containedWritePath); the in-repo case must at minimum
 not be a silent success.
+
+### `TestSyncWarnsWhenGoverningCodeownersIsUntracked`
+
+FINDING: `sync` silently adopts an UNTRACKED CODEOWNERS as the governing
+file, while `plan`, `snapshot` and `audit` all refuse the same repository at
+the same moment with "no CODEOWNERS file found … at HEAD" (exit 3).
+
+governing()'s D5 fallback searches the working tree when `git ls-tree` finds
+no CODEOWNERS, so a file that exists on disk but was never committed becomes
+the baseline INV-1 and INV-2 are proven against. On GitHub that repository
+has NO CODEOWNERS: every path is unowned, and the "before" state the proof
+rests on is one GitHub has never seen. The run reports
+`applied (proven: tree)`, exit 0, with no warning — and R-23's `--create`
+gate, the tool's stated permission to write a CODEOWNERS into a repo that
+has none, is never consulted.
+
+D5's stated purpose is narrower than its effect: it exists so a nightly job
+that created the file in pass 1 can converge in pass 2. It also silently
+adopts a template a provisioning script dropped in, a half-finished manual
+edit, and — the subtest below — a CODEOWNERS the repo's own .gitignore says
+can never be committed at all, which no amount of "commit it and re-run"
+will fix. governingWarnings() is the mechanism for exactly this class
+("Every condition below exits 0 and reports 'applied' … invisible at fleet
+scale unless the run that touched the file says so") and has no case for it.
+
+### `TestUnmergedCodeInParsesRecordsStrictly`
+
+SPEC R-23: a path whose NAME begins with two status letters is not read as a
+status code, and a record with no code is not read as one either.
+
+### `TestUnmergedCodeownersIsNotSilentlyRewritten`
+
+FINDING: `sync` rewrites a CODEOWNERS left UNMERGED by a conflict and
+reports `applied (proven: tree)`, exit 0.
+
+	$ git status --short
+	UU .github/CODEOWNERS
+	$ codeowners-tool sync --op 'add_owner(/services/api/, @org/api)'
+	warning: … has 2 line(s) GitHub cannot parse and silently skips (S-3) …
+	applied: 1 op(s) applied, 0 skipped; 1 line change(s), 1 path(s) change owners
+	  ops[0]  applied (proven: tree)
+
+The conflict markers are the only thing it notices, and it reads them as
+syntax errors rather than as an unmerged file. `=======` parses as a valid
+zero-owner rule (S-9), and BOTH sides' `/docs/` lines stay live, so the
+"before" ownership the invariants were proven against is a conflict-mangled
+state that no commit has ever had and GitHub will never see. The file is
+still `UU` afterwards — the run reports a proven change to something that
+cannot be committed as it stands.
+
+The tool refuses the adjacent checkout hazards in detail (the sparse-checkout
+refusal names sparse-checkout, partial clones and local deletion by name),
+and S-7's checkBranchIsWritable exists to stop "a rule justified by one tree
+and landing in another". An unmerged index is the same class, and one
+`git status --porcelain` settles it.
+
+### `TestVerifyAcceptsAHandWrittenBootstrapBaseline`
+
+The bootstrap pair: a repository whose base ref has NO CODEOWNERS at all
+(`snapshot` refuses it, exit 3) is verified against a hand-written baseline
+that lists every path as unowned. It carries no `repo`, `ref`,
+`codeowners_path` or `codeowners_sha256` — so a guard built on any of those
+fields would refuse the one flow that most needs the gate.
+
+### `TestVerifyAcceptsSnapshotsTakenFromTwoClones`
+
+Two clones of one repository have different `--repo` paths — CI checking
+main and the pull request into separate directories is the ordinary shape —
+so the pair must be judged on the tree it describes, never on that string.
+
+### `TestVerifyAcceptsSnapshotsTakenWithDifferentFileFlags`
+
+Two snapshots taken with different `--file` describe the same tree governed
+by different CODEOWNERS files, so `codeowners_path` and `codeowners_sha256`
+differ by construction. That is a comparison worth making, not a mismatched
+pair.
+
+### `TestVerifyComparesEachNonUTF8PathSeparately`
+
+SPEC R-18: two tracked paths differing only in a byte that is not valid
+UTF-8 are compared SEPARATELY. Both spell `bin/a�.md` once JSON has
+folded them, so before the fix each snapshot held one key for the two files
+and the gate reported half the reassignment it was looking at.
+
+### `TestVerifyPassesTheDocumentedTwoRefRecipeAcrossAChurnedTree`
+
+The documented recipe — snapshot two refs of ONE repository, verify against
+the declared scope — keeps working across a branch that renames, adds and
+deletes files. The guard above fires only on an empty intersection, so a
+pull request that churns most of the tree still gets a real answer.
+
+### `TestVerifyRefusesAPairWithNoPathInCommon`
+
+SPEC R-18: `verify` refuses a before/after pair whose snapshots share no
+tracked path, exit 3, naming both files. Such a pair was never compared —
+every row is a tree delta, which R-18 never counts as a violation — so the
+run could only ever print `ok`. That is the green a fleet loop reports on
+all 100 repositories when one filename in it is wrong.
+
+Exit 3, not 2: no path changed out of scope, so there is no offending path
+to print, and the same wrong invocation fails identically in every repo —
+the "stop the rollout" class, alongside a malformed snapshot.
+
+### `TestVerifyRefusesSnapshotsFromDifferentRepositories`
+
+FINDING: `verify` accepts a before/after pair taken from two DIFFERENT
+repositories and reports `ok`, exit 0.
+
+verify is the documented CI gate — COMMANDS.md prescribes `snapshot` twice
+then `verify --before … --after …` to "prove in CI that a merged change
+moved nothing outside its declared scope". A snapshot carries `repo`, `ref`,
+`codeowners_path` and `codeowners_sha256`, and verify.Compare reads none of
+them: it diffs the two ownership maps and classifies every path present in
+only one snapshot as a tree delta, which R-18 says is never a violation.
+Two unrelated repositories share no paths at all, so EVERY row is a tree
+delta and the gate reports "0 change(s), all within scope".
+
+The failure mode is a fleet loop — the setting FLEET.md is written for —
+where before.json and after.json are per-repo filenames and one loop
+variable is wrong: every repo comes back green, and the invariant the gate
+exists to prove was never checked on any of them. `apply` already refuses
+exactly this mistake ("--repo X is a different repository from the one this
+plan was computed against"); verify, which is the LAST line of defence
+rather than the first, has no such guard.
 
 ## internal/file
 
@@ -5439,6 +6543,44 @@ both strings parse to the same scope. Escaped whitespace INSIDE the scope is
 a different matter and is preserved exactly — `/x\ y/` names a path with a
 space in it, and losing that escape names a different path.
 
+### `TestDanglingBackslashSwallowingTheSeparatorIsNamed`
+
+SPEC: a scope's dangling backslash eats the comma that ends the argument, and
+the refusal says so. Under the escape this is no longer an arity accident —
+it is one argument swallowing the rest of the op.
+
+### `TestEscapedCommaKeepsTheScopeWhole`
+
+SPEC: a backslash escapes a comma in an op string exactly as it escapes a
+space, so a path holding a comma is reachable. The backslash stays in the
+scope text: it is the pattern language's own escape, and stripping it would
+hand the planner a pattern for a different path.
+
+### `TestLeadingHashScopeIsRefusedByParse`
+
+SPEC: a scope whose written line would read back as a comment is refused at
+parse time, in the words of the defect — the same standard `!` and `\#`
+already meet.
+
+### `TestNamesOwnersAsksWhetherTheTextCouldBeAnOwner`
+
+SPEC: NamesOwners answers R-39b's question — does this op string STATE
+owners — and text that cannot be an owner states none. Reading `b/` as an
+owner is how an op naming one scope came to be refused for naming owners
+twice.
+
+### `TestScopeThatCanNeverMatchIsRefused`
+
+SPEC: a scope no path can ever match is refused where the verdict belongs —
+in the op string, with no repository open, so `check` catches it once instead
+of every repo refusing it separately at exit 2 (or `declare` writing it).
+
+### `TestUnescapedCommaInAScopeIsNamedForWhatItIs`
+
+SPEC: an UNESCAPED comma still separates arguments, and the refusal names the
+text that landed where an owner belongs plus the escape that would have kept
+it in the scope — rather than an argument count the operator did not write.
+
 ## internal/pattern
 
 **`pattern_test.go`**
@@ -5501,6 +6643,12 @@ compile error surfaced to the caller, never a silent negation.
 SPEC S-6: paths are case-sensitive. `/Src/` on a tree containing `src/` is a
 dead rule that looks fine on a case-insensitive filesystem.
 
+### `TestCompileRefusesLeadingHash`
+
+SPEC: Compile refuses a bare leading `#` for the reason it already refuses
+`\#` — the line would read back as a comment, so the rule is dead there and a
+mutation tool must never emit one (S-2/S-6).
+
 ### `TestContainsIsReflexive`
 
 Reflexivity: a pattern always contains itself, whatever its shape.
@@ -5540,6 +6688,20 @@ and hand its owner every file the inner rule will ever match.
 ### `TestContainsRejectsInvalid`
 
 Contains must not blow up or report true on patterns Compile rejects.
+
+### `TestNeverMatchesAgreesWithTheMatcher`
+
+SPEC: NeverMatches agrees with the matcher on a generated corpus — every
+pattern it calls dead has no witness, and every pattern it calls alive has
+one. The corpus is the cross product of segment shapes and candidate paths,
+so a divergence in either direction fails here rather than in a repository.
+
+### `TestNeverMatchesNamesTheDeadFamilies`
+
+SPEC: NeverMatches names exactly the patterns whose language is empty. It is
+the write-side guard behind an exit-3 refusal, so an over-broad answer would
+halt a rollout over a live pattern, and an under-broad one would let a rule
+that owns nothing forever be written and called proven.
 
 ## internal/plan
 
@@ -6483,6 +7645,27 @@ treat these two spellings as selecting different files. If this ever fails,
 TestR2_NarrowingIsIndependentOfScopeSpelling is asserting the wrong thing and
 the spelling-sensitivity finding needs rereading, not the matcher fixing.
 
+### `TestSetOwnersDisclosesTheNarrowerRuleItStrands`
+
+SPEC: a set_owners insert that leaves a NARROWER pre-existing rule unable to
+win any path discloses it. Resolved ownership is right and the invariants
+hold — the defect is the rot the write authors: the repo audits clean before
+and fails A-6 ("fully shadowed", exit 4) after, with nothing in the run's own
+output naming the line.
+
+### `TestStrandDisclosureIgnoresAnAlreadyDeadRule`
+
+SPEC: the disclosure is about lines this run kills, not about lines that were
+already dead. A rule shadowed before the run is audit's finding and has
+always been; repeating it here would make the new warning noise.
+
+### `TestStrandDisclosureSparesARuleThatStillWinsSomewhere`
+
+SPEC: a rule the insert only partly covers is not stranded and is not
+reported. "**/*.md" loses docs/a.md to the new line and keeps src/b.md, so it
+still takes effect — calling that dead would send a reader to delete a live
+rule.
+
 ## internal/policy
 
 **`bounds_test.go`**
@@ -7066,6 +8249,48 @@ including the no-scope "assert nothing changed" mode — the strictest one.
 Unowned (no rule matched, null in JSON) vs explicitly-zero-owners ([]) are
 DIFFERENT states; transitioning between them is a real ownership change.
 
+### `TestCompareAcceptsAPairSharingASinglePath`
+
+The conservative boundary: ONE shared path is enough to compare, and the
+pair is accepted. A false refusal here breaks the documented CI gate on
+every repository whose branch renamed most of the tree, so the guard fires
+only when the intersection is genuinely empty.
+
+### `TestCompareIgnoresTheRepoFieldWhenTheTreesMatch`
+
+The `repo` field is whatever path the operator passed to `snapshot`, so two
+snapshots of one repository taken from two clones (CI checks main and the
+feature branch into separate directories) carry different `repo` strings.
+Identity is the tree they describe, never that string.
+
+### `TestCompareRefusesAPairWithNoPathInCommon`
+
+SPEC R-18: a before/after pair with no tracked path in common is refused,
+because nothing in it was compared. Every row of such a pair is a tree
+delta, and R-18 says a tree delta is never a violation, so the run can only
+ever report `ok` — the vacuous green a fleet loop with one wrong filename
+gets on every repository it visits.
+
+### `TestLoadRejectsEscapedKeysThatCollide`
+
+A snapshot whose escaped keys decode to the same path is malformed: keeping
+either one silently would lose a tracked path, which is the defect this
+encoding exists to prevent.
+
+### `TestSnapshotJSONLeavesValidUTF8KeysByteIdentical`
+
+The encoding is applied ONLY to paths that are not valid UTF-8: every other
+key, including a literal percent escape and a multi-byte rune, keeps the
+exact bytes the plain encoder produced, so an existing consumer of an
+ordinary snapshot sees no difference.
+
+### `TestSnapshotJSONRoundTripsNonUTF8Paths`
+
+SPEC R-18: a path git stores as bytes that are not valid UTF-8 round-trips
+through the snapshot exactly. encoding/json folds every such byte to
+U+FFFD, so `a\xe9.md` and `a\xff.md` used to be written as the same key
+twice and one tracked file vanished from the gate.
+
 ---
 
-681 documented test cases across 13 packages.
+780 documented test cases across 13 packages.

@@ -588,6 +588,78 @@ func writePathComponents(abs string) []string {
 	}
 }
 
+// refuseNonTreeAncestor refuses to write a CODEOWNERS whose path runs THROUGH
+// a tracked non-directory — a submodule mounted at one of the three locations
+// (the shared-org-`.github` layout is a real one), or a committed symlink
+// standing where a directory should be.
+//
+// The same defect refuseSymlinkedTarget catches, established from the tree
+// instead of from the filesystem: git records a submodule as a GITLINK and a
+// symlinked directory as a LINK BLOB, and neither is a tree, so with `.github`
+// mounted there is no `.github/CODEOWNERS` in the tree GitHub reads.
+// Discovery is right to find nothing there; sync's working-tree fallback (D5)
+// then adopted the file inside the SUBMODULE's own checkout, amended it, proved
+// the change against the SUBMODULE's owners and reported `applied (proven:
+// tree)` at exit 0 — a change the parent cannot even stage (`fatal: Pathspec
+// '.github/CODEOWNERS' is in submodule '.github'`), justified by a different
+// repository's rules.
+//
+// The evidence is in the tracked tree already: `ls-tree -r --name-only` lists
+// no directories, so a tree entry that is a strict path prefix of the write
+// target is not a directory. Which non-directory it is decides the message and
+// nothing else, so the mode is fetched only once the refusal is certain: a
+// live symlink is refused earlier and by name, but a TRACKED link DELETED from
+// the working tree reaches here with nothing to Lstat, and in that repo `git
+// add .github/CODEOWNERS` succeeds — naming it a submodule would send the
+// operator after one that does not exist.
+//
+// Exit 2, not 3: which clone mounts a submodule where is a fact about THIS
+// repository, so the fleet loop records it and steps to the next.
+func refuseNonTreeAncestor(repoDir, ref string, tree []string, rel string) error {
+	clean := relClean(rel)
+	for _, p := range tree {
+		if p == "" || !strings.HasPrefix(clean, p+"/") {
+			continue
+		}
+		// The mode is fetched only now, once the refusal is certain.
+		return &plan.RefusalError{Msg: nonTreeRefusal(gitEntryMode(repoDir, ref, p), ref, p, clean)}
+	}
+	return nil
+}
+
+// nonTreeRefusal words the refusal for the object git actually records, since
+// the operator's next move differs entirely: a submodule mount is somebody
+// else's repository to leave alone, a stale link is this repository's own
+// commit to fix. A mode that could not be read falls back to what the tree
+// alone proved and no more — refusing on a vaguer noun beats refusing on a
+// wrong one.
+func nonTreeRefusal(mode, ref, p, clean string) string {
+	kind := "a file object"
+	consequence := "the write would be proven against a tree that has no CODEOWNERS at all, and land at a path the tracked entry still occupies"
+	fix := fmt.Sprintf("replace %s with a real directory in its own commit and re-run", p)
+	switch mode {
+	case "160000":
+		kind = "a submodule (gitlink)"
+		consequence = fmt.Sprintf("the write would land in the submodule's own checkout and be proven against the submodule's owners, and this repository cannot stage it (`git add %s` fails with \"is in submodule\")", clean)
+		fix = "keep this repository's CODEOWNERS at a path this repository tracks itself"
+	case "120000":
+		kind = "a symlink"
+	}
+	return fmt.Sprintf("refusing to write %s: git records %s at %s as %s, not a directory, so no %s exists in the tree GitHub reads — %s; %s — nothing was written",
+		clean, p, ref, kind, clean, consequence, fix)
+}
+
+// gitEntryMode is gittree.EntryMode with the error dropped: this decides
+// message wording only, so a failed lookup degrades to the generic noun rather
+// than turning a refusal the tree already justifies into an I/O error.
+func gitEntryMode(repoDir, ref, p string) string {
+	mode, err := gittree.EntryMode(repoDir, ref, p)
+	if err != nil {
+		return ""
+	}
+	return mode
+}
+
 type multiFlag []string
 
 func (m *multiFlag) String() string     { return strings.Join(*m, ",") }
@@ -644,6 +716,24 @@ func cmdPlan(args []string, stdout, stderr io.Writer) int {
 	if err := containedWritePath(*repo, filepath.Join(*repo, filepath.FromSlash(coPath))); err != nil {
 		return errExit(err, stderr)
 	}
+	// Same reasoning one object type over, and the only place it can be caught:
+	// with `.github` mounted as a submodule, `--file .github/CODEOWNERS` plans
+	// against the file in the SUBMODULE's checkout, a human approves owners
+	// that belong to another repository, and `apply` writes a change this clone
+	// cannot stage. apply's tree_sha256 check cannot be the backstop — mounting
+	// a submodule changes the digest, so the hole is only reachable when the
+	// plan itself was made against the mount. See refuseNonTreeAncestor.
+	if err := refuseNonTreeAncestor(*repo, *branch, tree, coPath); err != nil {
+		return errExit(err, stderr)
+	}
+	// And the state of the bytes the plan is built from. A plan is the artifact
+	// a HUMAN approves, so one computed from a conflicted CODEOWNERS is the
+	// worst place for this to surface: the ownership rows are derived from both
+	// sides of a merge at once, and after_content carries the markers forward
+	// into whatever apply writes. See refuseUnmergedCodeowners.
+	if err := refuseUnmergedCodeowners(*repo, coPath); err != nil {
+		return errExit(err, stderr)
+	}
 	// File bytes come from the working tree — that is what apply mutates.
 	content, err := os.ReadFile(filepath.Join(*repo, filepath.FromSlash(coPath)))
 	if err != nil {
@@ -653,6 +743,13 @@ func cmdPlan(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		return errExit(err, stderr)
 	}
+	// R-24, in the artifact a human reviews. governingWarnings had one call
+	// site, in sync.go, so `plan --file docs/CODEOWNERS` in a repo GitHub
+	// resolves from .github/CODEOWNERS wrote its plan in total silence — and
+	// the plan is the one document somebody reads BEFORE the write. They lead
+	// the list: a location the reader may not have intended outranks anything
+	// the planner has to say about the edit itself.
+	p.Warnings = append(governingWarnings(tree, *branch, coPath, false, content), p.Warnings...)
 	pf := planFile{Plan: *p, Repo: absRepo(*repo), Ref: *branch, CodeownersPath: coPath, TreeSHA256: gittree.Digest(tree)}
 	b, _ := json.MarshalIndent(pf, "", "  ")
 	if *out != "" {
@@ -724,6 +821,19 @@ func cmdApply(args []string, stdout, stderr io.Writer) int {
 	if err := checkRepoRoot(repoDir); err != nil {
 		return errExit(&plan.RefusalError{Msg: err.Error()}, stderr)
 	}
+	// And the S-7 guard sync and lint carry, at the verb that does the write.
+	// The plan's ref decides which tree every row in it was proven against;
+	// the BYTES come from the working tree, which is whatever is checked out.
+	// Standing somewhere else, apply lands a reviewed change in a tree nobody
+	// proved anything about: with `.github` a directory on `main` and a
+	// submodule mount on the checked-out branch, `plan --branch main` is
+	// internally consistent — main's tree has no non-tree ancestor to refuse
+	// and its digest still matches — while apply writes the SUBMODULE's file,
+	// the exact write sync refuses. tree_sha256 cannot see this: main's tree
+	// never changed. See checkBranchIsWritable.
+	if err := checkBranchIsWritable(repoDir, planRef(pf), "apply", false); err != nil {
+		return errExit(&plan.RefusalError{Msg: err.Error()}, stderr)
+	}
 	target := filepath.Join(repoDir, filepath.FromSlash(pf.CodeownersPath))
 	// The same containment `sync` enforces, enforced again here. A plan is an
 	// artifact: it is reviewed in one place and applied somewhere else entirely,
@@ -737,16 +847,23 @@ func cmdApply(args []string, stdout, stderr io.Writer) int {
 	if err := refuseSymlinkedTarget(target); err != nil {
 		return errExit(err, stderr)
 	}
+	// And the unmerged file neither the plan's integrity fields nor the tree
+	// digest can see: `git checkout --ours .github/CODEOWNERS` leaves the path
+	// UNMERGED holding exactly the bytes the plan was computed from, so
+	// sha256_before matches and HEAD's tree never moved — apply wrote at exit
+	// 0, and the operator's `git add` then resolved somebody's merge with
+	// content this tool synthesized from one side of it. See
+	// refuseUnmergedCodeowners.
+	if err := refuseUnmergedCodeowners(repoDir, pf.CodeownersPath); err != nil {
+		return errExit(err, stderr)
+	}
 	// The tree the plan was reviewed against. sha256_before proves CODEOWNERS
 	// has not moved; this proves the thing it is resolved AGAINST has not
 	// either. Without it the documented plan-in-CI / apply-after-merge
 	// sequence let a colleague's merge widen the blast radius under a plan a
 	// human had already approved, silently and at exit 0.
 	if pf.TreeSHA256 != "" {
-		ref := pf.Ref
-		if ref == "" {
-			ref = "HEAD"
-		}
+		ref := planRef(pf)
 		tree, err := gittree.ListTracked(repoDir, ref)
 		if err != nil {
 			return errExit(&plan.InvalidError{Msg: err.Error()}, stderr)
@@ -768,10 +885,82 @@ func cmdApply(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		return errExit(err, stderr)
 	}
+	// R-24 again, at the verb that moved the bytes: `apply` reported
+	// `applied: docs/CODEOWNERS (5 → 30 bytes)` and never said that GitHub
+	// resolves this repository from .github/CODEOWNERS. A plan travels, so the
+	// person running apply is often not the person who read the plan.
+	//
+	// Content is nil deliberately: the syntax half of governingWarnings would
+	// be about the bytes this run just wrote, which apply.Apply already
+	// validates before writing. Only the file's LOCATION is news here.
+	if tree, err := gittree.ListTracked(repoDir, planRef(pf)); err == nil {
+		for _, w := range governingWarnings(tree, planRef(pf), pf.CodeownersPath, false, nil) {
+			fmt.Fprintln(stderr, "warning:", w)
+		}
+	}
 	// The plan's size_before/size_after are claims by the document being
 	// applied. These two numbers were measured on disk.
-	fmt.Fprintf(stdout, "applied: %s (%d → %d bytes)\n", target, written.Before, written.After)
+	//
+	// The path is the plan's repo-RELATIVE one, not the absolute join above:
+	// `repo` is recorded absolute so a plan travels, and echoing that made the
+	// success line `applied: /home/me/clones/api-service/.github/CODEOWNERS`,
+	// different on every machine that applied the same plan. A rollout that
+	// diffs its logs across runners saw one line change per clone, and the
+	// repo-relative name is the one a reader can compare — and the one
+	// GUIDE.md documents.
+	fmt.Fprintf(stdout, "applied: %s (%d → %d bytes)\n", pf.CodeownersPath, written.Before, written.After)
 	return ExitOK
+}
+
+// planRef is the ref a plan was computed against, defaulting to HEAD for plans
+// written before the field existed. One spelling of that default, because the
+// branch guard and the tree digest have to agree on which tree the plan claims
+// — two copies would let a plan be checked against one tree and refused
+// against another.
+func planRef(pf planFile) string {
+	if pf.Ref == "" {
+		return "HEAD"
+	}
+	return pf.Ref
+}
+
+// codeownersAtRef reads the CODEOWNERS committed at ref for the read-only
+// verbs, and refuses in the operator's own words when --file names a path the
+// ref does not carry.
+//
+// `snapshot --file docs/CODEOWNERS` on a ref without it answered with `git
+// cat-file --end-of-options blob HEAD:docs/CODEOWNERS: exit status 128:
+// fatal: path 'docs/CODEOWNERS' does not exist in 'HEAD'` — a plumbing command
+// nobody ran, carrying a flag this tool passes on the reader's behalf, which
+// sends them hunting for an option that does not exist.
+// TestBranchMismatchErrorNamesHeadCleanly pinned exactly that for the S-7
+// refusal. `plan` is not the model here and never was: it reads the working
+// tree by design, so on this condition it exits 0 and emits a plan, and when
+// the path is missing from disk too it reports a raw Go syscall error over an
+// absolute host path — the same genre this refusal replaces.
+//
+// Only --file can reach the refusal: discovery picks coPath out of the tree
+// itself, so a discovered path is tracked by construction.
+//
+// Exit 3 is unchanged. It is the class locate's sibling verdict ("no CODEOWNERS
+// file found … use --file to specify one") already lands in on the same code
+// path, and splitting one "which file does this ref carry?" question across two
+// exit classes is worse for a script than either class alone. Neither `sync`
+// nor `check` — the verbs under the coarse contract — reach here.
+func codeownersAtRef(repoDir, ref string, tree, all []string, coPath string) ([]byte, error) {
+	if !trackedAt(tree, coPath) {
+		// Name the file that GOVERNS, not "the one committed there": several
+		// may be committed, and `there` after "nothing to read at that path"
+		// reads as the missing path itself.
+		governing := ""
+		if len(all) > 0 {
+			governing = fmt.Sprintf(" — %s is the file %s resolves ownership from", all[0], ref)
+		}
+		return nil, &plan.InvalidError{Msg: fmt.Sprintf(
+			"--file %s is not in the tree at %s: this command reports what GitHub would do, and GitHub reads only committed files, so there is nothing to read at that path%s; commit the file, or name one %s carries",
+			coPath, ref, governing, ref)}
+	}
+	return gittree.ReadFileAtRef(repoDir, ref, coPath)
 }
 
 func cmdSnapshot(args []string, stdout, stderr io.Writer) int {
@@ -792,13 +981,13 @@ func cmdSnapshot(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "error:", err)
 		return ExitInvalid
 	}
-	tree, coPath, _, err := locate(*repo, *branch, *filePath)
+	tree, coPath, all, err := locate(*repo, *branch, *filePath)
 	if err != nil {
 		return errExit(err, stderr)
 	}
-	content, err := gittree.ReadFileAtRef(*repo, *branch, coPath)
+	content, err := codeownersAtRef(*repo, *branch, tree, all, coPath)
 	if err != nil {
-		return errExit(&plan.InvalidError{Msg: err.Error()}, stderr)
+		return errExit(err, stderr)
 	}
 	res := plan.ResolveContent(string(content), tree)
 	snap := verify.Snapshot{Repo: *repo, Ref: *branch, Path: coPath, Ownership: map[string][]string{}}
@@ -847,19 +1036,26 @@ func cmdVerify(args []string, stdout, stderr io.Writer) int {
 	}
 	res, err := verify.Compare(before, after, scopes)
 	if err != nil {
+		// A pair from two different repositories is the fleet-loop mistake
+		// (one wrong filename, every repo green), so the refusal names the
+		// two files the operator actually paired.
+		var mm *verify.MismatchError
+		if errors.As(err, &mm) {
+			mm.BeforeName, mm.AfterName = *beforePath, *afterPath
+		}
 		return errExit(&plan.InvalidError{Msg: err.Error()}, stderr)
 	}
 	for _, c := range res.Changed {
-		fmt.Fprintf(stdout, "changed: %s  %s → %s\n", c.Path, fmtOwners(c.Before), fmtOwners(c.After))
+		fmt.Fprintf(stdout, "changed: %s  %s → %s\n", verify.EscapePath(c.Path), fmtOwners(c.Before), fmtOwners(c.After))
 	}
 	// Tree deltas are reported, never fatal (R-18). They are the ordinary
 	// difference between two refs, so they print after the ownership changes
 	// rather than competing with them for a reader's attention.
 	for _, c := range res.Added {
-		fmt.Fprintf(stdout, "added:   %s  %s\n", c.Path, fmtOwners(c.After))
+		fmt.Fprintf(stdout, "added:   %s  %s\n", verify.EscapePath(c.Path), fmtOwners(c.After))
 	}
 	for _, c := range res.Removed {
-		fmt.Fprintf(stdout, "removed: %s  %s\n", c.Path, fmtOwners(c.Before))
+		fmt.Fprintf(stdout, "removed: %s  %s\n", verify.EscapePath(c.Path), fmtOwners(c.Before))
 	}
 	if !res.OK() {
 		// The loudest string in the tool is reserved for the case it is about:
@@ -876,7 +1072,7 @@ func cmdVerify(args []string, stdout, stderr io.Writer) int {
 			fmt.Fprintf(stderr, "INVARIANT VIOLATED: %d path(s) changed that no --scope declared (--scope is repeatable; pass one per intended scope)\n", len(res.Violations))
 		}
 		for _, v := range res.Violations {
-			fmt.Fprintf(stderr, "  %s  %s → %s\n", v.Path, fmtOwners(v.Before), fmtOwners(v.After))
+			fmt.Fprintf(stderr, "  %s  %s → %s\n", verify.EscapePath(v.Path), fmtOwners(v.Before), fmtOwners(v.After))
 		}
 		return ExitRefused
 	}
@@ -995,12 +1191,19 @@ func cmdAudit(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		return errExit(err, stderr)
 	}
-	content, err := gittree.ReadFileAtRef(*repo, *branch, coPath)
+	content, err := codeownersAtRef(*repo, *branch, tree, all, coPath)
 	if err != nil {
-		return errExit(&plan.InvalidError{Msg: err.Error()}, stderr)
+		return errExit(err, stderr)
 	}
 
-	in := audit.Input{Content: content, Tree: tree, CodeownersPath: coPath, AllPresent: all}
+	in := audit.Input{Content: content, Tree: tree, CodeownersPath: coPath, AllPresent: all,
+		NestedPresent: gittree.FindNestedCodeownersPaths(tree)}
+	// A symlinked CODEOWNERS: `cat-file` returns the LINK TARGET as content, so
+	// without the recorded mode the target string is parsed as a rule and
+	// reported as a dead pattern. The mode is the same fact `sync` refuses on.
+	if gitEntryMode(*repo, *branch, coPath) == "120000" {
+		in.SymlinkTarget = strings.TrimSpace(string(content))
+	}
 	if *checksFlag != "" {
 		in.Checks = map[string]bool{}
 		for _, c := range strings.Split(*checksFlag, ",") {
@@ -1019,6 +1222,12 @@ func cmdAudit(args []string, stdout, stderr io.Writer) int {
 			}
 			in.Checks[fmt.Sprintf("A-%d", n)] = true
 		}
+	}
+	// The working-tree half of A-10, gathered only when that check is running
+	// and only when the ref IS what this checkout has: on any other ref the
+	// files on disk belong to a different commit and say nothing about it.
+	if in.Checks == nil || in.Checks["A-10"] {
+		in.StagedHigher = stagedHigherCodeowners(*repo, *branch, tree, coPath)
 	}
 	apiChecksWanted := in.Checks == nil || in.Checks["A-1"] || in.Checks["A-2"] || in.Checks["A-3"]
 	if apiChecksWanted && authToken != "" && *githubRepo != "" {
@@ -1086,6 +1295,55 @@ func cmdAudit(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stdout, "audit clean")
 	}
 	return ExitOK
+}
+
+// stagedHigherCodeowners lists the CODEOWNERS files on disk, uncommitted at
+// ref, at an S-8 location that OUTRANKS the file this audit is about (A-10).
+//
+// `audit` reads the ref because GitHub reads the ref, and that stays true —
+// this only reports a file whose arrival redefines which document the whole
+// report was about. Ignored files are excluded (ListWorkTree uses
+// --exclude-standard): a CODEOWNERS git is told never to track can never
+// supersede anything.
+//
+// Everything it cannot establish answers "nothing found": the finding is an
+// assertion about the checkout, and asserting it from a lookup that failed
+// would turn a CI gate red on evidence nobody has.
+func stagedHigherCodeowners(repoDir, ref string, tree []string, coPath string) []string {
+	if !refIsCheckedOut(repoDir, ref) {
+		return nil
+	}
+	work, err := gittree.ListWorkTree(repoDir)
+	if err != nil {
+		return nil
+	}
+	onDisk := make(map[string]bool, len(work))
+	for _, p := range work {
+		onDisk[p] = true
+	}
+	var found []string
+	for _, loc := range gittree.CodeownersLocations {
+		if onDisk[loc] && !trackedAt(tree, loc) && outranksCodeowners(loc, coPath) {
+			found = append(found, loc)
+		}
+	}
+	return found
+}
+
+// refIsCheckedOut reports whether ref names the commit this working tree is
+// standing on, so a fact read off disk is a fact about that ref. Resolved
+// commits, not names, for the reason checkBranchIsWritable compares them that
+// way: a tag or an alias branch naming the same commit is the same tree.
+func refIsCheckedOut(repoDir, ref string) bool {
+	if ref == "HEAD" {
+		return true
+	}
+	head, err := gitLine(repoDir, "rev-parse", "--verify", "--end-of-options", "HEAD^{commit}")
+	if err != nil {
+		return false
+	}
+	want, err := gitLine(repoDir, "rev-parse", "--verify", "--end-of-options", ref+"^{commit}")
+	return err == nil && head == want
 }
 
 // The --fail-on thresholds, and the severity ladder they are compared on.

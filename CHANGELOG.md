@@ -12,6 +12,143 @@ changes to which class a failure lands in are called out explicitly.
 
 ### Fixed (from five user-test personas driving the shipped binary)
 
+- **A CODEOWNERS the working tree has but git does not is disclosed, and one
+  it can never have is refused.** `sync`'s D5 fallback searches the working
+  tree when the ref carries no CODEOWNERS, so a template a provisioning script
+  dropped in became the baseline INV-1 and INV-2 were proven against — reported
+  `applied (proven: tree)` at exit 0, while `plan`, `snapshot` and `audit` all
+  exit 3 on the same repository at the same moment because GitHub reads no
+  CODEOWNERS from it, and R-23's `--create` gate was never consulted. The
+  fallback stays (it is what lets a nightly job amend in pass 2 what it created
+  in pass 1), but every verb that reads the file now warns that git has never
+  recorded it — on stderr and in `warnings`, so the fleet can see which repos
+  still need a commit. The one shape no re-run can fix is refused instead: a
+  CODEOWNERS this repository's own ignore rules match, where `git add` declines
+  and the write governs nothing by construction, like a symlinked target or a
+  submodule mount. **Exit-code change:** an ignored CODEOWNERS moves exit 0 →
+  exit 2, the per-repo class a fleet loop records and steps past; an untracked
+  but committable one stays exit 0 with a warning, and no exit-3 verdict moves.
+
+- **A repository mid-migration between CODEOWNERS locations is refused rather
+  than edited on the wrong side.** With root `CODEOWNERS` committed and
+  `.github/CODEOWNERS` staged, discovery looked only at the ref, so `sync`
+  amended the OUTGOING file, reported `applied` at exit 0 and put that path in
+  `codeowners_path` for the rollout to stage — an edit that dies the moment the
+  migration commit lands (S-8). `audit` called the same repository clean, its
+  A-10 check being tree-only. `sync` now refuses, naming both files, with
+  `--file` as the way to say which half of the migration this run is in; A-10
+  reports the staged file at severity `error`, the one thing `audit` reads off
+  disk, and only when `--branch` is the commit this clone is standing on.
+  Ownership still resolves against the ref, and a LOWER-precedence file in the
+  working tree is not a migration and is not reported. **Exit-code changes:**
+  `sync` exit 0 → exit 2 in such a repository; `audit` exit 0 → exit 4
+  (findings), the class `--fail-on` already governs. No exit-3 verdict moves.
+
+- **`--file` naming a path the repository does not have is refused in terms of
+  that path.** `sync --file OWNERS` in a repo carrying CODEOWNERS in all three
+  S-8 locations answered "no CODEOWNERS file found in .github/, root, or docs/
+  at HEAD; re-run with --create to write one at .github/CODEOWNERS, or --file
+  to name a path" — false three times over, and that text is what a fleet's
+  `needs-human` records carry, so triage concluded those repos had no
+  CODEOWNERS at all. The refusal now names the missing path, offers `--create`
+  at that path (which is where it really writes), and offers amending the
+  governing file only when there is one. The discovery-path wording is
+  unchanged, because there it is true. On `audit` and `snapshot`, where the
+  file must be committed, the same mistake used to surface as
+  `git cat-file --end-of-options blob HEAD:docs/CODEOWNERS: exit status 128` —
+  a plumbing command nobody ran, carrying a flag this tool passes on the
+  reader's behalf; it now names the path, the ref, and the CODEOWNERS the ref
+  does carry. Both keep their existing exit classes (2 for `sync`, 3 for
+  `audit`/`snapshot`, matching the sibling "no CODEOWNERS found … use --file"
+  verdict on the same code path).
+
+- **R-24's disclosure now reaches `plan`, `apply` and `lint`, not only `sync`.**
+  BEHAVIOR.md specifies it as "the record says so — every time, on stderr and
+  in `warnings`", but the check had a single call site: `plan --file
+  docs/CODEOWNERS` in a repo GitHub resolves from `.github/CODEOWNERS` wrote
+  its plan in silence, `apply` reported the write in silence, and `lint` —
+  which writes with no plan for anybody to review — repaired that file and
+  reported success. All three now emit the same warnings `sync` does; `plan`
+  carries them in the plan's own `warnings` array, which is the artifact a
+  human approves, and `lint` in its JSON `warnings`. No exit code changes: a
+  disclosure is not a refusal, and a run pointed at the governing file emits
+  nothing new.
+
+- **`lint --cache-dir` prints the reason LINTING.md documents.** The page lists
+  "`--cache-dir is not available with --lint` (exit 3)" among lint's errors,
+  with the reason a cached "this owner does not exist" is served without
+  revalidation and here deletes an owner rather than printing a finding — but
+  `lint`'s flagset never defined the flag, so the reader got
+  `flag provided but not defined: -cache-dir` and a usage dump, and the
+  documented sentence was reachable only through the older `audit --lint`
+  spelling. Both `--cache-dir` and `--cache-ttl` are now defined on `lint` and
+  refused with their reasons. The exit class is unchanged (3, as documented);
+  a run that passes neither flag is unaffected.
+
+- **`apply` names the CODEOWNERS by its repo-relative path.** GUIDE.md
+  documents `applied: .github/CODEOWNERS (58 → 101 bytes)` and the run printed
+  an absolute one, because a plan records `repo` absolute so that it travels.
+  Every machine that applied the same plan therefore logged a different line,
+  which anyone diffing rollout logs across runners had to filter out. The path
+  is now the plan's own `codeowners_path`; the byte counts are still the ones
+  measured on disk. No exit code changes.
+
+- **A CODEOWNERS left unmerged by a conflict is refused, not rewritten.** With
+  `UU .github/CODEOWNERS` from a conflicted merge, rebase or cherry-pick,
+  `sync` saw only S-3 syntax errors in the markers, kept BOTH sides' rules live
+  — `=======` is not invalid, it parses as a zero-owner rule (S-9) — and
+  reported `applied (proven: tree)` at exit 0. The invariants were proven
+  against a "before" ownership no commit has ever had and GitHub will never
+  see, and the file was still `UU` afterwards, so the proven change could not
+  be committed as it stood. `plan` emitted the same mangled state as a
+  reviewable artifact (markers and all, in `after_content`); `lint` judged
+  every rule against it; and `apply` could not catch it either, because
+  `git checkout --ours` leaves the path unmerged holding exactly the bytes
+  `sha256_before` was computed from, so the write landed at exit 0 and the
+  operator's `git add` would have resolved somebody's merge with tool-synthesized
+  content. All four verbs now ask `git status --porcelain` about the governing
+  file and refuse the unmerged codes (`DD AU UD UA DU AA UU`). The guard is
+  scoped to that file by pathspec: a conflict in any other file, an ordinary
+  dirty working tree, and a rebase in progress with nothing unmerged all sync
+  as before. **Exit-code change:** what reported `status:"applied"` at exit 0
+  in such a repo is now `status:"refused"` at exit 2 — the per-repo class a
+  fleet loop records and steps past; no policy-level (exit 3) verdict moves.
+
+- **A CODEOWNERS location occupied by a submodule is refused, not written
+  through.** The shared-org-`.github` layout mounts another repository at a
+  location GitHub reads, and `git ls-tree` reports it as a gitlink — so
+  discovery correctly found no CODEOWNERS, and `sync`'s working-tree fallback
+  (D5) then adopted the file inside the SUBMODULE's checkout: it amended it,
+  proved the change against the submodule's owners, and reported
+  `applied (proven: tree)` at exit 0, while the parent cannot even stage that
+  path (`fatal: Pathspec '.github/CODEOWNERS' is in submodule '.github'`).
+  `plan --file` into the mount produced a reviewable artifact for the same
+  write, which `apply` then performed. `sync`, `plan` and `lint` now refuse when
+  a tracked non-directory stands on the write path, naming the object git
+  actually records there — a submodule mount and a stale committed link need
+  different fixes. **Exit-code change:** what reported `status:"applied"` at
+  exit 0 in such a repo is now `status:"refused"` at exit 2, the per-repo class
+  a fleet loop records and steps past; no policy-level (exit 3) verdict moves.
+  A submodule anywhere else in the tree is unaffected.
+
+- **`apply` refuses a plan whose ref is not what the clone has checked out
+  (S-7).** `sync` and `lint` have always refused to prove a change against one
+  ref's tree and write it into another checkout, and `sync`'s refusal offers
+  `plan` as the way to target another ref — but `apply` never checked, so the
+  documented escape hatch performed the write `sync` had just declined. With
+  `.github` a directory on `main` and a submodule mount on the checked-out
+  branch, `plan --branch main` was internally consistent (main's tree has no
+  non-tree ancestor, and its digest never moved) while `apply` wrote the
+  submodule's file at exit 0. `tree_sha256` cannot see this: the tree the plan
+  names did not change — the clone is elsewhere. Plans that name no ref, or
+  name `HEAD`, are unaffected; they are covered by the tree digest and
+  `sha256_before` as before. A plan whose ref no longer resolves here — the
+  branch was deleted or renamed since it was written — is refused in words
+  rather than by echoing `git rev-parse`. **Exit-code changes:** exit 0 → exit
+  2 for an apply run from the wrong checkout, and exit 3 → exit 2 when the
+  plan's ref does not resolve in the clone, which is a fact about this
+  repository rather than about the plan.
+
 - **A `declare` batched with an op on one tracked file is no longer refused
   (R-22b).** R-8's zero-match guard exists because two `declare`d rules both land
   at EOF, where last-match-wins picks between them silently — but it fired

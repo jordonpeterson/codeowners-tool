@@ -81,6 +81,14 @@ func Parse(s string) (Op, error) {
 	kind := Kind(strings.TrimSpace(s[:open]))
 	argStr := s[open+1 : len(s)-1]
 	args := splitArgs(argStr)
+	// Every verb takes at least two arguments, so a short count is where a
+	// swallowed separator shows up — and blaming the arity there sends the
+	// operator counting arguments they wrote two of.
+	if len(args) < 2 {
+		if bad, ok := swallowedSeparator(argStr); ok {
+			return Op{}, fmt.Errorf("argument %q ends with a dangling backslash, and that backslash escaped the comma after it: `\\,` is a literal comma INSIDE a path, so the separator and everything past it became part of this one argument", bad)
+		}
+	}
 	op := Op{Kind: kind, Raw: s}
 
 	switch kind {
@@ -104,15 +112,26 @@ func Parse(s string) (Op, error) {
 			break
 		}
 		if len(args) != 2 {
+			// An argument that cannot be an owner is named as such, before the
+			// arity is blamed: `add_owner(/a,b/, @org/x)` has three arguments
+			// because a comma inside a PATH split one of them, and "got 3 args"
+			// sends the operator counting arguments they wrote two of.
+			if bad, ok := nonOwnerArg(args[1:]); ok {
+				return Op{}, fmt.Errorf("invalid owner token %q%s", bad, commaSplitHint)
+			}
 			return Op{}, fmt.Errorf("%s takes (scope, owner) or (scope, [owners]), got %d args", kind, len(args))
 		}
 		if !file.ValidOwnerToken(args[1]) {
-			return Op{}, fmt.Errorf("invalid owner token %q", args[1])
+			return Op{}, fmt.Errorf("invalid owner token %q%s", args[1], commaSplitHint)
 		}
 		op.Owners = []string{args[1]}
 	case SetOwners:
 		if len(args) < 2 || !strings.HasPrefix(args[1], "[") || !strings.HasSuffix(args[len(args)-1], "]") {
-			return Op{}, fmt.Errorf("set_owners takes (scope, [owners]) — the list brackets are required")
+			hint := ""
+			if len(args) > 1 && !strings.HasPrefix(args[1], "[") && !file.ValidOwnerToken(args[1]) {
+				hint = commaSplitHint
+			}
+			return Op{}, fmt.Errorf("set_owners takes (scope, [owners]) — the list brackets are required%s", hint)
 		}
 		scope, excepts, err := parseScopeArg(args[0])
 		if err != nil {
@@ -252,6 +271,23 @@ func ParseAll(specs []string) ([]Op, error) {
 	return out, nil
 }
 
+// commaSplitHint names the one thing that can put text where an owner belongs:
+// an unescaped comma inside a scope. It is phrased as a condition because the
+// grammar cannot know which the comma was — `add_owner(/x/, nonsense)` reaches
+// the same refusal with no comma of its own to blame — but naming the escape is
+// what makes a path holding a comma reachable at all.
+const commaSplitHint = `; if that text belongs to the scope, an unescaped comma separated it — a comma inside a path is written "\," (as a space is written "\ ")`
+
+// nonOwnerArg returns the first argument that cannot be an owner token.
+func nonOwnerArg(args []string) (string, bool) {
+	for _, a := range args {
+		if !file.ValidOwnerToken(a) {
+			return a, true
+		}
+	}
+	return "", false
+}
+
 func checkScope(scope string) error {
 	if scope == "" {
 		return fmt.Errorf("empty scope")
@@ -276,6 +312,19 @@ func checkScope(scope string) error {
 	}
 	if _, err := pattern.Compile(scope); err != nil {
 		return fmt.Errorf("invalid scope %q: %v", scope, err)
+	}
+	// A pattern whose language is EMPTY is dead in every repository, not just
+	// in this one. R-5 refuses "creating a dead rule" from the tree, at exit 2,
+	// and on_zero_match=declare is allowed to overrule it — the guarantee it
+	// trades down to is "when someone later adds a matching file, this rule
+	// takes it" (GUARANTEES.md). For `**/` or `/` no such file can exist in any
+	// repo, so that guarantee is not weaker, it is void: the line would be
+	// written, reported `proven: structural`, and own nothing forever. Refuse
+	// it here, where the verdict is a fact about the op string alone and so
+	// belongs to exit 3 — `check`, which opens no repository, catches it before
+	// repo #1.
+	if pattern.NeverMatches(scope) {
+		return fmt.Errorf("scope %q can never match any path, in any repository — no repo-relative path can match it, so the rule would be dead everywhere and on_zero_match=declare would only write it down (R-5)", scope)
 	}
 	return nil
 }
@@ -404,21 +453,37 @@ func trimArg(s string) string {
 
 // splitArgs splits on top-level commas, keeping [...] groups intact enough
 // for set_owners; whitespace is trimmed from each piece.
+//
+// A BACKSLASHED byte is never structural — `\,` is a literal comma, `\[` a
+// literal bracket — which is the same escape the scope grammar already uses for
+// a space (checkScope, splitUnescapedWS). Without it a tracked path holding a
+// comma was unreachable by every spelling this tool has: `add_owner(/a,b/,
+// @org/x)` split into three arguments and came back as an arity error naming an
+// owner list nobody wrote, and the escaped spelling died on "dangling
+// backslash". A comma is a legal git path byte, and so are brackets (S-2 makes
+// them literal), so these are real monorepo paths.
+//
+// The backslash STAYS in the token: these are raw pattern texts, and stripping
+// the escape would hand the planner a pattern for a different path — the same
+// reason splitUnescapedWS keeps it.
 func splitArgs(s string) []string {
 	var args []string
 	depth := 0
 	start := 0
-	for i, r := range s {
-		switch r {
-		case '[':
+	esc := false
+	for i := 0; i < len(s); i++ {
+		switch c := s[i]; {
+		case esc:
+			esc = false
+		case c == '\\':
+			esc = true
+		case c == '[':
 			depth++
-		case ']':
+		case c == ']':
 			depth--
-		case ',':
-			if depth == 0 {
-				args = append(args, trimArg(s[start:i]))
-				start = i + 1
-			}
+		case c == ',' && depth == 0:
+			args = append(args, trimArg(s[start:i]))
+			start = i + 1
 		}
 	}
 	args = append(args, trimArg(s[start:]))
@@ -430,6 +495,36 @@ func splitArgs(s string) []string {
 		args = args[:len(args)-1]
 	}
 	return args
+}
+
+// swallowedSeparator finds an argument that ends with a dangling backslash and
+// so ate the comma after it.
+//
+// `\,` is a literal comma inside a path (splitArgs), so a backslash at the END
+// of an argument escapes the SEPARATOR instead, and the op arrives with fewer
+// arguments than it names: `add_owner(/docs/ except /docs/gen\, @org/team_a)`
+// comes out as one argument.
+//
+// The signature is the escaped comma followed by whitespace or the end of the
+// argument list. A scope may not hold unescaped whitespace (checkScope), so
+// `\, ` cannot be part of one path, while `/a\,b/` — a real path with a comma
+// in its name — is left alone. Consulted only when the split already came up
+// short, so a well-formed op never reaches it.
+func swallowedSeparator(body string) (string, bool) {
+	esc := false
+	for i := 0; i < len(body); i++ {
+		c := body[i]
+		switch {
+		case esc:
+			esc = false
+			if c == ',' && (i+1 == len(body) || body[i+1] == ' ' || body[i+1] == '\t') {
+				return trimArg(body[:i]), true
+			}
+		case c == '\\':
+			esc = true
+		}
+	}
+	return "", false
 }
 
 // WithExcept returns the op string s re-spelled with an except clause carrying
@@ -449,6 +544,12 @@ func splitArgs(s string) []string {
 // the round trip itself rather than a list of forbidden characters, because a
 // balanced character class is live pattern syntax (R-37c) and survives.
 //
+// On a false return the ATTEMPTED string is still returned when one could be
+// built, so a caller with nothing structural to name can report the grammar's
+// own refusal of it rather than inventing a sentence: an element ending in a
+// backslash eats the comma that ends the scope argument, and "contains a
+// character an op string cannot carry" names no character at all.
+//
 // s must be an op string Parse accepted, and must not already carry an except
 // clause; both spellings on one op are refused before this is reached (R-37b).
 func WithExcept(s string, pats []string) (string, bool) {
@@ -459,15 +560,15 @@ func WithExcept(s string, pats []string) (string, bool) {
 	out := s[:start] + arg + " except " + strings.Join(pats, " ") + s[end:]
 	gotArg, _, _, ok := scopeArgSpan(out)
 	if !ok {
-		return "", false
+		return out, false
 	}
 	gotScope, gotPats, isExcept := splitExceptClause(gotArg)
 	if !isExcept || gotScope != arg || len(gotPats) != len(pats) {
-		return "", false
+		return out, false
 	}
 	for i := range pats {
 		if gotPats[i] != pats[i] {
-			return "", false
+			return out, false
 		}
 	}
 	return out, true
@@ -484,16 +585,19 @@ func scopeArgSpan(s string) (arg string, start, end int, ok bool) {
 	}
 	body := s[open+1 : len(s)-1]
 	depth, cut := 0, -1
-	for i, r := range body {
-		switch r {
-		case '[':
+	esc := false
+	for i := 0; i < len(body); i++ {
+		switch c := body[i]; {
+		case esc:
+			esc = false
+		case c == '\\':
+			esc = true
+		case c == '[':
 			depth++
-		case ']':
+		case c == ']':
 			depth--
-		case ',':
-			if depth == 0 && cut < 0 {
-				cut = i
-			}
+		case c == ',' && depth == 0 && cut < 0:
+			cut = i
 		}
 	}
 	if cut < 0 {
@@ -768,7 +872,30 @@ func NamesOwners(s string) bool {
 	if !ok {
 		return false
 	}
-	return len(splitArgs(body)) > 1
+	args := splitArgs(body)
+	if len(args) < 2 {
+		return false
+	}
+	if strings.HasPrefix(args[1], "[") {
+		// A bracketed list states owners whatever it holds; what is inside it
+		// is the list grammar's diagnosis to make, not this one's.
+		return true
+	}
+	// Arity alone WAS the whole test, and the reason above still holds: the
+	// bare `add_owner(/x/, @a)` spelling states owners exactly as much as the
+	// list does. What arity could not tell apart is text that is not an owner
+	// at all. A comma is a legal byte in a git path, so `add_owner(/a,b/)` — an
+	// op naming one scope and no owners — arrived here as two arguments and was
+	// refused for naming owners "in its op string AND in an owners array"
+	// (R-39b), sending the reader to look for an array they did not write.
+	// Text that cannot be an owner names none, and the op string's own grammar
+	// then reports what is actually wrong with it.
+	for _, a := range args[1:] {
+		if !file.ValidOwnerToken(a) {
+			return false
+		}
+	}
+	return true
 }
 
 // opBody returns the text between an op string's outer parentheses, split

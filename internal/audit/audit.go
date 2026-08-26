@@ -47,10 +47,16 @@ type Report struct {
 type Input struct {
 	Content        []byte
 	Tree           []string
-	CodeownersPath string          // for A-11
-	AllPresent     []string        // all CODEOWNERS files in the tree (A-10)
-	Checks         map[string]bool // nil = all
-	WarnSize       int             // default 2,500,000
+	CodeownersPath string   // for A-11
+	AllPresent     []string // CODEOWNERS files at the three S-8 locations (A-10)
+	NestedPresent  []string // CODEOWNERS files GitHub never searches (A-10)
+	// StagedHigher is the CODEOWNERS files sitting in the WORKING TREE at an
+	// S-8 location that OUTRANKS CodeownersPath and are not committed at the
+	// ref (A-10). The caller establishes both facts; audit only reports them.
+	StagedHigher  []string
+	SymlinkTarget string          // set when CodeownersPath is a symlink at ref (A-10)
+	Checks        map[string]bool // nil = all
+	WarnSize      int             // default 2,500,000
 
 	// API-dependent checks run only when Client is set.
 	Client              *ghapi.Client
@@ -67,6 +73,32 @@ func Run(in Input) *Report {
 		in.WarnSize = 2_500_000
 	}
 	rep := &Report{}
+
+	// A-10, symlink shape: the governing entry is a link blob, so nothing in
+	// this repository is owned and Content is the LINK TARGET, not a document.
+	//
+	// `cat-file` hands back a symlink's target as its content, and parsing that
+	// produced `[A-4/warning] pattern "../OWNERS.real" matches zero tracked
+	// files` — a finding about a filesystem path, leaving the operator to infer
+	// the real defect from A-9's "100% of tracked paths have no owner". `sync`
+	// already refuses this repository and names the link; audit is where the
+	// same fact belongs, so it is reported here and everything derived from the
+	// bytes below is skipped rather than invented.
+	if in.SymlinkTarget != "" {
+		if in.enabled("A-10") {
+			rep.add(Finding{Check: "A-10", Severity: "error",
+				Message: fmt.Sprintf("%s is a symlink to %q, and GitHub does not follow a symlinked CODEOWNERS (S-8) — it loads no rules at all, so every path in this repository is unowned; replace the link with a real file. No other check ran: the file's bytes are the link target, not a CODEOWNERS document",
+					in.CodeownersPath, in.SymlinkTarget)})
+		} else {
+			// A subset that excludes A-10 must not come back clean over bytes
+			// that are not a CODEOWNERS at all: the requested check could not
+			// be run, which is exit 5, not a vacuous pass (R-12).
+			rep.inconclusive(fmt.Sprintf("%s is a symlink to %q; its bytes are the link target, not a CODEOWNERS document — run `audit --checks a10` for the finding",
+				in.CodeownersPath, in.SymlinkTarget))
+		}
+		return rep
+	}
+
 	f := file.Parse(in.Content)
 	rules := f.Rules()
 	res := resolve.All(f, in.Tree)
@@ -106,6 +138,22 @@ func Run(in Input) *Report {
 						// review) — the user must correct the casing by hand.
 						msg += "; correct the pattern to the tree's actual casing"
 					}
+					rep.add(Finding{Check: "A-5", Severity: "warning", Line: r.LineIndex + 1, Pattern: r.PatternText,
+						SuggestedPattern: sugg, Message: msg})
+				}
+			} else if sugg, collides, normOnly := normalizationCorrected(r, in.Tree); normOnly {
+				if in.enabled("A-5") {
+					// A-5 rather than a new check: same defect class as the
+					// case miss it already covers — the pattern is dead only
+					// because of an invisible spelling difference, the remedy
+					// is to retype it from the tree, and the severity and the
+					// suggested_pattern field are the same. Case is one
+					// invisible difference; NFC vs NFD is the other.
+					msg := fmt.Sprintf("pattern %q matches zero tracked files, but %q differs from it ONLY by Unicode normalization", r.PatternText, collides)
+					if cp := composedCodepoints(r.PatternText); cp != "" {
+						msg += " (" + cp + ")"
+					}
+					msg += " — CODEOWNERS matches bytes, so two spellings that render identically never match; retype the pattern from the tree's own spelling. Compared under a partial NFD over Latin-1 accented letters, not a full Unicode normalization"
 					rep.add(Finding{Check: "A-5", Severity: "warning", Line: r.LineIndex + 1, Pattern: r.PatternText,
 						SuggestedPattern: sugg, Message: msg})
 				}
@@ -179,6 +227,50 @@ func Run(in Input) *Report {
 		rep.add(Finding{Check: "A-10", Severity: "error",
 			Message: fmt.Sprintf("multiple CODEOWNERS files present (%s); GitHub uses only %q and silently ignores the rest (S-8)",
 				strings.Join(in.AllPresent, ", "), in.AllPresent[0])})
+	}
+
+	// A-10, nested shape: package-level CODEOWNERS files GitHub never searches.
+	//
+	// Left behind by Bazel/Gerrit OWNERS migrations and by merging split repos,
+	// they look authoritative and people route review by them; GitHub honors
+	// not one line. Discovery only ever tested the three root-level S-8
+	// locations, so `audit clean`, exit 0 — the CI gate asserting this
+	// repository has no ownership rot — was asserting it over whole files of
+	// assignments that do nothing.
+	//
+	// `warning`, not the `error` the case above carries. Two root-level files
+	// are ambiguity in the document that GOVERNS — both are searched, one
+	// silently loses. A nested file is not searched at all, so what governs is
+	// never in doubt, and it is often a deliberate artifact another tool still
+	// consumes. `--fail-on error` is the tier for "GitHub is doing something
+	// other than what the file says"; ranking this there turns that gate red on
+	// every migrated monorepo over a condition no edit to the governing file
+	// resolves. It is still rot, so it clears `info` and trips the default gate.
+	if in.enabled("A-10") && len(in.NestedPresent) > 0 {
+		rep.add(Finding{Check: "A-10", Severity: "warning",
+			Message: fmt.Sprintf("%d CODEOWNERS file(s) GitHub never loads: %s — only .github/, root and docs/ at the repository ROOT are searched (S-8), so no rule in them takes effect however the team reads them",
+				len(in.NestedPresent), strings.Join(in.NestedPresent, ", "))})
+	}
+
+	// A-10, mid-migration shape: a higher-precedence CODEOWNERS in the working
+	// tree, not yet committed.
+	//
+	// The check above is tree-only, so a repo moving from root `CODEOWNERS` to
+	// `.github/CODEOWNERS` — the new file staged, the migration commit not yet
+	// made — came back `audit clean`, exit 0, while every rule in the file this
+	// report describes is one commit away from being ignored. Reporting it does
+	// not change what audit RESOLVES against: ownership below is still the ref's,
+	// because that is what GitHub reads. This is the one fact about the checkout
+	// that changes what the report will mean tomorrow.
+	//
+	// `error`, like two committed files and unlike the nested shape: both are
+	// ambiguity about which document GOVERNS, and the resolution here is a
+	// single `git commit` away rather than a permanent property of a migrated
+	// monorepo.
+	if in.enabled("A-10") && len(in.StagedHigher) > 0 {
+		rep.add(Finding{Check: "A-10", Severity: "error",
+			Message: fmt.Sprintf("%s is in the working tree but not committed at this ref, and outranks %s under S-8 (.github/ > root > docs/, first found wins, never merged) — this report describes %s, and every rule in it stops applying the moment that file is committed",
+				strings.Join(in.StagedHigher, ", "), in.CodeownersPath, in.CodeownersPath)})
 	}
 
 	// A-11: the CODEOWNERS file itself is unowned. A zero-owner match is
@@ -429,6 +521,41 @@ func caseCorrected(r *file.Rule, tree []string) (suggestion string, caseOnly boo
 		}
 	}
 	return "", false
+}
+
+// normalizationCorrected reports whether the rule matches zero files ONLY
+// because the pattern and the tree disagree about Unicode normalization, and
+// names the tracked path it collides with.
+//
+// Both sides go through the same partial decomposition (see normalize.go), so
+// the test is symmetric: whichever side is composed, they agree afterwards only
+// if the difference was composition. Two names that differ by a real accent —
+// "réunion" against "rèunion" — decompose to different marks and are correctly
+// left to A-4.
+//
+// suggestion is non-empty only when the decomposed pattern VERIFIABLY matches a
+// real tree path byte for byte, matching caseCorrected's rule: an unverified
+// suggestion between two identical-looking strings is worse than none.
+func normalizationCorrected(r *file.Rule, tree []string) (suggestion, collides string, normOnly bool) {
+	nfd := decompose(r.PatternText)
+	p, err := pattern.Compile(nfd)
+	if err != nil {
+		return "", "", false
+	}
+	for _, path := range tree {
+		if !p.Match(decompose(path)) {
+			continue
+		}
+		if collides == "" {
+			collides = path
+		}
+		// The decomposed pattern is offered as a fix only once it is shown to
+		// match a path exactly as the tree committed it.
+		if suggestion == "" && nfd != r.PatternText && p.Match(path) {
+			suggestion, collides = nfd, path
+		}
+	}
+	return suggestion, collides, collides != ""
 }
 
 func splitTeam(owner string) (org, slug string, ok bool) {

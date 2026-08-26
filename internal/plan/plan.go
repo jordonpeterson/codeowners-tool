@@ -887,12 +887,64 @@ func synthSet(f *file.File, tree []string, op ops.Op, scope map[string]bool, des
 					r.LineIndex+1, op.Scope, at+1))
 			}
 		}
+		warnStrandedByInsert(f, tree, cur, at, op, pl)
 	}
 
 	for p := range scope {
 		desired[p] = append([]string{}, op.Owners...)
 	}
 	return nil
+}
+
+// warnStrandedByInsert discloses a pre-existing rule that the line this run
+// inserted leaves permanently dead.
+//
+// The disclosure above covers the case where the stranded rule's pattern is
+// BYTE-EQUAL to the scope, and gives the reason it exists: "without this, the
+// run creating the dead line is the one run that says nothing about it". A
+// NARROWER pre-existing rule is exactly that case and was silent —
+// `set_owners(/docs/, [@org/new])` over a file holding `/docs/x/ @org/x-team`
+// inserts after it, and every path `/docs/x/` matches is now won by the new
+// line. Resolved ownership is right (those paths are in scope, so the
+// invariants hold); what the write authors is undisclosed rot. The repo audits
+// clean before the run and fails A-6 ("fully shadowed", exit 4) after it, so a
+// CI gate on `audit` breaks with nothing in the run's own output to explain it.
+//
+// Disclosure rather than repair: A-6 is structural — it fires when a rule wins
+// no tracked path — so amending the stranded rule's owners would not revive it,
+// and the only edits that would are deleting it or moving the new line above it.
+// Deleting a rule the op never named destroys a narrower intent the operator
+// may want back, and reordering is R-1's flat prohibition. So the run says what
+// it did and leaves the line to a human.
+//
+// Decided over the resolved tree, exactly as A-6 decides it, and limited to
+// rules this run actually killed: one that already won nothing was dead before
+// the run, and audit has always reported that.
+func warnStrandedByInsert(f *file.File, tree []string, before map[string]resolve.Resolution, at int, op ops.Op, pl *Plan) {
+	after := resolve.All(f, tree)
+	wonBefore, wonAfter := map[int]bool{}, map[int]bool{}
+	for _, p := range tree {
+		if r := before[p]; r.Matched {
+			wonBefore[r.LineIndex] = true
+		}
+		if r := after[p]; r.Matched {
+			wonAfter[r.LineIndex] = true
+		}
+	}
+	for _, r := range f.Rules() {
+		// Only rules ABOVE the insert can be shadowed by it, and their line
+		// indexes are the ones `before` was keyed by (the insert shifted only
+		// what follows it). A byte-equal pattern is R-7's disclosure above.
+		if r.LineIndex >= at || r.PatternText == op.Scope {
+			continue
+		}
+		if !wonBefore[r.LineIndex] || wonAfter[r.LineIndex] {
+			continue
+		}
+		pl.addWarning(fmt.Sprintf(
+			"line %d: rule %q is now fully shadowed by line %d, which this run inserted for scope %q — every path it matches is won by that line under last-match-wins (S-1), so it can never take effect while still stating %s to a reader; `audit` reports it as A-6 (exit 4) from the next run on. Delete the line, or narrow the new one.",
+			r.LineIndex+1, r.PatternText, at+1, op.Scope, fmtOwners(r.OwnersCopy())))
+	}
 }
 
 func synthRemove(f *file.File, tree []string, op ops.Op, scope map[string]bool, desired map[string][]string, onEmpty string, pl *Plan) error {

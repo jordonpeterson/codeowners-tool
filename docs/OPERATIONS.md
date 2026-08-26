@@ -14,6 +14,26 @@ Scope is a directory, file path, or glob — same syntax as CODEOWNERS patterns.
 | `remove_owner(scope, owner)` | Owner — or a bracketed list (R-33), or an `owners` array (R-39) — stops owning every path in scope. If a rule's owner set would empty, an `--on-empty` policy is **required**. |
 | `rename_owner(old, new)` | Global identifier substitution — the only op safe as pure text replacement (it can't change any rule's match set). |
 
+### Writing a scope (escapes, and scopes that are refused)
+
+An op string separates its arguments with commas and its `except` patterns with spaces, so
+a scope containing either character escapes it with a backslash — the pattern language's
+own escape, which stays in the text that is written to the file:
+
+```
+add_owner(/docs/release\ notes.md, @org/docs)   # a space in the path
+add_owner(/a\,b/, @org/x)                       # a comma in the path
+```
+
+Two kinds of scope are refused with no repository open (exit 3, caught by `check`), because
+the rule they would write is dead in **every** repo:
+
+- one no path can ever match — `/`, `**/`, `**/**` — which even `on_zero_match: declare`
+  would only write down as a line that owns nothing. `x/**/**`, `foo/**/` and `**/*.tf` are
+  alive and unaffected;
+- one starting with `#`, whose line reads back as a comment rather than as a rule — the
+  same standard that refuses `!` and `\#` (S-2).
+
 ### Naming several owners in one op (R-33, R-39)
 
 `add_owner` and `remove_owner` take a bracketed list wherever they take a single owner;
@@ -30,10 +50,16 @@ string. It goes on an op naming **only** its scope, and is re-spelled as the bra
 before anything else sees it — so one grammar validates both, both are reported as the
 list, and a refusal about an array quotes the list form it became.
 
+Against a repo holding `services/api/m.go` and `docs/d.md`, and a CODEOWNERS of exactly
+`/services/api/   @org/api-team`, both ops apply and both are reported:
+
 ```console
 $ codeowners-tool sync --policy ownership.json
-applied: 1 op(s) applied, 0 skipped; 1 line change(s), 1 path(s) change owners
+applied: 2 op(s) applied, 0 skipped; 2 line change(s), 2 path(s) change owners
+  ops[0]  applied (proven: tree)
+  ops[1]  applied (proven: tree)
 $ cat CODEOWNERS
+/docs/ @org/platform @org/sre
 /services/api/   @org/api-team @org/platform @org/sre
 ```
 

@@ -65,8 +65,8 @@ read (a bad `--branch`, no CODEOWNERS and no `--create`) have no file to name, a
 
 `warnings` carries what a human should look at in a repo the tool did not refuse over: a
 second CODEOWNERS file GitHub ignores (A-10), a run writing a file that is not the one
-GitHub reads, lines GitHub cannot parse and silently skips (S-3), and a comment still
-naming an owner a `rename_owner` renamed away. None of these is a reason to refuse a
+GitHub reads or one git has never recorded, lines GitHub cannot parse and silently skips
+(S-3), and a comment still naming an owner a `rename_owner` renamed away. None of these is a reason to refuse a
 correct edit, and none of them is visible at fleet scale unless the run that touched the
 file reports it. They are independent, so a run can carry several at once, and they ride
 on any record whose file was read — including a `refused` one, where the warning may be
@@ -105,3 +105,26 @@ and counted by neither. Keys with nothing in them are **omitted entirely** rathe
 emitted empty, which applies to `ops`, `warnings` and `changes`; guard with `// []`. See
 [FLEET.md](FLEET.md#the-jq-habit-worth-having) for the aggregation recipes.
 
+## Paths that are not valid UTF-8
+
+Git stores path bytes verbatim and JSON cannot: `encoding/json` folds every invalid byte
+to U+FFFD, which wrote two distinct tracked files as one duplicate key and dropped a path
+before `verify` ever saw it. Such a path is written under a key prefixed with **U+0000** —
+the one byte a git path can never contain — with each invalid byte percent-escaped (`%XX`,
+and a literal `%` as `%25`):
+
+```json
+"ownership": {
+  "\u0000bin/a%E9.md": ["@org/tools"],
+  ".github/CODEOWNERS": ["@org/every"]
+}
+```
+
+Every other key is untouched, so an ordinary snapshot is byte-for-byte what it always was —
+including a real file that literally spells `a%E9.md`. `verify` decodes the key back to the
+raw bytes before comparing, and prints the escaped spelling without the marker
+(`bin/a%E9.md`), which is what a `grep` over the snapshot matches.
+
+That printed spelling is for reading, not for identity: `bin/a\xe9.md` and a real ASCII
+file named `bin/a%E9.md` both print as `bin/a%E9.md`. The keys tell them apart — only one
+carries the marker — so compare snapshots, not console output.
