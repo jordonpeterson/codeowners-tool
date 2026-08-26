@@ -270,22 +270,25 @@ func usage(w io.Writer) {
   check    (--op 'OP' ... | --policy FILE) [--format text|json]
   plan     --op 'add_owner(/services/api, @org/team-1)' [--op ...] [--on-empty error|inherit|unowned]
            [--repo DIR] [--branch REF] [--file PATH] [--out plan.json]
+           [--max-size BYTES] [--warn-size BYTES]
   apply    --plan plan.json [--repo DIR]
   audit    [--checks a1,a3,a6] [--fail-on any|warning|error|never] [--format json|text]
            [--github-repo owner/name] [--token T | $GITHUB_TOKEN] [--api-url URL]
            [--cache-dir D] [--cache-ttl DUR] [--repo DIR] [--branch REF] [--file PATH]
+           [--lint [--remove-stale-paths] [--on-empty error|inherit|unowned] [--dry-run]]
   lint     --github-repo owner/name [--token T | $GITHUB_TOKEN] [--api-url URL]
            [--remove-stale-paths] [--on-empty error|inherit|unowned] [--dry-run]
            [--policy FILE] [--repo DIR] [--branch REF] [--file PATH] [--format text|json]
-  snapshot [--repo DIR] [--branch REF] [--out snap.json]
+  snapshot [--repo DIR] [--branch REF] [--file PATH] [--out snap.json]
   verify   --before before.json --after after.json [--scope PATTERN ...]
   version  print the build this binary was stamped with
 
 audit REPORTS — twelve checks, and it never writes. lint REPAIRS three of the
 things audit reports: @handles that whitespace has split, owners that no longer
 exist, and (only with --remove-stale-paths) rules matching nothing. It rewrites
-the WORKING-TREE file, so it needs a token and --github-repo; one lookup it
-cannot answer and nothing is written at all. Start with --dry-run.
+the WORKING-TREE file, so it needs a token and --github-repo — except offline,
+where --remove-stale-paths alone removes dead rules and checks no owner; one
+lookup it cannot answer and nothing is written at all. Start with --dry-run.
 
 audit --lint is the older spelling of lint and still works.
 
@@ -295,8 +298,9 @@ Exit 4 from lint means the file still needs a person — fixes pending under
 
 Exit codes: 0 ok · 1 no-op · 2 refused (invariant/size) · 3 invalid input
             4 audit findings · 5 inconclusive (fail-closed) · 6 rolled back
-sync/check use a coarser contract and return only:
+sync uses a coarser contract and returns only:
             0 converged · 2 this repo needs a human · 3 the policy is broken
+check opens no repository, so it returns 0 (valid policy) or 3 (broken) only.
 `)
 }
 
@@ -771,7 +775,7 @@ func cmdPlan(args []string, stdout, stderr io.Writer) int {
 func cmdApply(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("apply", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	planPath := fs.String("plan", "", "plan JSON produced by `plan`")
+	planPath := fs.String("plan", "", "plan JSON `file` produced by plan")
 	repo := fs.String("repo", "", "path to local git repository (default: plan's repo)")
 	if err := fs.Parse(args); err != nil {
 		return flagParseCode(err)

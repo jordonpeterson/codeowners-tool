@@ -192,7 +192,7 @@ func cmdSync(args []string, stdout, stderr io.Writer) int {
 	branch := fs.String("branch", "HEAD", "ref whose tracked tree governs resolution (S-7)")
 	filePath := fs.String("file", "", "CODEOWNERS path override (repo-relative)")
 	onEmpty := fs.String("on-empty", "", "R-6 policy when remove_owner empties a set: error|inherit|unowned (only with --op)")
-	create := fs.Bool("create", false, "write .github/CODEOWNERS when the repo has none; never overwrites (R-23)")
+	create := fs.Bool("create", false, "write .github/CODEOWNERS when the repo has none; never overwrites (R-23) (only with --op)")
 	maxPaths := fs.Int("max-paths-changed", -1, "R-25 ceiling: refuse (exit 2) if more than N paths would change owners; omit for no ceiling (only with --op)")
 	dryRun := fs.Bool("dry-run", false, "change no CODEOWNERS; --out and --summary-out still emit")
 	format := fs.String("format", "text", "text|json — governs stdout only")

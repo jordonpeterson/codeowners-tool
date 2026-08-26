@@ -120,8 +120,8 @@ func cmdLint(args []string, stdout, stderr io.Writer) int {
 	repo := fs.String("repo", ".", "path to local git repository")
 	branch := fs.String("branch", "HEAD", "ref whose tracked tree governs resolution (S-7); must be what the clone has checked out unless --dry-run")
 	filePath := fs.String("file", "", "CODEOWNERS path override (repo-relative); needed for a CODEOWNERS that is not committed yet")
-	githubRepo := fs.String("github-repo", "", "owner/name on GitHub — required: owner existence is not decidable offline")
-	token := fs.String("token", "", "GitHub token (default $GITHUB_TOKEN)")
+	githubRepo := fs.String("github-repo", "", "owner/name on GitHub — required, bar the offline mode below: owner existence is not decidable offline")
+	token := fs.String("token", "", "GitHub token (default $GITHUB_TOKEN); required, bar the offline mode: --remove-stale-paths with NEITHER credential does stale-rule removal alone")
 	apiURL := fs.String("api-url", "", "API base URL (GHES), default https://api.github.com")
 	format := fs.String("format", "text", "text|json")
 	// Defined so the refusal in runLint can be REACHED. Both flags are
