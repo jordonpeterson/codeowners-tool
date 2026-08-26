@@ -969,19 +969,26 @@ func cmdVerify(args []string, stdout, stderr io.Writer) int {
 	}
 	res, err := verify.Compare(before, after, scopes)
 	if err != nil {
+		// A pair from two different repositories is the fleet-loop mistake
+		// (one wrong filename, every repo green), so the refusal names the
+		// two files the operator actually paired.
+		var mm *verify.MismatchError
+		if errors.As(err, &mm) {
+			mm.BeforeName, mm.AfterName = *beforePath, *afterPath
+		}
 		return errExit(&plan.InvalidError{Msg: err.Error()}, stderr)
 	}
 	for _, c := range res.Changed {
-		fmt.Fprintf(stdout, "changed: %s  %s → %s\n", c.Path, fmtOwners(c.Before), fmtOwners(c.After))
+		fmt.Fprintf(stdout, "changed: %s  %s → %s\n", verify.EscapePath(c.Path), fmtOwners(c.Before), fmtOwners(c.After))
 	}
 	// Tree deltas are reported, never fatal (R-18). They are the ordinary
 	// difference between two refs, so they print after the ownership changes
 	// rather than competing with them for a reader's attention.
 	for _, c := range res.Added {
-		fmt.Fprintf(stdout, "added:   %s  %s\n", c.Path, fmtOwners(c.After))
+		fmt.Fprintf(stdout, "added:   %s  %s\n", verify.EscapePath(c.Path), fmtOwners(c.After))
 	}
 	for _, c := range res.Removed {
-		fmt.Fprintf(stdout, "removed: %s  %s\n", c.Path, fmtOwners(c.Before))
+		fmt.Fprintf(stdout, "removed: %s  %s\n", verify.EscapePath(c.Path), fmtOwners(c.Before))
 	}
 	if !res.OK() {
 		// The loudest string in the tool is reserved for the case it is about:
@@ -998,7 +1005,7 @@ func cmdVerify(args []string, stdout, stderr io.Writer) int {
 			fmt.Fprintf(stderr, "INVARIANT VIOLATED: %d path(s) changed that no --scope declared (--scope is repeatable; pass one per intended scope)\n", len(res.Violations))
 		}
 		for _, v := range res.Violations {
-			fmt.Fprintf(stderr, "  %s  %s → %s\n", v.Path, fmtOwners(v.Before), fmtOwners(v.After))
+			fmt.Fprintf(stderr, "  %s  %s → %s\n", verify.EscapePath(v.Path), fmtOwners(v.Before), fmtOwners(v.After))
 		}
 		return ExitRefused
 	}
