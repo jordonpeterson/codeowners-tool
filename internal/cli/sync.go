@@ -719,7 +719,8 @@ func resolveDir(p string) (string, error) {
 // because --create is off by default; an I/O failure is one it never got to read.
 // A file tracked in the ref but absent from the working tree is the first kind:
 // the repository was read, the disagreement between the two was noticed, and the
-// tool declined to write over a file it could not read.
+// tool declined to write over a file it could not read. So is a create that
+// would supersede the file this repo is governed by.
 func statusForReadFailure(err error) string {
 	var missing *noCodeownersError
 	if errors.As(err, &missing) {
@@ -727,6 +728,10 @@ func statusForReadFailure(err error) string {
 	}
 	var absent *trackedButAbsentError
 	if errors.As(err, &absent) {
+		return StatusRefused
+	}
+	var superseding *supersedingCreateError
+	if errors.As(err, &superseding) {
 		return StatusRefused
 	}
 	return StatusError
@@ -880,10 +885,53 @@ func (r *syncRun) governing(tree []string) (rel string, content []byte, creating
 	case !r.create:
 		return "", nil, false, &noCodeownersError{ref: r.branch, policy: r.policy != nil}
 	default:
+		// Creating from nothing is only true when nothing governs yet. A
+		// higher-precedence location is not nothing: see supersedingCreateError.
+		if existing := r.existingGoverning(tree); existing != "" && outranksCodeowners(rel, existing) {
+			return "", nil, false, &supersedingCreateError{rel: rel, existing: existing}
+		}
 		// Creating from nothing: the "before" state is an empty file, which is
 		// what INV-2 is proven against.
 		return rel, nil, true, nil
 	}
+}
+
+// existingGoverning is the CODEOWNERS this repo resolves from today, read from
+// the same two sources governing() discovers over (D5): the ref's tree first,
+// then the working tree.
+func (r *syncRun) existingGoverning(tree []string) string {
+	if present := gittree.FindCodeownersPaths(tree); len(present) > 0 {
+		return present[0]
+	}
+	return r.findOnDisk()
+}
+
+// supersedingCreateError is `--create` at a location that OUTRANKS the
+// CODEOWNERS this repo already has.
+//
+// The old file is left untouched, which satisfies "create never overwrites",
+// and under S-8 it is also never read again: `--file .github/CODEOWNERS
+// --create` on a repo governed by docs/CODEOWNERS made one op's worth of rules
+// the entire repository's ownership. It reported `applied (proven: tree)`,
+// exit 0, because both invariants were proven against the empty bytes of a
+// file that governs everything the moment it exists — services/api/main.go
+// lost @org/api-team (INV-2) and /docs/ lost @org/everyone (INV-1), and the
+// tool's own `verify` calls the same change INVARIANT VIOLATED.
+//
+// Discovery cannot reach this: it selects the governing file, so `creating` is
+// never true where one exists. `--file` names the path directly, which is why
+// the guard belongs here rather than in the discovery branch (R-34d).
+//
+// Exit 2, not 3: which location this clone keeps its CODEOWNERS at is a fact
+// about THIS repository, so the fleet loop records it and steps to the next.
+type supersedingCreateError struct {
+	rel      string
+	existing string
+}
+
+func (e *supersedingCreateError) Error() string {
+	return fmt.Sprintf("refusing: this repository is governed by %s, and creating %s would supersede it — GitHub loads only the first of %s (S-8), never merging, so every rule in %s would stop applying and this run's ops would become the whole repository's ownership. Re-run without --file to amend %s, or move it to %s in its own reviewable commit first",
+		e.existing, e.rel, strings.Join(gittree.CodeownersLocations, ", "), e.existing, e.existing, e.rel)
 }
 
 // governingWarnings reports what is wrong with the FILE this run is about to
@@ -932,14 +980,26 @@ func governingWarnings(tree []string, rel string, content []byte) []string {
 // trackedAt: `./.github/CODEOWNERS` governs exactly what `.github/CODEOWNERS`
 // governs, and classifying the raw string drew the false "governs nothing"
 // warning for an alternate spelling of a governing file.
-func isCodeownersLocation(rel string) bool {
+func isCodeownersLocation(rel string) bool { return codeownersRank(rel) >= 0 }
+
+// codeownersRank is a path's position in GitHub's search order, or -1 for a
+// path GitHub never loads (S-8). Cleaned before comparison, like trackedAt.
+func codeownersRank(rel string) int {
 	clean := relClean(rel)
-	for _, loc := range gittree.CodeownersLocations {
+	for i, loc := range gittree.CodeownersLocations {
 		if clean == loc {
-			return true
+			return i
 		}
 	}
-	return false
+	return -1
+}
+
+// outranksCodeowners reports whether a file at rel would take precedence over
+// one at other, i.e. whether writing rel demotes other to a file GitHub never
+// reads. A path outside the three locations outranks nothing.
+func outranksCodeowners(rel, other string) bool {
+	r, o := codeownersRank(rel), codeownersRank(other)
+	return r >= 0 && o >= 0 && r < o
 }
 
 // withGoverningFile appends the CODEOWNERS a refusal was about. A refused
