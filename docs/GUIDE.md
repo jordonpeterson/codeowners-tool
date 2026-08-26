@@ -5,14 +5,8 @@ Worked examples for each kind of change. Concepts:
 
 ## A basic example
 
-A small repo whose `README.md` nobody owns in particular:
-
-```
-README.md
-docs/guide.md
-services/api/main.go
-services/web/app.ts
-```
+A small repo — `README.md`, `docs/guide.md`, `services/api/main.go` and
+`services/web/app.ts` — whose `README.md` nobody owns in particular:
 
 ```console
 $ cat .github/CODEOWNERS
@@ -42,12 +36,9 @@ applied: 1 op(s) applied, 0 skipped; 1 line change(s), 1 path(s) change owners
 ```
 
 `proven: tree` means the claim was checked against the repo's real files, not just
-reasoned about. Drop `--dry-run` to write it:
+reasoned about. Drop `--dry-run` to write it — the same two lines, and then:
 
 ```console
-$ codeowners-tool sync --policy ownership.json
-applied: 1 op(s) applied, 0 skipped; 1 line change(s), 1 path(s) change owners
-  ops[0]  applied (proven: tree)
 $ cat .github/CODEOWNERS
 *            @org/everyone
 README.md @org/everyone @org/docs-team
@@ -66,10 +57,10 @@ Three things happened that are worth noticing:
 
 ## Writing a new CODEOWNERS file
 
-For a repo with no CODEOWNERS at all, `"create": true` grants permission to write one at
-`.github/CODEOWNERS`. It never overwrites an existing file, it's off by default, and a run
-with nothing to write creates nothing — so it is safe to leave set for a fleet where only
-some repos have a file ([why it lives in the policy, not a
+For those same four files with no CODEOWNERS at all, `"create": true` grants permission
+to write one at `.github/CODEOWNERS`. It never overwrites an existing file, it's off by
+default, and a run with nothing to write creates nothing — so it is safe to leave set for
+a fleet where only some repos have a file ([why it lives in the policy, not a
 flag](POLICY-FILE.md#creating-a-file-r-23-and-not-creating-one)):
 
 ```json
@@ -89,8 +80,16 @@ flag](POLICY-FILE.md#creating-a-file-r-23-and-not-creating-one)):
 ```console
 $ codeowners-tool check --policy bootstrap.json
 ok: bootstrap.json — 4 op(s), no policy errors
+  ops[0]  on_zero_match: require (built-in)
+  ops[1]  on_zero_match: require (built-in)
+  ops[2]  on_zero_match: require (built-in)
+  ops[3]  on_zero_match: declare
 $ codeowners-tool sync --policy bootstrap.json
 applied: 4 op(s) applied, 0 skipped; 4 line change(s), 4 path(s) change owners
+  ops[0]  applied (proven: tree)
+  ops[1]  applied (proven: tree)
+  ops[2]  applied (proven: tree)
+  ops[3]  applied (proven: structural)
   created a new CODEOWNERS file
 ```
 
