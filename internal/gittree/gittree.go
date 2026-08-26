@@ -167,3 +167,32 @@ func gitOutput(repoDir string, args ...string) ([]byte, error) {
 	}
 	return out, nil
 }
+
+// FindNestedCodeownersPaths returns every tracked file named CODEOWNERS that is
+// NOT one of the three locations S-8 names — `packages/foo/.github/CODEOWNERS`,
+// `services/api/CODEOWNERS`. GitHub searches only the repository root's
+// `.github/`, root and `docs/`, so it loads none of them.
+//
+// Deliberately a SEPARATE list from FindCodeownersPaths: that one is a
+// precedence order whose first entry GOVERNS, and a nested file must never
+// enter it — it would be adopted as the governing file in any repo that has no
+// root-level one, and every verb would then read, prove and rewrite a document
+// GitHub does not consult.
+//
+// The name is matched exactly. `OWNERS`, `CODEOWNERS.bak` and `codeowners` are
+// other tools' files or backups; calling them ownership rot would report a
+// finding on the monorepos this check exists to help.
+func FindNestedCodeownersPaths(tree []string) []string {
+	root := make(map[string]bool, len(CodeownersLocations))
+	for _, loc := range CodeownersLocations {
+		root[loc] = true
+	}
+	var found []string
+	for _, p := range tree {
+		if !root[p] && strings.HasSuffix(p, "/CODEOWNERS") {
+			found = append(found, p)
+		}
+	}
+	sort.Strings(found)
+	return found
+}

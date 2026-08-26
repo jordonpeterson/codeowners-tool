@@ -1104,7 +1104,14 @@ func cmdAudit(args []string, stdout, stderr io.Writer) int {
 		return errExit(&plan.InvalidError{Msg: err.Error()}, stderr)
 	}
 
-	in := audit.Input{Content: content, Tree: tree, CodeownersPath: coPath, AllPresent: all}
+	in := audit.Input{Content: content, Tree: tree, CodeownersPath: coPath, AllPresent: all,
+		NestedPresent: gittree.FindNestedCodeownersPaths(tree)}
+	// A symlinked CODEOWNERS: `cat-file` returns the LINK TARGET as content, so
+	// without the recorded mode the target string is parsed as a rule and
+	// reported as a dead pattern. The mode is the same fact `sync` refuses on.
+	if gitEntryMode(*repo, *branch, coPath) == "120000" {
+		in.SymlinkTarget = strings.TrimSpace(string(content))
+	}
 	if *checksFlag != "" {
 		in.Checks = map[string]bool{}
 		for _, c := range strings.Split(*checksFlag, ",") {
