@@ -38,6 +38,10 @@ comparison is a partial NFD over Latin-1 accented letters — not a full Unicode
 normalization, and the finding says so — and it prints the codepoints of both spellings.
 A different accent (`é` vs `è`) is a different name and stays A-4.
 
+**A-6 is disclosed by the run that causes it.** Where an inserted line leaves a
+pre-existing narrower rule unable to win any path, `plan`/`sync` warn and name it, so the
+run that authors the finding is not the one run silent about it.
+
 Run a subset with `--checks a1,a3,a6` (`a4`, `A4`, `a-4` and `A-4` are all accepted; an
 unrecognized name is a hard error, because silently matching nothing would make audits
 pass vacuously). Requesting A-1/A-2/A-3 without both `--token` and `--github-repo` is exit
