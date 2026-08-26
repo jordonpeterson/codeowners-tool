@@ -29,6 +29,20 @@ changes to which class a failure lands in are called out explicitly.
   a fleet loop records and steps past; no policy-level (exit 3) verdict moves.
   A submodule anywhere else in the tree is unaffected.
 
+- **`apply` refuses a plan whose ref is not what the clone has checked out
+  (S-7).** `sync` and `lint` have always refused to prove a change against one
+  ref's tree and write it into another checkout, and `sync`'s refusal offers
+  `plan` as the way to target another ref — but `apply` never checked, so the
+  documented escape hatch performed the write `sync` had just declined. With
+  `.github` a directory on `main` and a submodule mount on the checked-out
+  branch, `plan --branch main` was internally consistent (main's tree has no
+  non-tree ancestor, and its digest never moved) while `apply` wrote the
+  submodule's file at exit 0. `tree_sha256` cannot see this: the tree the plan
+  names did not change — the clone is elsewhere. Plans that name no ref, or
+  name `HEAD`, are unaffected; they are covered by the tree digest and
+  `sha256_before` as before. **Exit-code change:** exit 0 → exit 2 for an apply
+  run from the wrong checkout.
+
 - **A `declare` batched with an op on one tracked file is no longer refused
   (R-22b).** R-8's zero-match guard exists because two `declare`d rules both land
   at EOF, where last-match-wins picks between them silently — but it fired

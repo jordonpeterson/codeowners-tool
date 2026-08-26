@@ -806,6 +806,19 @@ func cmdApply(args []string, stdout, stderr io.Writer) int {
 	if err := checkRepoRoot(repoDir); err != nil {
 		return errExit(&plan.RefusalError{Msg: err.Error()}, stderr)
 	}
+	// And the S-7 guard sync and lint carry, at the verb that does the write.
+	// The plan's ref decides which tree every row in it was proven against;
+	// the BYTES come from the working tree, which is whatever is checked out.
+	// Standing somewhere else, apply lands a reviewed change in a tree nobody
+	// proved anything about: with `.github` a directory on `main` and a
+	// submodule mount on the checked-out branch, `plan --branch main` is
+	// internally consistent — main's tree has no non-tree ancestor to refuse
+	// and its digest still matches — while apply writes the SUBMODULE's file,
+	// the exact write sync refuses. tree_sha256 cannot see this: main's tree
+	// never changed. See checkBranchIsWritable.
+	if err := checkBranchIsWritable(repoDir, planRef(pf), "apply", false); err != nil {
+		return errExit(&plan.RefusalError{Msg: err.Error()}, stderr)
+	}
 	target := filepath.Join(repoDir, filepath.FromSlash(pf.CodeownersPath))
 	// The same containment `sync` enforces, enforced again here. A plan is an
 	// artifact: it is reviewed in one place and applied somewhere else entirely,
@@ -825,10 +838,7 @@ func cmdApply(args []string, stdout, stderr io.Writer) int {
 	// sequence let a colleague's merge widen the blast radius under a plan a
 	// human had already approved, silently and at exit 0.
 	if pf.TreeSHA256 != "" {
-		ref := pf.Ref
-		if ref == "" {
-			ref = "HEAD"
-		}
+		ref := planRef(pf)
 		tree, err := gittree.ListTracked(repoDir, ref)
 		if err != nil {
 			return errExit(&plan.InvalidError{Msg: err.Error()}, stderr)
@@ -854,6 +864,18 @@ func cmdApply(args []string, stdout, stderr io.Writer) int {
 	// applied. These two numbers were measured on disk.
 	fmt.Fprintf(stdout, "applied: %s (%d → %d bytes)\n", target, written.Before, written.After)
 	return ExitOK
+}
+
+// planRef is the ref a plan was computed against, defaulting to HEAD for plans
+// written before the field existed. One spelling of that default, because the
+// branch guard and the tree digest have to agree on which tree the plan claims
+// — two copies would let a plan be checked against one tree and refused
+// against another.
+func planRef(pf planFile) string {
+	if pf.Ref == "" {
+		return "HEAD"
+	}
+	return pf.Ref
 }
 
 func cmdSnapshot(args []string, stdout, stderr io.Writer) int {

@@ -619,7 +619,12 @@ func checkRepoRoot(repoDir string) error {
 // failure than the one being fixed, and it is invisible until someone opens a
 // PR that is not there. --dry-run remains fully available; it just has to be
 // asked for. `plan` is unaffected: it emits an artifact and writes no
-// CODEOWNERS, so proving against another ref is exactly its job.
+// CODEOWNERS, so proving against another ref is exactly its job — which is
+// why `apply`, the verb that turns that artifact into a write, carries this
+// same guard against the plan's own ref. Without it the refusal above was an
+// instruction to route around itself: `sync --branch main` on a clone standing
+// elsewhere refused and offered `plan`, and plan → apply then performed the
+// very write it had refused, against `.github` mounted as a submodule.
 //
 // Refs are compared by resolved commit, not by name, so the ordinary fleet
 // invocation `--branch main` on a clone checked out at main writes as it always
@@ -649,16 +654,25 @@ func checkBranchIsWritable(repoDir, branch, verb string, dryRun bool) error {
 		return err
 	}
 	if head != want {
-		// The `plan` escape hatch is offered only to sync, whose intent is a
-		// set of ops and so can be expressed as an artifact for another ref.
-		// A lint pass is not expressible that way, and pointing someone at a
-		// verb that cannot do what they asked is worse than saying nothing.
-		alt := ""
-		if verb == "sync" {
-			alt = ", or use `plan` to produce an artifact for that ref"
+		// Each verb names the ref the way ITS operator set it and offers only
+		// advice it can act on. The `plan` escape hatch is offered only to
+		// sync, whose intent is a set of ops and so can be expressed as an
+		// artifact for another ref; a lint pass is not expressible that way,
+		// and pointing someone at a verb that cannot do what they asked is
+		// worse than saying nothing. `apply` has neither --branch nor
+		// --dry-run — the ref came from the plan file — so the sync wording
+		// would send its operator to two flags that do not exist.
+		named := "--branch " + branch
+		advice := fmt.Sprintf("re-run with --dry-run to preview it, or check out %s first", branch)
+		switch verb {
+		case "sync":
+			advice += ", or use `plan` to produce an artifact for that ref"
+		case "apply":
+			named = "this plan was computed against " + branch + ", which"
+			advice = fmt.Sprintf("check out %s and re-run, or re-run `plan` against the ref this clone is on", branch)
 		}
-		return fmt.Errorf("--branch %s is not what this clone has checked out (HEAD is %s): %s proves the change against %s's tree but writes the working tree, so the rule would be justified by one tree and land in another; re-run with --dry-run to preview it, or check out %s first%s (S-7)",
-			branch, headLabel(repoDir, head), verb, branch, branch, alt)
+		return fmt.Errorf("%s is not what this clone has checked out (HEAD is %s): %s proves the change against %s's tree but writes the working tree, so the rule would be justified by one tree and land in another; %s (S-7)",
+			named, headLabel(repoDir, head), verb, branch, advice)
 	}
 	return nil
 }

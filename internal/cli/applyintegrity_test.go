@@ -153,15 +153,32 @@ func TestApply_ReportsMeasuredBytesNotThePlansClaim(t *testing.T) {
 	if code != cli.ExitOK {
 		t.Fatalf("size fields are not integrity fields; the plan must still apply: %d %s", code, errOut)
 	}
-	if strings.Contains(out, "9999") || strings.Contains(out, "8888") {
-		t.Errorf("the success line repeated the plan's claim instead of measuring: %s", out)
-	}
 
+	// Asserted on the byte report alone, not on the whole line. The line also
+	// carries the target path, which under t.TempDir() is
+	// .../TestApply_ReportsMeasuredBytesNotThePlansClaim1296888869/001/... —
+	// a substring search for the tampered "8888" hits the tempdir's random
+	// digits and fails a correct build, and the same search for the honest
+	// sizes ("11", "39") passes on a build that reports nothing at all. Exact
+	// equality on the extracted span settles both directions: a run echoing
+	// the plan's claim reports (9999 → 8888 bytes) and fails here.
 	co, _ := os.ReadFile(filepath.Join(dir, ".github", "CODEOWNERS"))
 	before := len("* @org/all\n")
-	if !strings.Contains(out, itoa(before)) || !strings.Contains(out, itoa(len(co))) {
-		t.Errorf("want the real %d → %d bytes, got: %s", before, len(co), out)
+	want := "(" + itoa(before) + " → " + itoa(len(co)) + " bytes)"
+	if got := byteReport(t, out); got != want {
+		t.Errorf("want the measured %s, got %s\nfull line: %s", want, got, out)
 	}
+}
+
+// byteReport is the parenthesized `(N → M bytes)` span of an apply success
+// line, isolated from the target path that precedes it.
+func byteReport(t *testing.T, out string) string {
+	t.Helper()
+	open, close := strings.LastIndex(out, "("), strings.LastIndex(out, ")")
+	if open < 0 || close < open {
+		t.Fatalf("no byte report in the success line: %s", out)
+	}
+	return out[open : close+1]
 }
 
 func itoa(n int) string {

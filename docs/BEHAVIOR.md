@@ -1173,6 +1173,23 @@ The repo-root guard reaches `apply` too: --repo can point the apply at a
 different clone than the plan's, and pointed below the root the joined
 codeowners_path names a file GitHub never reads (checkRepoRoot).
 
+### `TestFix_ApplyRefusesAPlanFromARefThisCloneIsNotOn`
+
+The submodule finding, still live through the one verb that had no guard:
+`apply` writes the WORKING TREE but validates only the tree at the plan's
+ref, and never checks the clone is standing on it. With `.github` a real
+directory on `main` and a submodule mount on `subm`, a plan made
+`--branch main` from a clone on `subm` is internally consistent — main's
+tree holds `.github/CODEOWNERS`, so nothing is a non-tree ancestor there,
+and the tree digest still matches at apply time because main never changed
+— while the bytes it planned against, and the file it writes, are the
+SUBMODULE's.
+
+sync and lint both refuse this shape (S-7, checkBranchIsWritable) and sync's
+refusal points the operator at `plan`, so the tool routed people into the
+unguarded path. The defect is wider than submodules: any ref whose tree
+differs from the checkout lands a change justified by a tree nobody wrote to.
+
 ### `TestFix_ApplyRefusesSymlinkedCodeowners`
 
 The symlink refusal reaches `apply` too: a plan is reviewed in one place and
@@ -1346,6 +1363,13 @@ not exist in the tree GitHub reads — yet Lstat'ing only the final component
 (a real file, reached through the link) let sync write through it at exit 0.
 The refusal must fire, name WHICH component is the link, and leave the
 link's target untouched.
+
+### `TestFix_TrackedFileAtACodeownersLocationIsNamedNeutrally`
+
+The fallback noun, which no other test reaches: a tracked REGULAR FILE at
+`.github` is neither a gitlink nor a link, so the refusal must not guess at
+either. Naming it "a submodule" here would be the same falsifiable diagnosis
+the link case was fixed for, and the whole suite passes with that mutation.
 
 ### `TestFix_TrackedLinkAtACodeownersLocationIsDiagnosedAsALink`
 
@@ -7697,4 +7721,4 @@ DIFFERENT states; transitioning between them is a real ownership change.
 
 ---
 
-713 documented test cases across 13 packages.
+715 documented test cases across 13 packages.

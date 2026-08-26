@@ -811,3 +811,84 @@ func TestFix_TrackedLinkAtACodeownersLocationIsDiagnosedAsALink(t *testing.T) {
 		}
 	}
 }
+
+// The submodule finding, still live through the one verb that had no guard:
+// `apply` writes the WORKING TREE but validates only the tree at the plan's
+// ref, and never checks the clone is standing on it. With `.github` a real
+// directory on `main` and a submodule mount on `subm`, a plan made
+// `--branch main` from a clone on `subm` is internally consistent — main's
+// tree holds `.github/CODEOWNERS`, so nothing is a non-tree ancestor there,
+// and the tree digest still matches at apply time because main never changed
+// — while the bytes it planned against, and the file it writes, are the
+// SUBMODULE's.
+//
+// sync and lint both refuse this shape (S-7, checkBranchIsWritable) and sync's
+// refusal points the operator at `plan`, so the tool routed people into the
+// unguarded path. The defect is wider than submodules: any ref whose tree
+// differs from the checkout lands a change justified by a tree nobody wrote to.
+func TestFix_ApplyRefusesAPlanFromARefThisCloneIsNotOn(t *testing.T) {
+	sub := initRepo(t, map[string]string{"CODEOWNERS": "* @sub/owners\n"})
+	repo := initRepo(t, map[string]string{
+		".github/CODEOWNERS":   "* @org/everyone\n",
+		"services/api/main.go": "m\n",
+	})
+	gitRun(t, repo, "switch", "-qc", "subm")
+	gitRun(t, repo, "rm", "-r", "-q", ".github")
+	gitRun(t, repo, "commit", "-qm", "drop the directory")
+	fixMountSubmodule(t, repo, sub, ".github")
+	before := syncReadFile(t, filepath.Join(repo, ".github", "CODEOWNERS"))
+
+	planPath := filepath.Join(t.TempDir(), "plan.json")
+	// `plan` against another ref is its documented job (checkBranchIsWritable
+	// sends sync here), so this half must keep working.
+	if code, out, errOut := runCLI(t, "plan", "--repo", repo, "--branch", "main", "--file", ".github/CODEOWNERS",
+		"--op", "add_owner(/services/api/, @org/api)", "--out", planPath); code != cli.ExitOK {
+		t.Fatalf("plan for another ref: want exit 0, got %d\nstdout:\n%s\nstderr:\n%s", code, out, errOut)
+	}
+
+	code, stdout, stderr := runCLI(t, "apply", "--repo", repo, "--plan", planPath)
+	out := stdout + stderr
+	if code != cli.ExitRefused {
+		t.Fatalf("apply of a plan for a ref this clone is not on: want exit 2, got %d\noutput:\n%s", code, out)
+	}
+	if got := syncReadFile(t, filepath.Join(repo, ".github", "CODEOWNERS")); got != before {
+		t.Errorf("the submodule's own CODEOWNERS was written by the parent repository:\n%s", got)
+	}
+	if !strings.Contains(out, "not what this clone has checked out") || !strings.Contains(out, "main") {
+		t.Errorf("the refusal must name the ref and say the clone is not on it:\n%s", out)
+	}
+	// apply has neither flag, and sending an operator to a flag that does not
+	// exist is the failure the mode-specific wording was fixed for.
+	for _, absent := range []string{"--branch", "--dry-run"} {
+		if strings.Contains(out, absent) {
+			t.Errorf("the refusal advises %s, which `apply` does not have:\n%s", absent, out)
+		}
+	}
+}
+
+// The fallback noun, which no other test reaches: a tracked REGULAR FILE at
+// `.github` is neither a gitlink nor a link, so the refusal must not guess at
+// either. Naming it "a submodule" here would be the same falsifiable diagnosis
+// the link case was fixed for, and the whole suite passes with that mutation.
+func TestFix_TrackedFileAtACodeownersLocationIsNamedNeutrally(t *testing.T) {
+	repo := initRepo(t, map[string]string{
+		".github":              "not a directory at all\n",
+		"services/api/main.go": "m\n",
+	})
+	planPath := filepath.Join(t.TempDir(), "plan.json")
+
+	code, stdout, stderr := runCLI(t, "plan", "--repo", repo, "--file", ".github/CODEOWNERS",
+		"--op", "add_owner(/services/api/, @org/api)", "--out", planPath)
+	out := stdout + stderr
+	if code != cli.ExitRefused {
+		t.Fatalf("plan through a tracked regular file: want exit 2, got %d\noutput:\n%s", code, out)
+	}
+	if !strings.Contains(out, "records .github at ") || !strings.Contains(out, "as a file object") {
+		t.Errorf("the refusal must name the path and the object git records, without guessing:\n%s", out)
+	}
+	for _, absent := range []string{"submodule", "symlink"} {
+		if strings.Contains(out, absent) {
+			t.Errorf("the refusal claims %q for a plain tracked file:\n%s", absent, out)
+		}
+	}
+}

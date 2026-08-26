@@ -106,8 +106,12 @@ recorded absolute, so a plan applies from any working directory; passing `apply 
 different repository is refused rather than silently obeyed. `tree_sha256` fingerprints
 the tracked tree, and `apply` refuses when it has moved — the `ownership_rows` a human
 reviewed are facts about one tree, so a colleague's merge under a reviewed scope would
-otherwise widen the blast radius after approval. To roll one intent across many
-repositories, use `sync --policy`; a plan is per-repository by construction.
+otherwise widen the blast radius after approval. It is bound to the plan's **ref** as
+well: `apply` refuses (exit 2) when the clone is not standing on `ref`, because the rows
+were proven against that ref's tree while the bytes written are the working tree's — the
+same S-7 rule `sync` and `lint` enforce, at the verb that performs the write. To roll one
+intent across many repositories, use `sync --policy`; a plan is per-repository by
+construction.
 
 A snapshot distinguishes the **two ways a path can have no owner**, and the difference is
 the point: `null` means no rule matched it — a gap nobody has addressed — while `[]` means
