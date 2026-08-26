@@ -81,6 +81,11 @@ func TestSnapshotJSONRoundTripsNonUTF8Paths(t *testing.T) {
 		"a\xe9.md":           {"@org/one"},
 		"a\xff.md":           nil,
 		"a%E9.md":            {"@org/literal"}, // the escaped spelling, as a real ASCII file
+		// A literal % INSIDE a path that is already being escaped: without
+		// the %25 rule these two tracked files both encode to
+		// `bin/a%FF.md%E9` and one of them is lost again.
+		"bin/a\xff.md\xe9": {"@org/pct"},
+		"bin/a%FF.md\xe9":  {"@org/pct-literal"},
 	}}
 	b, err := json.Marshal(orig)
 	if err != nil {
