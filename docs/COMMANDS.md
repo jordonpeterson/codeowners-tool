@@ -13,14 +13,16 @@ sync     (--op 'OP' ... | --policy FILE) [--on-empty error|inherit|unowned]
 check    (--op 'OP' ... | --policy FILE) [--format text|json]
 plan     --op 'OP' ... [--on-empty error|inherit|unowned]
          [--repo DIR] [--branch REF] [--file PATH] [--out plan.json]
+         [--max-size BYTES] [--warn-size BYTES]
 apply    --plan plan.json [--repo DIR]
 audit    [--checks a1,a3,a6] [--fail-on any|warning|error|never] [--format json|text]
          [--github-repo owner/name] [--token T | $GITHUB_TOKEN] [--api-url URL]
          [--cache-dir D] [--cache-ttl DUR] [--repo DIR] [--branch REF] [--file PATH]
+         [--lint [--remove-stale-paths] [--on-empty error|inherit|unowned] [--dry-run]]
 lint     --github-repo owner/name [--token T | $GITHUB_TOKEN] [--api-url URL]
          [--remove-stale-paths] [--on-empty error|inherit|unowned] [--dry-run]
          [--policy FILE] [--repo DIR] [--branch REF] [--file PATH] [--format text|json]
-snapshot [--repo DIR] [--branch REF] [--out snap.json]
+snapshot [--repo DIR] [--branch REF] [--file PATH] [--out snap.json]
 verify   --before before.json --after after.json [--scope PATTERN ...]
 version  print the build this binary was stamped with
 ```
@@ -98,6 +100,10 @@ codeowners-tool plan --op 'add_owner(/services/api/, @org/team-1)' --out plan.js
 codeowners-tool apply --plan plan.json
 ```
 
+The size flags are `plan`'s alone. `--max-size` (default 3,000,000) is the S-4 hard cap:
+a result over it is refused at exit 2, because GitHub silently ignores a CODEOWNERS past
+3 MB. `--warn-size` (default 2,500,000) only warns (R-9) and still exits 0.
+
 A plan records `sha256_before`, `sha256_after`, `size_before`/`size_after`, `changes`,
 `ownership_rows`, `diff`, `after_content` and `op_results`. Two hashes, two different
 jobs: `sha256_before` is the drift gate (R-16) — `apply` hashes the file it is about to
@@ -141,6 +147,10 @@ codeowners-tool verify --before before.json --after after.json --scope /services
 that ref's tracked tree — an uncommitted edit is invisible to it, exactly as it is to
 GitHub. In the `ownership` map, `[]` means a rule matches the path and deliberately
 assigns no owners; `null` means no rule matches it at all.
+
+`--file` decides which CODEOWNERS the map is derived from, and is the one flag that can
+make `snapshot` answer about a file GitHub does not read: it is taken as given, in place
+of the path S-8 precedence would have picked.
 
 `verify` compares two snapshots and exits `0` when every ownership change falls inside
 a declared `--scope` (repeatable), `2` — printing each offending path — when any change

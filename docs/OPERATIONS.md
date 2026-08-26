@@ -30,10 +30,16 @@ string. It goes on an op naming **only** its scope, and is re-spelled as the bra
 before anything else sees it — so one grammar validates both, both are reported as the
 list, and a refusal about an array quotes the list form it became.
 
+Against a repo holding `services/api/m.go` and `docs/d.md`, and a CODEOWNERS of exactly
+`/services/api/   @org/api-team`, both ops apply and both are reported:
+
 ```console
 $ codeowners-tool sync --policy ownership.json
-applied: 1 op(s) applied, 0 skipped; 1 line change(s), 1 path(s) change owners
+applied: 2 op(s) applied, 0 skipped; 2 line change(s), 2 path(s) change owners
+  ops[0]  applied (proven: tree)
+  ops[1]  applied (proven: tree)
 $ cat CODEOWNERS
+/docs/ @org/platform @org/sre
 /services/api/   @org/api-team @org/platform @org/sre
 ```
 

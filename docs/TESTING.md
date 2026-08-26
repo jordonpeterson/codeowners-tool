@@ -2,7 +2,7 @@
 
 This tool rewrites the file that decides who reviews your code, so the interesting
 question is not "are there tests" but "what is actually proven, and where can you check".
-The 610 tests catalogued in [BEHAVIOR.md](BEHAVIOR.md) answer that. Contributor workflow —
+The 717 tests catalogued in [BEHAVIOR.md](BEHAVIOR.md) answer that. Contributor workflow —
 what to run before pushing — is in [CONTRIBUTING.md](../CONTRIBUTING.md).
 
 ## The tests are the specification
@@ -20,7 +20,7 @@ The specification is also written **first**. Several end-to-end suites were comm
 against a document before the implementation existed, failing for the stated reason, and
 their doc comments say so — including the warning that a vacuous pass is the real risk
 there, since a feature that does not exist yet fails with the same exit code the test
-expects. `internal/cli` alone carries 28 test files, most driving the real binary against
+expects. `internal/cli` alone carries 41 test files, most driving the real binary against
 real git repositories.
 
 ## The two invariants, proven by re-resolution
