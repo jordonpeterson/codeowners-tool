@@ -49,14 +49,7 @@ rather than a security boundary.
 
 ## Verifying what you installed
 
-`checksums.txt` proves only that the bytes arrived intact; it ships on the same
-release from the same host. The attestation proves origin:
-
-```sh
-gh attestation verify <archive> \
-  --repo jordonpeterson/codeowners-tool \
-  --signer-workflow jordonpeterson/codeowners-tool/.github/workflows/release.yml
-```
-
-`install.sh` runs this when `gh` is available; `PROVENANCE=require` refuses to
-install when it cannot.
+`checksums.txt` proves only that the bytes arrived intact; the build-provenance
+attestation proves origin. The commands, and how `install.sh` applies them
+(`PROVENANCE=require` refuses to install when it cannot verify), are in
+[docs/INSTALL.md](docs/INSTALL.md#verifying-a-download).

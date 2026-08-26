@@ -25,14 +25,11 @@ real git repositories.
 
 ## The two invariants, proven by re-resolution
 
-The planner does not merely construct an edit it believes is correct — it re-resolves
-**every file git knows about** at `--branch` after the edit and compares against an
-independently computed desired state:
+INV-1 (in scope) and INV-2 (out of scope) are defined in
+[GUARANTEES.md](GUARANTEES.md#the-two-invariants), along with how the planner proves them:
+re-resolving every tracked file at `--branch` and refusing anything unprovable.
 
-- **INV-1** — every path in scope resolves to exactly what the op requires.
-- **INV-2** — every path out of scope resolves to exactly what it did before.
-
-Anything unprovable is a refusal, not a guess. `internal/plan/property_test.go` generates
+`internal/plan/property_test.go` generates
 thousands of `(file, tree, op)` combinations — directories, globs, owner sets, and all
 three `on_empty` policies — and checks INV-1, INV-2 and idempotence on each against
 expectations computed a second, independent way. Seeds are deterministic, so a failure

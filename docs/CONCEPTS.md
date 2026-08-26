@@ -9,7 +9,7 @@ What the tool does, in the words you need to follow everything else.
 * **Policy** : one JSON file describing the ownership you want, applied unchanged to many repos.
 * **Fleet run** : that policy across N repos, each converging on its own.
 * **Order-independence (R-8)** : operations must commute; a batch whose outcome depends on order is refused, not guessed at.
-* **Exit 3 vs exit 2** : 3 = the policy is broken and fails identically everywhere; fix it, don't retry. 2 = this repo alone was refused.
+* **Exit 3 vs exit 2** : 3 = the policy is broken and fails identically everywhere; fix it, don't retry. 2 = this repo alone was refused. Full tables: [COMMANDS.md](COMMANDS.md#exit-codes).
 * **`on_zero_match`** : what to do when a scope matches no files here — repos aren't identical.
 * **`on_empty`** : what to do when a removal takes a rule's last owner.
 * **Dry run** : produce the plan without writing anything.
@@ -56,7 +56,3 @@ verify --before before.json --after after.json --scope '/services/api/'
 * **Gate CI on `lint --dry-run`.** A successful write can still exit 4 when a line needs a person, so the writing run is the wrong signal.
 * **Re-run freely.** Applying the same ops or policy twice is a no-op: the second run reports `unchanged` at exit 0 and the file is byte-identical. Permission to create is included in that.
 * **Start `lint` with `--dry-run` always.** It rewrites files and needs network; one lookup it cannot answer and nothing is written.
-
-## Exit codes
-
-`sync` and `check` use a coarse contract — **0** converged, **2** this repo needs a human, **3** the policy is broken. The other commands use the full ladder: **0** ok, **1** no-op, **2** refused, **3** invalid input, **4** audit findings, **5** inconclusive, **6** rolled back.

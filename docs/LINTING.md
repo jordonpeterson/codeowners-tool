@@ -119,19 +119,9 @@ refuses to guess at has an empty `changes` array and still needs somebody.
 
 ## Exit codes
 
-One rule: **0 when the file needs nothing further from a person, 4 when it does.**
-
-| Code | Means |
-|---|---|
-| 0 | Nothing to repair, or the fixes were written and nothing is left over |
-| 2 | Refused — `--on-empty=error`, the size cap, wrong `--branch`, or `--repo` below the repo root |
-| 3 | Invalid input — a missing `--on-empty`, a bad flag combination, or the file changed under the run |
-| 4 | Still needs a person — pending fixes under `--dry-run`, an unrepairable line, or a case-only typo |
-| 5 | Inconclusive — a lookup could not be answered, or credentials missing (bar the offline mode below). **Nothing written** |
-| 6 | Post-write validation failed; rolled back |
-
-`lint` never returns 1. A file needing no repair is this command's success, and exiting
-"no-op" would make every healthy repository in a fleet read as a failure under `set -e`.
+One rule: **0 when the file needs nothing further from a person, 4 when it does.** The
+code-by-code table — including why `lint` never returns 1 — is in
+[AUDIT.md](AUDIT.md#lint).
 
 ## Errors you will actually hit
 
