@@ -25,6 +25,10 @@ remains the system's single writer path.
 | A-11 | CODEOWNERS file itself unowned | no | report only |
 | A-12 | File size approaching 3 MB | no | n/a |
 
+A write that strands a rule says so at the time. Where an inserted line leaves a
+pre-existing narrower rule unable to win any path, `plan`/`sync` warn and name it, so the
+run that authors the A-6 finding is not the one run silent about it.
+
 Run a subset with `--checks a1,a3,a6` (`a4`, `A4`, `a-4` and `A-4` are all accepted; an
 unrecognized name is a hard error, because silently matching nothing would make audits
 pass vacuously). Requesting A-1/A-2/A-3 without both `--token` and `--github-repo` is exit

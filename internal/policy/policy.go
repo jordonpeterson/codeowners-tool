@@ -866,9 +866,25 @@ func (v *validator) exceptArray(parsed *ops.Op, m *member, i int, id string) (ok
 			return false
 		}
 		pat := escapeExceptPattern(el.str)
-		if _, ok := ops.WithExcept(parsed.Raw, []string{pat}); !ok {
-			v.at(el.off, i, id, `field "except" element %d cannot be carried by an op string: %q contains %s, and an op is one string — a comma separates its arguments and brackets bound its owner list — so this pattern would be read as part of another argument rather than as a path. The `+"`<scope> except <pat> …`"+` spelling cannot express this path either (R-37c); carve a directory that contains it instead`,
-				n, el.str, uncarryableChars(el.str))
+		if attempt, ok := ops.WithExcept(parsed.Raw, []string{pat}); !ok {
+			if named := uncarryableChars(el.str); named != "" {
+				v.at(el.off, i, id, `field "except" element %d cannot be carried by an op string: %q contains %s, and an op is one string — a comma separates its arguments and brackets bound its owner list — so this pattern would be read as part of another argument rather than as a path. The `+"`<scope> except <pat> …`"+` spelling cannot express this path either (R-37c); carve a directory that contains it instead`,
+					n, el.str, named)
+				return false
+			}
+			// Nothing structural to name, so what is wrong is the CLAUSE this
+			// element makes — an element ending in a backslash escapes the
+			// comma that ends the scope argument and swallows the rest of the
+			// op. Report the grammar's refusal of that string unchanged: it is
+			// the same sentence the `<scope> except <pat> …` spelling gets for
+			// the same text, which is what R-37e promises.
+			if attempt != "" {
+				if _, err := ops.Parse(attempt); err != nil {
+					v.at(el.off, i, id, `the "except" array is not valid: %v (R-37a: the array is validated exactly as the `+"`<scope> except <pat> …`"+` spelling it is equivalent to)`, err)
+					return false
+				}
+			}
+			v.at(el.off, i, id, `field "except" element %d cannot be carried by an op string: %q does not survive being spelled as `+"`<scope> except <pat> …`"+` (R-37c); carve a directory that contains it instead`, n, el.str)
 			return false
 		}
 		pats = append(pats, pat)
@@ -956,7 +972,9 @@ func uncarryableChars(pat string) string {
 	}
 	switch len(names) {
 	case 0:
-		return "a character an op string cannot carry"
+		// "" and not a generic phrase: a message that names no character is no
+		// diagnosis, and the caller has a better one to fall back to.
+		return ""
 	case 1:
 		return names[0]
 	default:

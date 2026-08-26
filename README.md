@@ -82,7 +82,8 @@ it, in which case that line wins outright and `@org/eng` is simply gone. This to
 terms of files, and treats the lines as an implementation detail it derives for you.
 
 **Each entry in `ops` is one intent.** Scope is a directory, file path, or glob in
-CODEOWNERS pattern syntax; a space is escaped with a backslash (`docs/release\ notes.md`).
+CODEOWNERS pattern syntax; a space or a comma is escaped with a backslash
+(`docs/release\ notes.md`, `/a\,b/`).
 Where an op takes an owner it also takes a bracketed **list** —
 `add_owner(/services/api/, [@org/platform, @org/sre])` — one line change rather than two, and
 for `remove_owner` [the only always-correct spelling](docs/OPERATIONS.md#naming-several-owners-in-one-op-r-33-r-39).
