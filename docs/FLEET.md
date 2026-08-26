@@ -109,6 +109,7 @@ ordinary, and none of them changes a verdict:
 | Detached HEAD (any CI checkout) | Works, on the default `--branch HEAD`. |
 | Default branch is `master`, or anything else | Works. Nothing here knows the name of your default branch. |
 | Freshly created, **no commits at all** | Exit 2, `"status": "error"` — there is no tree to read. Recorded, stepped over. |
+| Mid-merge or mid-rebase with **CODEOWNERS unmerged** | Exit 2, `"status": "refused"` — its bytes are both sides of the conflict. A conflict in any other file is fine. |
 
 `--branch` is the one to be careful with. It names the ref whose tree governs resolution,
 but the bytes are the working tree's, so writing while proving against a ref this clone

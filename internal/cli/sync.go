@@ -437,6 +437,14 @@ func (r *syncRun) execute() (SyncRecord, int) {
 		rec.Error = err.Error()
 		return rec, ExitRefused
 	}
+	// And the one that is about the BYTES just read rather than the path they
+	// came from: a CODEOWNERS git still reports as unmerged is both sides of a
+	// conflict, not any commit's rules. See refuseUnmergedCodeowners.
+	if err := refuseUnmergedCodeowners(r.repoArg, rel); err != nil {
+		rec.Status = StatusRefused
+		rec.Error = err.Error()
+		return rec, ExitRefused
+	}
 
 	p, buildErr := plan.Build(content, tree, r.ops, plan.Options{OnEmpty: r.onEmpty})
 	var noop *plan.NoOpError
@@ -696,6 +704,67 @@ func checkBranchIsWritable(repoDir, branch, verb string, dryRun bool) error {
 	return nil
 }
 
+// refuseUnmergedCodeowners refuses to read a CODEOWNERS that git reports as
+// unmerged — the file a conflicted merge, rebase or cherry-pick left with both
+// sides still in it.
+//
+// Every invariant is proven against the working-tree bytes, and for an
+// unmerged path those bytes are a merge artifact rather than any commit's
+// rules. `sync` saw only S-3 syntax errors in the markers, kept BOTH sides'
+// conflicting rules live — `=======` is not even invalid, it parses as a
+// zero-owner rule (S-9) — and reported `applied (proven: tree)` at exit 0,
+// having rewritten a file that is still `UU` and cannot be committed as it
+// stands. The "before" ownership it proved against is a state no commit has
+// ever had and GitHub will never see; `git add` afterwards would resolve
+// somebody's merge with content the tool synthesized from that state.
+//
+// Scoped to the governing file by pathspec, deliberately: a conflict in some
+// OTHER file changes neither these bytes nor the tree the proof resolves
+// against, and refusing there would block the CODEOWNERS edit exactly when
+// someone is reconciling a merge. A rebase merely in progress is not the
+// condition either — the question is what git says about this FILE.
+//
+// Not lifted by --dry-run, unlike checkBranchIsWritable: there the bytes are
+// real and only the ref is wrong, while here a preview reports ownership
+// derived from text that is not any version of the file.
+//
+// Exit 2, not 3: an unmerged index is a fact about THIS clone, so the fleet
+// loop records it and steps to the next repo.
+func refuseUnmergedCodeowners(repoDir, rel string) error {
+	clean := relClean(rel)
+	// :(literal) because rel can come from --file, where a `*` would otherwise
+	// be a pathspec glob and report some other file's conflict as this one's.
+	out, err := gitBytes(repoDir, "status", "--porcelain", "-z", "--untracked-files=no", "--", ":(literal)"+clean)
+	if err != nil {
+		// Refusal, not an error: `ls-tree` already succeeded here, so a status
+		// that fails is this checkout being unreadable in a way the run cannot
+		// prove anything through — and exit 3 is reserved for facts that hold
+		// in every repo.
+		return &plan.RefusalError{Msg: fmt.Sprintf("refusing: cannot tell whether %s is unmerged (%v) — a conflicted CODEOWNERS would be proven against both sides of a merge at once, so this run stops rather than guess; nothing was written", clean, err)}
+	}
+	for _, entry := range bytes.Split(out, []byte{0}) {
+		// "XY path": a rename's second NUL field carries no code and cannot
+		// match an unmerged one.
+		if len(entry) < 4 || string(entry[3:]) != clean || !unmergedStatus(string(entry[:2])) {
+			continue
+		}
+		return &plan.RefusalError{Msg: fmt.Sprintf(
+			"refusing: %s is unmerged in this checkout (git status: %s) — a conflicted merge, rebase or cherry-pick left both sides in the file, and `=======` parses as a valid zero-owner rule (S-9), so the ownership this run would prove against is a conflict-mangled state no commit has ever had and GitHub will never see; resolve the conflict and `git add %s`, then re-run — nothing was written",
+			clean, string(entry[:2]), clean)}
+	}
+	return nil
+}
+
+// unmergedStatus reports whether a `git status --porcelain` code marks a path
+// as unmerged: either side U, both added, or both deleted (git-status(1)).
+func unmergedStatus(code string) bool {
+	switch code {
+	case "DD", "AU", "UD", "UA", "DU", "AA", "UU":
+		return true
+	}
+	return false
+}
+
 // headLabel names what HEAD actually is — "main (f800559)" rather than a bare
 // abbreviated SHA. The operator has to decide whether to check out the ref they
 // asked for, and "you are not on it" is not enough to act on; they need to know
@@ -720,14 +789,24 @@ func headLabel(repoDir, head string) string {
 
 // gitLine runs a git command that answers with a single line.
 func gitLine(repoDir string, args ...string) (string, error) {
+	out, err := gitBytes(repoDir, args...)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+// gitBytes runs a git command whose output is read verbatim — NUL-separated
+// records, where trimming would eat the separator the parse depends on.
+func gitBytes(repoDir string, args ...string) ([]byte, error) {
 	cmd := exec.Command("git", append([]string{"-C", repoDir}, args...)...)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
 	if err != nil {
-		return "", fmt.Errorf("git %s: %v: %s", strings.Join(args, " "), err, strings.TrimSpace(stderr.String()))
+		return nil, fmt.Errorf("git %s: %v: %s", strings.Join(args, " "), err, strings.TrimSpace(stderr.String()))
 	}
-	return strings.TrimSpace(string(out)), nil
+	return out, nil
 }
 
 // sameDir reports whether two paths name one directory, symlinks resolved.

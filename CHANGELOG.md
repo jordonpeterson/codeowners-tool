@@ -12,6 +12,27 @@ changes to which class a failure lands in are called out explicitly.
 
 ### Fixed (from five user-test personas driving the shipped binary)
 
+- **A CODEOWNERS left unmerged by a conflict is refused, not rewritten.** With
+  `UU .github/CODEOWNERS` from a conflicted merge, rebase or cherry-pick,
+  `sync` saw only S-3 syntax errors in the markers, kept BOTH sides' rules live
+  — `=======` is not invalid, it parses as a zero-owner rule (S-9) — and
+  reported `applied (proven: tree)` at exit 0. The invariants were proven
+  against a "before" ownership no commit has ever had and GitHub will never
+  see, and the file was still `UU` afterwards, so the proven change could not
+  be committed as it stood. `plan` emitted the same mangled state as a
+  reviewable artifact (markers and all, in `after_content`); `lint` judged
+  every rule against it; and `apply` could not catch it either, because
+  `git checkout --ours` leaves the path unmerged holding exactly the bytes
+  `sha256_before` was computed from, so the write landed at exit 0 and the
+  operator's `git add` would have resolved somebody's merge with tool-synthesized
+  content. All four verbs now ask `git status --porcelain` about the governing
+  file and refuse the unmerged codes (`DD AU UD UA DU AA UU`). The guard is
+  scoped to that file by pathspec: a conflict in any other file, an ordinary
+  dirty working tree, and a rebase in progress with nothing unmerged all sync
+  as before. **Exit-code change:** what reported `status:"applied"` at exit 0
+  in such a repo is now `status:"refused"` at exit 2 — the per-repo class a
+  fleet loop records and steps past; no policy-level (exit 3) verdict moves.
+
 - **A CODEOWNERS location occupied by a submodule is refused, not written
   through.** The shared-org-`.github` layout mounts another repository at a
   location GitHub reads, and `git ls-tree` reports it as a gitlink — so

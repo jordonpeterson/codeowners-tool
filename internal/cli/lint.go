@@ -384,6 +384,14 @@ func runLint(r lintRun, stdout, stderr io.Writer) int {
 	if err := refuseNonTreeAncestor(r.repo, r.branch, tree, coPath); err != nil {
 		return errExit(err, stderr)
 	}
+	// And the state of the file itself: an unmerged CODEOWNERS is both sides of
+	// a conflict, so every rule lint judges — stale, unknown owner, duplicate —
+	// is judged against text no commit has ever had, and the repair is written
+	// back into a file git still considers conflicted. Offline and before the
+	// token is used, like the two guards above. See refuseUnmergedCodeowners.
+	if err := refuseUnmergedCodeowners(r.repo, coPath); err != nil {
+		return errExit(err, stderr)
+	}
 	content, err := os.ReadFile(target)
 	if err != nil {
 		return errExit(&plan.InvalidError{Msg: err.Error()}, stderr)

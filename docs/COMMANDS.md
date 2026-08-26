@@ -69,6 +69,13 @@ else (bad enum values, ops that can't carry the `on_zero_match` you gave them, a
 without asking, and they are *not* contained to `--repo`. Unlike `--file` and the
 discovered CODEOWNERS path, no repository can influence them.
 
+An **unmerged CODEOWNERS is refused** (exit 2) by every verb that reads its bytes to
+decide an edit — `sync`, `plan`, `apply` and `lint`. After a conflicted merge, rebase or
+cherry-pick the file holds both sides at once (`=======` is a legal zero-owner rule, S-9),
+so the "before" ownership is a state no commit has ever had. Resolve the conflict and
+`git add` it, then re-run. A conflict in any *other* file changes nothing and is not
+refused.
+
 Three different things in this tool are called "policy". `--policy` is your ops file — and
 that file is always "the policy file". `--on-empty` and `on_zero_match` are per-situation
 rules the tool follows.

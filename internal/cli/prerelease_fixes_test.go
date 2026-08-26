@@ -963,3 +963,209 @@ func TestFix_ApplyRefusesAPlanWhoseRefIsGoneWithoutGitPlumbing(t *testing.T) {
 		}
 	}
 }
+
+// fixConflictedMerge leaves repo standing in a conflicted merge, with path
+// unmerged: the side branch and main write different content there, and the
+// merge of the two fails. Returns the conflicted bytes on disk.
+func fixConflictedMerge(t *testing.T, repo, path, theirs, ours string) string {
+	t.Helper()
+	full := filepath.Join(repo, filepath.FromSlash(path))
+	write := func(s string) {
+		t.Helper()
+		if err := os.WriteFile(full, []byte(s), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	gitRun(t, repo, "switch", "-qc", "sidebranch")
+	write(theirs)
+	gitRun(t, repo, "commit", "-aqm", "theirs")
+	gitRun(t, repo, "switch", "-q", "main")
+	write(ours)
+	gitRun(t, repo, "commit", "-aqm", "ours")
+	// The merge is EXPECTED to fail, so it does not go through gitRun.
+	if code, _, _ := runGit(t, repo, "merge", "sidebranch"); code == 0 {
+		t.Fatal("fixture: the merge was supposed to conflict")
+	}
+	if _, status, _ := runGit(t, repo, "status", "--short"); !strings.Contains(status, "U "+path) {
+		t.Fatalf("fixture: expected %s unmerged, git says:\n%s", path, status)
+	}
+	return syncReadFile(t, full)
+}
+
+// An unmerged CODEOWNERS is refused by every verb that reads its bytes to
+// decide an edit, not only by the `sync` the finding was reported against.
+//
+// The bytes on disk are both sides of a conflict, so the "before" ownership is
+// a state no commit has ever had: `=======` parses as a zero-owner rule (S-9)
+// and both sides' rules stay live. `plan` is in the list because the artifact
+// it emits is what a human approves — a plan computed from conflict-mangled
+// bytes should not exist to be approved. Exit 2: an unmerged index is a fact
+// about THIS clone, so a fleet loop records it and steps to the next repo.
+func TestFix_UnmergedCodeownersIsRefusedByEveryVerbThatReadsIt(t *testing.T) {
+	for _, tc := range []struct {
+		verb string
+		args []string
+	}{
+		{"sync", []string{"sync", "--op", "add_owner(/services/api/, @org/api)"}},
+		{"plan", []string{"plan", "--op", "add_owner(/services/api/, @org/api)"}},
+		{"lint", []string{"lint", "--github-repo", "o/r", "--token", "t"}},
+	} {
+		t.Run(tc.verb, func(t *testing.T) {
+			repo := initRepo(t, map[string]string{
+				".github/CODEOWNERS":   "* @org/everyone\n",
+				"services/api/main.go": "m\n",
+				"docs/x.md":            "d\n",
+			})
+			conflicted := fixConflictedMerge(t, repo, ".github/CODEOWNERS",
+				"* @org/everyone\n/docs/ @org/docs-a\n", "* @org/everyone\n/docs/ @org/docs-b\n")
+
+			code, stdout, stderr := runCLI(t, append(tc.args, "--repo", repo)...)
+			out := stdout + stderr
+			if code != cli.ExitRefused {
+				t.Fatalf("%s on an unmerged CODEOWNERS: want exit 2, got %d\noutput:\n%s", tc.verb, code, out)
+			}
+			if !strings.Contains(out, "unmerged") || !strings.Contains(out, ".github/CODEOWNERS") {
+				t.Errorf("the refusal must name the file and say it is unmerged\noutput:\n%s", out)
+			}
+			if got := syncReadFile(t, filepath.Join(repo, ".github", "CODEOWNERS")); got != conflicted {
+				t.Errorf("the conflicted file was rewritten anyway:\n%s", got)
+			}
+		})
+	}
+}
+
+// `apply` carries the guard too, because its integrity checks cannot reach
+// this: `git checkout --ours .github/CODEOWNERS` leaves the file UNMERGED with
+// exactly the bytes the plan was computed from, so sha256_before matches and
+// the tracked tree at HEAD never moved. Pre-guard, apply wrote at exit 0 and
+// the operator's `git add` would then have resolved somebody's merge with
+// content the tool synthesized against one side of it.
+func TestFix_ApplyRefusesAnUnmergedCodeowners(t *testing.T) {
+	repo := initRepo(t, map[string]string{
+		".github/CODEOWNERS":   "* @org/everyone\n",
+		"services/api/main.go": "m\n",
+		"docs/x.md":            "d\n",
+	})
+	co := filepath.Join(repo, ".github", "CODEOWNERS")
+	write := func(s string) {
+		t.Helper()
+		if err := os.WriteFile(co, []byte(s), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	gitRun(t, repo, "switch", "-qc", "sidebranch")
+	write("* @org/everyone\n/docs/ @org/docs-a\n")
+	gitRun(t, repo, "commit", "-aqm", "theirs")
+	gitRun(t, repo, "switch", "-q", "main")
+	write("* @org/everyone\n/docs/ @org/docs-b\n")
+	gitRun(t, repo, "commit", "-aqm", "ours")
+
+	// Planned while the checkout is clean — the reviewed artifact.
+	planPath := filepath.Join(t.TempDir(), "plan.json")
+	if code, _, errOut := runCLI(t, "plan", "--repo", repo,
+		"--op", "add_owner(/services/api/, @org/api)", "--out", planPath); code != cli.ExitOK {
+		t.Fatalf("plan on the clean checkout: want exit 0, got %d\n%s", code, errOut)
+	}
+
+	// The merge is EXPECTED to fail, so it does not go through gitRun.
+	if code, _, _ := runGit(t, repo, "merge", "sidebranch"); code == 0 {
+		t.Fatal("fixture: the merge was supposed to conflict")
+	}
+	// Our side's bytes, restored: still unmerged, and byte-identical to what
+	// the plan was computed from, so sha256_before cannot notice.
+	gitRun(t, repo, "checkout", "--ours", "--", ".github/CODEOWNERS")
+	before := syncReadFile(t, co)
+	if strings.Contains(before, "<<<<<<<") {
+		t.Fatalf("fixture: --ours should have removed the markers:\n%s", before)
+	}
+	if _, status, _ := runGit(t, repo, "status", "--short"); !strings.Contains(status, "U .github/CODEOWNERS") {
+		t.Fatalf("fixture: the file must still be unmerged, git says:\n%s", status)
+	}
+
+	code, stdout, stderr := runCLI(t, "apply", "--repo", repo, "--plan", planPath)
+	out := stdout + stderr
+	if code != cli.ExitRefused {
+		t.Fatalf("apply onto an unmerged CODEOWNERS: want exit 2, got %d\noutput:\n%s", code, out)
+	}
+	if !strings.Contains(out, "unmerged") {
+		t.Errorf("the refusal must say the file is unmerged\noutput:\n%s", out)
+	}
+	if got := syncReadFile(t, co); got != before {
+		t.Errorf("apply wrote into a file git still reports as unmerged:\n%s", got)
+	}
+}
+
+// The neighbour the guard must not take with it: an ordinary DIRTY working
+// tree. Uncommitted edits to CODEOWNERS are the normal state of a repo the
+// tool has just written to — a second `sync` in the same fleet pass sees them
+// — and nothing about them is ambiguous, so the run proceeds.
+func TestFix_DirtyButMergedWorkingTreeStillSyncs(t *testing.T) {
+	repo := initRepo(t, map[string]string{
+		".github/CODEOWNERS":   "* @org/everyone\n",
+		"services/api/main.go": "m\n",
+	})
+	co := filepath.Join(repo, ".github", "CODEOWNERS")
+	if err := os.WriteFile(co, []byte("* @org/everyone\n/docs/ @org/docs\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	code, stdout, stderr := runCLI(t, "sync", "--repo", repo, "--op", "add_owner(/services/api/, @org/api)")
+	if code != cli.ExitOK {
+		t.Fatalf("sync on a dirty but merged working tree: want exit 0, got %d\nstdout:\n%s\nstderr:\n%s",
+			code, stdout, stderr)
+	}
+	got := syncReadFile(t, co)
+	if !strings.Contains(got, "@org/api") || !strings.Contains(got, "/docs/ @org/docs") {
+		t.Errorf("the uncommitted edit or the new rule is missing:\n%s", got)
+	}
+}
+
+// A conflict in some OTHER file must not block a CODEOWNERS edit. The bytes
+// the invariants are proven against are this file's, and the tree they are
+// resolved against is the ref's — an unmerged main.go changes neither. Blocking
+// it would refuse exactly when someone is reconciling a merge, which is when
+// ownership most often needs a line.
+func TestFix_ConflictInAnotherFileDoesNotBlockACodeownersEdit(t *testing.T) {
+	repo := initRepo(t, map[string]string{
+		".github/CODEOWNERS":   "* @org/everyone\n",
+		"services/api/main.go": "m\n",
+	})
+	fixConflictedMerge(t, repo, "services/api/main.go", "side\n", "main\n")
+
+	code, stdout, stderr := runCLI(t, "sync", "--repo", repo, "--op", "add_owner(/services/api/, @org/api)")
+	if code != cli.ExitOK {
+		t.Fatalf("sync with an unrelated file unmerged: want exit 0, got %d\nstdout:\n%s\nstderr:\n%s",
+			code, stdout, stderr)
+	}
+	if got := syncReadFile(t, filepath.Join(repo, ".github", "CODEOWNERS")); !strings.Contains(got, "@org/api") {
+		t.Errorf("sync exited 0 without writing the change:\n%s", got)
+	}
+}
+
+// Mid-rebase is not by itself a refusal: an interrupted rebase with nothing
+// unmerged leaves CODEOWNERS exactly as some commit wrote it, which is a state
+// the invariants can be proven against. The guard asks git what the FILE is,
+// not what the repository is in the middle of.
+func TestFix_MidRebaseWithoutAConflictStillSyncs(t *testing.T) {
+	repo := initRepo(t, map[string]string{
+		".github/CODEOWNERS":   "* @org/everyone\n",
+		"services/api/main.go": "m\n",
+	})
+	gitRun(t, repo, "commit", "-qm", "empty", "--allow-empty")
+	// `--exec false` stops the rebase after the first pick with a clean tree.
+	if code, _, _ := runGit(t, repo, "rebase", "--exec", "false", "HEAD~1"); code == 0 {
+		t.Skip("rebase --exec false did not stop the rebase here")
+	}
+	if _, status, _ := runGit(t, repo, "status", "--porcelain"); status != "" {
+		t.Fatalf("fixture: the working tree should be clean mid-rebase, git says:\n%s", status)
+	}
+
+	code, stdout, stderr := runCLI(t, "sync", "--repo", repo, "--op", "add_owner(/services/api/, @org/api)")
+	if code != cli.ExitOK {
+		t.Fatalf("sync mid-rebase with nothing unmerged: want exit 0, got %d\nstdout:\n%s\nstderr:\n%s",
+			code, stdout, stderr)
+	}
+	if got := syncReadFile(t, filepath.Join(repo, ".github", "CODEOWNERS")); !strings.Contains(got, "@org/api") {
+		t.Errorf("sync exited 0 without writing the change:\n%s", got)
+	}
+}

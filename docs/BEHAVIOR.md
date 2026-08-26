@@ -1213,6 +1213,15 @@ error was `git rev-parse --verify --end-of-options release^{commit}: exit
 status 128: fatal: Needed a single revision`, which names a command nobody
 ran and a flag this tool passes on the operator's behalf.
 
+### `TestFix_ApplyRefusesAnUnmergedCodeowners`
+
+`apply` carries the guard too, because its integrity checks cannot reach
+this: `git checkout --ours .github/CODEOWNERS` leaves the file UNMERGED with
+exactly the bytes the plan was computed from, so sha256_before matches and
+the tracked tree at HEAD never moved. Pre-guard, apply wrote at exit 0 and
+the operator's `git add` would then have resolved somebody's merge with
+content the tool synthesized against one side of it.
+
 ### `TestFix_ApplyRefusesSymlinkedCodeowners`
 
 The symlink refusal reaches `apply` too: a plan is reviewed in one place and
@@ -1240,6 +1249,14 @@ not only on the clean repo the KnownBug test pins.
 R-25's refusal names only the ops that would have APPLIED: an op whose rule
 was already satisfied changed zero paths, so naming it sent the operator
 narrowing an op that was never behind the number.
+
+### `TestFix_ConflictInAnotherFileDoesNotBlockACodeownersEdit`
+
+A conflict in some OTHER file must not block a CODEOWNERS edit. The bytes
+the invariants are proven against are this file's, and the tree they are
+resolved against is the ref's — an unmerged main.go changes neither. Blocking
+it would refuse exactly when someone is reconciling a merge, which is when
+ownership most often needs a line.
 
 ### `TestFix_CreateAtRootOverDocsIsRefused`
 
@@ -1278,6 +1295,13 @@ SHA — the honest answer, since there is no branch name to offer. Before the
 fix the echoed `--end-of-options` line meant the name never equalled "HEAD"
 and the detached path could not fire.
 
+### `TestFix_DirtyButMergedWorkingTreeStillSyncs`
+
+The neighbour the guard must not take with it: an ordinary DIRTY working
+tree. Uncommitted edits to CODEOWNERS are the normal state of a repo the
+tool has just written to — a second `sync` in the same fleet pass sees them
+— and nothing about them is ambiguous, so the run proceeds.
+
 ### `TestFix_FileFlagSpellingsClassifyByCleanPath`
 
 The other uncleaned spellings of a governing location: `.github//CODEOWNERS`
@@ -1304,6 +1328,13 @@ API call — so it is decidable, and tested, offline.
 
 lint shares the helper, so the parent-directory case refuses there too —
 offline, before any API call, like its final-component sibling above.
+
+### `TestFix_MidRebaseWithoutAConflictStillSyncs`
+
+Mid-rebase is not by itself a refusal: an interrupted rebase with nothing
+unmerged leaves CODEOWNERS exactly as some commit wrote it, which is a state
+the invariants can be proven against. The guard asks git what the FILE is,
+not what the repository is in the middle of.
 
 ### `TestFix_NoRecordNoteCoversEverySyncExit3`
 
@@ -1409,6 +1440,18 @@ succeeds (exit 0, staged as `D .github` + `A .github/CODEOWNERS`), so a
 message claiming it "fails with is in submodule" sends the operator looking
 for a submodule that does not exist. The message is the only evidence a
 refused fleet row carries.
+
+### `TestFix_UnmergedCodeownersIsRefusedByEveryVerbThatReadsIt`
+
+An unmerged CODEOWNERS is refused by every verb that reads its bytes to
+decide an edit, not only by the `sync` the finding was reported against.
+
+The bytes on disk are both sides of a conflict, so the "before" ownership is
+a state no commit has ever had: `=======` parses as a zero-owner rule (S-9)
+and both sides' rules stay live. `plan` is in the list because the artifact
+it emits is what a human approves — a plan computed from conflict-mangled
+bytes should not exist to be approved. Exit 2: an unmerged index is a fact
+about THIS clone, so a fleet loop records it and steps to the next repo.
 
 ### `TestFleet_BrokenPolicyHaltsOnTheFirstRepo`
 
@@ -7744,4 +7787,4 @@ DIFFERENT states; transitioning between them is a real ownership change.
 
 ---
 
-717 documented test cases across 13 packages.
+722 documented test cases across 13 packages.

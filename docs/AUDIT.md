@@ -105,10 +105,12 @@ token: a secret team returns the same 404 as a deleted one, and only an owner se
 teams. Email owners are `unverifiable`, never dead (R-13), and never make a run
 inconclusive.
 
-**Repository guards**, both exit 2: `--branch` must be the ref the clone has checked out
-(lifted by `--dry-run`), and `--repo` must be the repository root (not lifted). Both exist
-because lint proves against a tree and writes a file, and those are only the same document
-when the two agree.
+**Repository guards**, all exit 2: `--branch` must be the ref the clone has checked out
+(lifted by `--dry-run`), `--repo` must be the repository root (not lifted), and the
+governing CODEOWNERS must not be left unmerged by a conflict — a rule judged against both
+sides of a merge at once is judged against text no commit has ever had. They exist because
+lint proves against a tree and writes a file, and those are only the same document when
+the two agree.
 
 | Exit | When |
 |---|---|

@@ -726,6 +726,14 @@ func cmdPlan(args []string, stdout, stderr io.Writer) int {
 	if err := refuseNonTreeAncestor(*repo, *branch, tree, coPath); err != nil {
 		return errExit(err, stderr)
 	}
+	// And the state of the bytes the plan is built from. A plan is the artifact
+	// a HUMAN approves, so one computed from a conflicted CODEOWNERS is the
+	// worst place for this to surface: the ownership rows are derived from both
+	// sides of a merge at once, and after_content carries the markers forward
+	// into whatever apply writes. See refuseUnmergedCodeowners.
+	if err := refuseUnmergedCodeowners(*repo, coPath); err != nil {
+		return errExit(err, stderr)
+	}
 	// File bytes come from the working tree — that is what apply mutates.
 	content, err := os.ReadFile(filepath.Join(*repo, filepath.FromSlash(coPath)))
 	if err != nil {
@@ -830,6 +838,16 @@ func cmdApply(args []string, stdout, stderr io.Writer) int {
 	// And the symlink refusal those two do not cover: a link that stays inside
 	// the clone still lands the write on a file GitHub never reads.
 	if err := refuseSymlinkedTarget(target); err != nil {
+		return errExit(err, stderr)
+	}
+	// And the unmerged file neither the plan's integrity fields nor the tree
+	// digest can see: `git checkout --ours .github/CODEOWNERS` leaves the path
+	// UNMERGED holding exactly the bytes the plan was computed from, so
+	// sha256_before matches and HEAD's tree never moved — apply wrote at exit
+	// 0, and the operator's `git add` then resolved somebody's merge with
+	// content this tool synthesized from one side of it. See
+	// refuseUnmergedCodeowners.
+	if err := refuseUnmergedCodeowners(repoDir, pf.CodeownersPath); err != nil {
 		return errExit(err, stderr)
 	}
 	// The tree the plan was reviewed against. sha256_before proves CODEOWNERS
