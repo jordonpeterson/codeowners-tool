@@ -343,6 +343,16 @@ a bare line deletion.
 > Neighbours of the four op/pattern fixes: the cases each fix must NOT take
 > with it, end to end through the CLI.
 
+**`fixes_parse_internal_test.go`**
+
+> Package cli internal test: the `git status --porcelain -z` record parser,
+> which no end-to-end test can reach in its interesting cases.
+>
+> The pathspec the caller passes filters out both malformed shapes before the
+> parser sees them, so an e2e assertion about them passes whether the parser
+> is right or wrong — the vacuous pass CONTRIBUTING singles out. Testing the
+> function directly is the only honest way to pin it.
+
 **`fleet_idempotence_test.go`**
 
 > R-19 — convergence and idempotence at fleet scale.
@@ -1346,6 +1356,15 @@ tree. Uncommitted edits to CODEOWNERS are the normal state of a repo the
 tool has just written to — a second `sync` in the same fleet pass sees them
 — and nothing about them is ambiguous, so the run proceeds.
 
+### `TestFix_DryRunDoesNotLiftTheUnmergedGuard`
+
+SPEC R-23: --dry-run does NOT lift the unmerged guard, unlike the S-7 branch
+guard it sits beside.
+
+There the bytes are real and only the ref is wrong, so a preview is honest.
+Here the preview would report ownership derived from text that is no version
+of the file, which is the defect itself rather than a safe rehearsal of it.
+
 ### `TestFix_FileFlagSpellingsClassifyByCleanPath`
 
 The other uncleaned spellings of a governing location: `.github//CODEOWNERS`
@@ -1623,6 +1642,18 @@ and both sides' rules stay live. `plan` is in the list because the artifact
 it emits is what a human approves — a plan computed from conflict-mangled
 bytes should not exist to be approved. Exit 2: an unmerged index is a fact
 about THIS clone, so a fleet loop records it and steps to the next repo.
+
+### `TestFix_UnmergedGuardReachesAPathThatLooksLikePathspecMagic`
+
+SPEC R-23 (S-7): the unmerged guard reaches a CODEOWNERS whose path begins
+with `:`, which git reads as pathspec MAGIC rather than as a path.
+
+The review of the original fix disproved its own justification: dropping
+`:(literal)` broke no test, because the loop already compares the whole path
+exactly, so a glob metacharacter could never mis-select a record. The case
+it does prevent is this one — without the prefix `git status` matches
+nothing, the guard sees a clean tree, and the run rewrites the conflicted
+file reporting `applied (proven: tree)`.
 
 ### `TestFix_UntrackedButCommittableCodeownersStillConverges`
 
@@ -5351,6 +5382,11 @@ will fix. governingWarnings() is the mechanism for exactly this class
 ("Every condition below exits 0 and reports 'applied' … invisible at fleet
 scale unless the run that touched the file says so") and has no case for it.
 
+### `TestUnmergedCodeInParsesRecordsStrictly`
+
+SPEC R-23: a path whose NAME begins with two status letters is not read as a
+status code, and a record with no code is not read as one either.
+
 ### `TestUnmergedCodeownersIsNotSilentlyRewritten`
 
 FINDING: `sync` rewrites a CODEOWNERS left UNMERGED by a conflict and
@@ -8241,4 +8277,4 @@ twice and one tracked file vanished from the gate.
 
 ---
 
-776 documented test cases across 13 packages.
+779 documented test cases across 13 packages.

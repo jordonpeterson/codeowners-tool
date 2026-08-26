@@ -957,9 +957,13 @@ func TestFix_ApplyRefusesAPlanWhoseRefIsGoneWithoutGitPlumbing(t *testing.T) {
 	if !strings.Contains(out, "release") || !strings.Contains(out, "does not resolve in this clone") {
 		t.Errorf("the refusal must name the ref and say it does not resolve here:\n%s", out)
 	}
-	for _, plumbing := range []string{"rev-parse", "--end-of-options", "^{commit}", "exit status"} {
+	// --branch and --dry-run are flags `apply` does not have: its ref came from
+	// the plan file. Naming one sends the reader hunting for a flag that does
+	// not exist, which is what refPhrase exists to prevent — and collapsing it
+	// to the sync wording otherwise survives the whole suite.
+	for _, plumbing := range []string{"rev-parse", "--end-of-options", "^{commit}", "exit status", "--branch", "--dry-run"} {
 		if strings.Contains(out, plumbing) {
-			t.Errorf("the refusal leaks %q, git plumbing the operator never invoked:\n%s", plumbing, out)
+			t.Errorf("the refusal leaks %q, which `apply` never invoked and does not have:\n%s", plumbing, out)
 		}
 	}
 }

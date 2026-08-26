@@ -660,15 +660,10 @@ func (r *syncRun) checkBranchIsWritable() error {
 	return checkBranchIsWritable(r.repoArg, r.branch, "sync", r.dryRun)
 }
 
-// checkBranchIsWritable is the free function behind it, shared with
-// `audit --lint` — the other verb that proves against --branch's tree and
-// writes the working tree, and which therefore has exactly the same way to
-// land a change justified by a tree nobody wrote to. Sharing it is the point:
-// a second copy of this reasoning is a second chance to omit it.
-// refPhrase names a ref the way the verb's operator set it, so the two
-// refusals below agree on wording. `apply` has neither --branch nor --dry-run
-// — its ref came from the plan file — so naming a flag its operator never
-// typed would send them looking for one that does not exist.
+// refPhrase names a ref the way the verb's operator set it, so both refusals
+// below agree on wording. `apply` has neither --branch nor --dry-run — its ref
+// came from the plan file — so naming a flag its operator never typed would
+// send them looking for one that does not exist.
 func refPhrase(branch, verb string) string {
 	if verb == "apply" {
 		return "the ref this plan was computed against, " + branch + ","
@@ -676,6 +671,11 @@ func refPhrase(branch, verb string) string {
 	return "--branch " + branch
 }
 
+// checkBranchIsWritable is the free function behind it, shared with
+// `audit --lint` — the other verb that proves against --branch's tree and
+// writes the working tree, and which therefore has exactly the same way to
+// land a change justified by a tree nobody wrote to. Sharing it is the point:
+// a second copy of this reasoning is a second chance to omit it.
 func checkBranchIsWritable(repoDir, branch, verb string, dryRun bool) error {
 	if branch == "HEAD" || dryRun {
 		return nil
@@ -750,8 +750,17 @@ func checkBranchIsWritable(repoDir, branch, verb string, dryRun bool) error {
 // loop records it and steps to the next repo.
 func refuseUnmergedCodeowners(repoDir, rel string) error {
 	clean := relClean(rel)
-	// :(literal) because rel can come from --file, where a `*` would otherwise
-	// be a pathspec glob and report some other file's conflict as this one's.
+	// :(literal) because rel can come from --file, and a path beginning with
+	// `:` is pathspec MAGIC to git, not a path: without it, `--file
+	// ':weird/CODEOWNERS'` on a repo where that file is unmerged comes back
+	// with no matching entry at all, and the run rewrites the conflicted file
+	// reporting `applied (proven: tree)` — the very bug this guard exists for.
+	// A glob metacharacter cannot cause that: the loop below already compares
+	// the whole path exactly, so a wider match would be filtered out.
+	//
+	// It is load-bearing a second time, in the loop: a single literal path
+	// makes rename detection impossible, so git never emits the two-record
+	// `R  <to>\0<from>\0` form whose second record carries no status code.
 	out, err := gitBytes(repoDir, "status", "--porcelain", "-z", "--untracked-files=no", "--", ":(literal)"+clean)
 	if err != nil {
 		// Refusal, not an error: `ls-tree` already succeeded here, so a status
@@ -760,17 +769,41 @@ func refuseUnmergedCodeowners(repoDir, rel string) error {
 		// in every repo.
 		return &plan.RefusalError{Msg: fmt.Sprintf("refusing: cannot tell whether %s is unmerged (%v) — a conflicted CODEOWNERS would be proven against both sides of a merge at once, so this run stops rather than guess; nothing was written", clean, err)}
 	}
-	for _, entry := range bytes.Split(out, []byte{0}) {
-		// "XY path": a rename's second NUL field carries no code and cannot
-		// match an unmerged one.
-		if len(entry) < 4 || string(entry[3:]) != clean || !unmergedStatus(string(entry[:2])) {
-			continue
-		}
+	if code, ok := unmergedCodeIn(out, clean); ok {
+		// `git rm` for a modify/delete conflict (UD/DU), where the resolution
+		// may be to keep the deletion rather than a merged file.
 		return &plan.RefusalError{Msg: fmt.Sprintf(
-			"refusing: %s is unmerged in this checkout (git status: %s) — a conflicted merge, rebase or cherry-pick left both sides in the file, and `=======` parses as a valid zero-owner rule (S-9), so the ownership this run would prove against is a conflict-mangled state no commit has ever had and GitHub will never see; resolve the conflict and `git add %s`, then re-run — nothing was written",
-			clean, string(entry[:2]), clean)}
+			"refusing: %s is unmerged in this checkout (git status --short: %s) — a conflicted merge, rebase or cherry-pick left both sides in the file, and `=======` parses as a valid zero-owner rule (S-9), so the ownership this run would prove against is a conflict-mangled state no commit has ever had and GitHub will never see; resolve the conflict, then `git add %s` (or `git rm` it, for a modify/delete conflict), then re-run — nothing was written",
+			clean, code, clean)}
 	}
 	return nil
+}
+
+// unmergedCodeIn reports the status code `git status --porcelain -z` gives
+// path, when that code is an unmerged one.
+//
+// Split out to be testable. Every record git can emit for a single literal
+// pathspec is reachable from a repository, but the two malformed shapes this
+// guards against are not: the pathspec makes rename detection impossible, so
+// the codeless second record of an `R  <to>\0<from>\0` pair never arrives, and
+// a decoy path is filtered by the pathspec before the parser sees it. Both
+// would be reachable the moment the pathspec changed, and a parser whose
+// correctness rests on its caller's argument is one refactor from refusing a
+// repository that is perfectly merged.
+func unmergedCodeIn(out []byte, path string) (string, bool) {
+	for _, entry := range bytes.Split(out, []byte{0}) {
+		// A record is "XY<space>path". Requiring the space keeps a PATH that
+		// merely begins with two status letters from being read as a code:
+		// `UUx.github/CODEOWNERS` would otherwise parse as XY="UU" with
+		// path=".github/CODEOWNERS", refusing a fully merged repository.
+		if len(entry) < 4 || entry[2] != ' ' || string(entry[3:]) != path {
+			continue
+		}
+		if code := string(entry[:2]); unmergedStatus(code) {
+			return code, true
+		}
+	}
+	return "", false
 }
 
 // refuseIgnoredCodeowners refuses to write a CODEOWNERS that is untracked AND
