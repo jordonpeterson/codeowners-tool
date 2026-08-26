@@ -330,6 +330,14 @@ a bare line deletion.
 > they freeze current behavior the spec promises to preserve, rather than
 > specify new behavior. Everything else fails until the feature lands.
 
+**`fixes_cli_test.go`**
+
+> Neighbours of the seven CLI fixes in this change: the cases each fix must
+> NOT sweep up. Every test here passes before the fix as well as after — that
+> is the point. What each one holds is written above it, together with the
+> mutation of the product code that makes it fail, because a guard nobody has
+> broken on purpose is a guard nobody knows works.
+
 **`fixes_ops_test.go`**
 
 > Neighbours of the four op/pattern fixes: the cases each fix must NOT take
@@ -1190,6 +1198,18 @@ The repo-root guard reaches `apply` too: --repo can point the apply at a
 different clone than the plan's, and pointed below the root the joined
 codeowners_path names a file GitHub never reads (checkRepoRoot).
 
+### `TestFix_ApplyNamesThePlansOwnPathNotAFixedOne`
+
+apply's success line names the plan's own repo-relative path, whatever that
+path is and wherever the command is run from. `.github/CODEOWNERS` is the
+common case and would also match a hardcoded string, so this uses a repo
+governed by docs/CODEOWNERS and additionally requires the absolute repo path
+to be absent.
+
+MUTATION: print `target` (the absolute join) again and this fails on the
+absolute-path clause; hardcode ".github/CODEOWNERS" and it fails on the
+first.
+
 ### `TestFix_ApplyRefusesAPlanFromARefThisCloneIsNotOn`
 
 The submodule finding, still live through the one verb that had no guard:
@@ -1244,6 +1264,17 @@ existing guard pins.
 The pure-JSON fix must not have taken the human verdict with it: under the
 default text format a clean audit still says so on stdout.
 
+### `TestFix_AuditDoesNotReadTheWorkTreeAgainstAnotherRef`
+
+audit reads the ref, and the working tree belongs to HEAD. Auditing a ref
+this clone is not standing on must not report files on disk against it —
+those files are a different commit's, and the finding would be an assertion
+about a tree nobody looked at.
+
+MUTATION: make refIsCheckedOut return true unconditionally and this fails —
+.github/CODEOWNERS, committed on main and absent from `release`, is reported
+as staged against release.
+
 ### `TestFix_AuditJSONWithFindingsIsPureJSON`
 
 `audit --format json` stdout is one JSON document in the findings case too,
@@ -1284,6 +1315,14 @@ written as "--file plus an existing CODEOWNERS" would take this case with
 it. Nothing is lost by writing here — .github/CODEOWNERS keeps governing —
 and the R-24 warning is what tells the operator that.
 
+### `TestFix_CreateDoesNotWarnAboutTheFileItIsCreating`
+
+`--create` writes a file that is untracked by definition, and saying so is
+noise: the record already reports `created`, and there is no earlier state
+to have committed.
+
+MUTATION: drop the `!creating` guard in governingWarnings and this fails.
+
 ### `TestFix_CreateIntoASubmoduleIsRefused`
 
 `--create` reaches the submodule by a different route than discovery does:
@@ -1319,10 +1358,57 @@ location still does.
 `--file` names the path directly, so discovery is bypassed entirely — the
 same dead-on-arrival write with the operator's spelling on it.
 
+### `TestFix_FileNamesWhichHalfOfAMigrationToEdit`
+
+--file is the migration guard's escape hatch, and it has to actually open.
+The refusal's own advice is "pass --file to say which of the two this run
+should edit", so a --file run that still refused would be advice into a
+wall.
+
+MUTATION: drop the `r.filePath != ""` early return in
+refuseWorkTreeSupersede and this fails at exit 2.
+
+### `TestFix_FileNamingATrackedCodeownersStillReads`
+
+--file naming a path the ref DOES carry is the ordinary use of the flag and
+must keep working: the new refusal is about absence from the ref, not about
+the flag.
+
+MUTATION: invert the trackedAt test in codeownersAtRef and this fails at
+exit 3 for both verbs.
+
+### `TestFix_FileNotInRefKeepsItsExitClass`
+
+The missing-target refusal stays in the exit class its sibling is in.
+locate's "no CODEOWNERS file found … use --file to specify one" is exit 3 on
+these two verbs, and splitting one "which file does this ref carry?"
+question across two exit classes costs a script more than either class does.
+
+MUTATION: return a plan.RefusalError from codeownersAtRef and this fails at
+exit 2.
+
+### `TestFix_IgnoreRulesAboutOtherPathsDoNotRefuseTheRun`
+
+The ignore refusal is about the CODEOWNERS, not about the repository having
+a .gitignore. Refusing on the presence of ignore rules would stop nearly
+every real repository in a fleet.
+
+MUTATION: make refuseIgnoredCodeowners fire whenever `.gitignore` exists
+(rather than when check-ignore matches rel) and this fails at exit 2.
+
 ### `TestFix_LintRefusesACodeownersInsideASubmodule`
 
 lint writes the same file the other verbs do, so it refuses the same shape —
 and offline, before the token is used, like its symlink sibling above.
+
+### `TestFix_LintRefusesCacheTTLWithTheDocumentedReason`
+
+The other half of what AUDIT.md documents as rejected: `--cache-ttl` is a
+TTL over a disk cache lint does not use, so it governs nothing. It was
+reachable only through `audit --lint` for the same reason --cache-dir was.
+
+MUTATION: remove the cache-ttl flag from lint's flagset and this fails with
+the flag package's `flag provided but not defined: -cache-ttl`.
 
 ### `TestFix_LintRefusesSymlinkedCodeowners`
 
@@ -1334,12 +1420,53 @@ API call — so it is decidable, and tested, offline.
 lint shares the helper, so the parent-directory case refuses there too —
 offline, before any API call, like its final-component sibling above.
 
+### `TestFix_LintWithoutCacheFlagsStillRuns`
+
+Defining --cache-dir on lint's flagset must not make lint act as though it
+were passed. The refusal is conditioned on a non-empty value, and --cache-ttl
+on the flag having been TYPED — its default is 24h, so its value cannot
+answer "did you ask for this?".
+
+MUTATION: refuse whenever the flags are defined (drop the `r.cacheDir != ""`
+and `r.cacheTTLSet` tests) and this fails at exit 3.
+
+### `TestFix_LowerPrecedenceWorkTreeCodeownersIsNotAMigration`
+
+The migration guard is directional. A LOWER-precedence CODEOWNERS in the
+working tree changes nothing when it lands — `.github/CODEOWNERS` still
+wins under S-8 — so neither `sync` nor `audit` has anything to say about it.
+
+MUTATION: drop the outranksCodeowners test in refuseWorkTreeSupersede (and
+in stagedHigherCodeowners), leaving "present on disk and not tracked", and
+both halves of this fail.
+
 ### `TestFix_MidRebaseWithoutAConflictStillSyncs`
 
 Mid-rebase is not by itself a refusal: an interrupted rebase with nothing
 unmerged leaves CODEOWNERS exactly as some commit wrote it, which is a state
 the invariants can be proven against. The guard asks git what the FILE is,
 not what the repository is in the middle of.
+
+### `TestFix_MissingFileTargetWithNoGoverningFileClaimsNone`
+
+A missing --file target in a repo that has no CODEOWNERS either must not
+claim a governing file it does not have — the "drop --file to amend that
+file" advice would point at nothing.
+
+The path deliberately does not end in `OWNERS`: every message in this area
+contains the word CODEOWNERS, so asserting on `OWNERS` alone passes without
+the fix and proves nothing.
+
+MUTATION: hardcode the existing-file clause (drop the `e.existing != ""`
+test in fileError) and this fails.
+
+### `TestFix_NoCodeownersAnywhereKeepsItsRefusal`
+
+The discovery-path refusal keeps its original sentence. A repo that really
+has no CODEOWNERS anywhere is the case that head was written for, and every
+fleet script and triage note that greps for it predates this change.
+
+MUTATION: route every noCodeownersError through fileError and this fails.
 
 ### `TestFix_NoRecordNoteCoversEverySyncExit3`
 
@@ -1360,6 +1487,24 @@ component boundary: it is a tracked path and a string prefix of the file
 being written, so a guard comparing prefixes without requiring a `/` after
 them refuses this repo forever with "…: .github/CODEOWNER is a submodule",
 and no other test in the suite notices.
+
+### `TestFix_PlanApplyAndLintAreSilentOnTheGoverningFile`
+
+R-24's disclosure must stay a disclosure. plan, apply and lint pointed at
+the file that DOES govern have nothing to report, and a warning on every
+ordinary run is a warning nobody reads.
+
+MUTATION: drop the `relClean(rel) != present[0]` test in governingWarnings
+and all three clauses fail.
+
+### `TestFix_PlanCarriesTheDisclosureInTheArtifact`
+
+R-24 says the record says so "on stderr and in `warnings`". For `plan` the
+record is the plan file, which is the artifact a human reviews — stderr
+scrolls past in CI and the JSON is what gets attached to the PR.
+
+MUTATION: print the warnings to stderr only, without appending them to
+p.Warnings, and this fails while the target test still passes.
 
 ### `TestFix_PlanRefusesACodeownersInsideASubmodule`
 
@@ -1423,6 +1568,27 @@ not exist in the tree GitHub reads — yet Lstat'ing only the final component
 The refusal must fire, name WHICH component is the link, and leave the
 link's target untouched.
 
+### `TestFix_TheCreateRemedyWritesWhereItSays`
+
+And the remedy that refusal prints has to be true: --create with the same
+--file writes exactly there, and nowhere else.
+
+MUTATION: make governing()'s create branch fall back to
+gittree.CodeownersLocations[0] when --create is set, and this fails — the
+remedy would then be advertising a path the run does not write.
+
+### `TestFix_TrackedCodeownersIsNotCalledUntracked`
+
+A CODEOWNERS git tracks must not be called untracked.
+
+The D5 disclosure is conditioned on `!trackedAt(tree, rel)`; without that
+condition every ordinary repository in a fleet would carry a warning saying
+GitHub reads nothing from its CODEOWNERS, which is both false and the
+fastest way to teach an operator to stop reading warnings.
+
+MUTATION: drop the `!trackedAt(tree, rel)` guard in governingWarnings and
+this fails — the warning fires on the committed file.
+
 ### `TestFix_TrackedFileAtACodeownersLocationIsNamedNeutrally`
 
 The fallback noun, which no other test reaches: a tracked REGULAR FILE at
@@ -1457,6 +1623,16 @@ and both sides' rules stay live. `plan` is in the list because the artifact
 it emits is what a human approves — a plan computed from conflict-mangled
 bytes should not exist to be approved. Exit 2: an unmerged index is a fact
 about THIS clone, so a fleet loop records it and steps to the next repo.
+
+### `TestFix_UntrackedButCommittableCodeownersStillConverges`
+
+D5 still converges. An untracked CODEOWNERS the operator can commit is
+DISCLOSED, not refused: the fallback exists so a nightly job that created
+the file in pass 1 can amend it in pass 2, and a refusal would make that
+sequence impossible for every repo the job bootstraps.
+
+MUTATION: turn the governingWarnings case into a refusal (return an error
+from execute instead of appending a warning) and this fails at exit 2.
 
 ### `TestFleet_BrokenPolicyHaltsOnTheFirstRepo`
 
@@ -8065,4 +8241,4 @@ twice and one tracked file vanished from the gate.
 
 ---
 
-759 documented test cases across 13 packages.
+776 documented test cases across 13 packages.
