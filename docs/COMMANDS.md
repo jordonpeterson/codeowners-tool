@@ -133,13 +133,16 @@ codeowners-tool verify --before before.json --after after.json --scope /services
 `snapshot` resolves the CODEOWNERS **committed at `--branch`** (default `HEAD`) against
 that ref's tracked tree — an uncommitted edit is invisible to it, exactly as it is to
 GitHub. In the `ownership` map, `[]` means a rule matches the path and deliberately
-assigns no owners; `null` means no rule matches it at all.
+assigns no owners; `null` means no rule matches it at all. A path whose bytes are not
+valid UTF-8 is written under an escaped key ([JSON.md](JSON.md#snapshot-paths-that-are-not-valid-utf-8)).
 
 `verify` compares two snapshots and exits `0` when every ownership change falls inside
 a declared `--scope` (repeatable), `2` — printing each offending path — when any change
 falls outside them (with no `--scope`, any change at all violates), and `3` for a
-malformed snapshot. A path present in only one snapshot is a **tree delta**, reported as
-`added:`/`removed:` and never a violation: INV-2 preserves what a path resolved to
+malformed snapshot — or for a pair with no tracked path in common, which is two snapshots
+of different repositories: nothing in such a pair is compared, so it could only ever
+report `ok` (the fleet loop with one wrong filename). A path present in only one snapshot
+is a **tree delta**, reported as `added:`/`removed:` and never a violation: INV-2 preserves what a path resolved to
 before, and an added path has no before (R-18).
 
 ## Exit codes

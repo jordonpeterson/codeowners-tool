@@ -105,3 +105,22 @@ and counted by neither. Keys with nothing in them are **omitted entirely** rathe
 emitted empty, which applies to `ops`, `warnings` and `changes`; guard with `// []`. See
 [FLEET.md](FLEET.md#the-jq-habit-worth-having) for the aggregation recipes.
 
+## Snapshot paths that are not valid UTF-8
+
+Git stores path bytes verbatim and JSON cannot: `encoding/json` folds every invalid byte
+to U+FFFD, which wrote two distinct tracked files as one duplicate key and dropped a path
+before `verify` ever saw it. Such a path is written under a key prefixed with **U+0000** —
+the one byte a git path can never contain — with each invalid byte percent-escaped (`%XX`,
+and a literal `%` as `%25`):
+
+```json
+"ownership": {
+  "\u0000bin/a%E9.md": ["@org/tools"],
+  ".github/CODEOWNERS": ["@org/every"]
+}
+```
+
+Every other key is untouched, so an ordinary snapshot is byte-for-byte what it always was —
+including a real file that literally spells `a%E9.md`. `verify` decodes the key back to the
+raw bytes before comparing, and prints the escaped spelling without the marker
+(`bin/a%E9.md`), which is what a `grep` over the snapshot matches.
