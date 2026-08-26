@@ -858,11 +858,9 @@ func (r *syncRun) governing(tree []string) (rel string, content []byte, creating
 	case r.filePath != "":
 		rel = r.filePath
 	default:
-		if all := gittree.FindCodeownersPaths(tree); len(all) > 0 {
-			rel = all[0]
-		} else if onDisk := r.findOnDisk(); onDisk != "" {
-			rel = onDisk
-		} else {
+		rel = r.existingGoverning(tree)
+		if rel == "" {
+			// Nothing governs yet, so --create writes where GitHub looks first.
 			rel = gittree.CodeownersLocations[0]
 		}
 	}
@@ -896,9 +894,10 @@ func (r *syncRun) governing(tree []string) (rel string, content []byte, creating
 	}
 }
 
-// existingGoverning is the CODEOWNERS this repo resolves from today, read from
-// the same two sources governing() discovers over (D5): the ref's tree first,
-// then the working tree.
+// existingGoverning is the CODEOWNERS this repo resolves from today, or "" if
+// it has none: the ref's tree first, then the working tree (D5). One copy of
+// that order, because discovery and the superseding-create guard below have to
+// agree on which file governs — two spellings of it drift the day D5 changes.
 func (r *syncRun) existingGoverning(tree []string) string {
 	if present := gittree.FindCodeownersPaths(tree); len(present) > 0 {
 		return present[0]
@@ -930,8 +929,11 @@ type supersedingCreateError struct {
 }
 
 func (e *supersedingCreateError) Error() string {
-	return fmt.Sprintf("refusing: this repository is governed by %s, and creating %s would supersede it — GitHub loads only the first of %s (S-8), never merging, so every rule in %s would stop applying and this run's ops would become the whole repository's ownership. Re-run without --file to amend %s, or move it to %s in its own reviewable commit first",
-		e.existing, e.rel, strings.Join(gittree.CodeownersLocations, ", "), e.existing, e.existing, e.rel)
+	// relClean so the refusal names the file GitHub would load, not the
+	// operator's spelling of it: `--file .github//CODEOWNERS` read as
+	// "creating .github//CODEOWNERS", a path that appears nowhere else.
+	return fmt.Sprintf("refusing: this repository is governed by %s, and creating %s would supersede it — GitHub loads only the first of .github/ > root > docs/ (S-8), so every rule in %s would stop applying and this run's ops would become the repository's entire ownership. Drop --file to amend it where it is, or move it in its own commit first",
+		e.existing, relClean(e.rel), e.existing)
 }
 
 // governingWarnings reports what is wrong with the FILE this run is about to

@@ -485,3 +485,103 @@ func TestFix_StaleCommentWarningLeadingBoundary(t *testing.T) {
 		}
 	}
 }
+
+// SPEC R-23/R-24 (S-8): `--create` at a location BELOW the one this repo is
+// governed from still writes, and still says the rules govern nothing.
+//
+// The direction that is refused (superseding the governing file) and the one
+// that is allowed differ only in which way the precedence runs, so a guard
+// written as "--file plus an existing CODEOWNERS" would take this case with
+// it. Nothing is lost by writing here — .github/CODEOWNERS keeps governing —
+// and the R-24 warning is what tells the operator that.
+func TestFix_CreateBelowTheGoverningFileStillWrites(t *testing.T) {
+	repo := initRepo(t, map[string]string{
+		".github/CODEOWNERS":   "* @org/every\n",
+		"services/api/main.go": "",
+	})
+	code, _, errOut := runCLI(t, "sync", "--repo", repo, "--create",
+		"--file", "docs/CODEOWNERS", "--op", "add_owner(/services/api/, @org/platform)")
+	if code != cli.ExitOK {
+		t.Fatalf("want exit 0, got %d — docs/ ranks below .github/, so this write supersedes nothing\nstderr:\n%s", code, errOut)
+	}
+	if got := syncReadFile(t, filepath.Join(repo, "docs", "CODEOWNERS")); !strings.Contains(got, "@org/platform") {
+		t.Errorf("docs/CODEOWNERS = %q", got)
+	}
+	if !strings.Contains(errOut, "govern nothing") || !strings.Contains(errOut, ".github/CODEOWNERS") {
+		t.Errorf("R-24's warning is missing: the file just written is the one GitHub never loads\nstderr:\n%s", errOut)
+	}
+}
+
+// SPEC R-23 (S-8): the superseding-create refusal is about PRECEDENCE, not
+// about .github/ — `--file CODEOWNERS --create` over a docs/-governed repo is
+// refused on the same rule.
+//
+// Root outranks docs/ exactly as .github/ does, so a guard narrowed to the
+// one location the finding happened to use would leave this spelling writing
+// a file that silently takes the whole repository's ownership.
+func TestFix_CreateAtRootOverDocsIsRefused(t *testing.T) {
+	repo := initRepo(t, map[string]string{
+		"docs/CODEOWNERS":      "* @org/everyone\n/services/api/ @org/api-team\n",
+		"services/api/main.go": "",
+	})
+	code, _, errOut := runCLI(t, "sync", "--repo", repo, "--create",
+		"--file", "CODEOWNERS", "--op", "add_owner(/services/api/, @org/platform)")
+	if code != cli.ExitRefused {
+		t.Fatalf("want exit 2, got %d — a root CODEOWNERS would demote docs/CODEOWNERS to a file GitHub never reads\nstderr:\n%s", code, errOut)
+	}
+	if _, err := os.Stat(filepath.Join(repo, "CODEOWNERS")); err == nil {
+		t.Error("CODEOWNERS was written: docs/CODEOWNERS now governs nothing")
+	}
+	fixWantNamesBothFiles(t, errOut, "CODEOWNERS", "docs/CODEOWNERS")
+}
+
+// SPEC R-23/R-34d (S-8): the policy spelling is refused identically —
+// `"create": true` with a pinned `--file` is the fleet-scale shape of this
+// hazard, set once and run against a hundred clones.
+//
+// The record is the whole assertion. A refused repo carries no
+// codeowners_path, so `.error` is all a `needs-human` pile has to triage on,
+// and `created: false` is what keeps a commit step from staging a file that
+// was never written.
+func TestFix_PolicyCreateWithAPinnedFileIsRefused(t *testing.T) {
+	pol := syncWritePolicy(t, `{"version":1,"create":true,"ops":["add_owner(/services/api/, @org/platform)"]}`)
+	repo := initRepo(t, map[string]string{
+		"docs/CODEOWNERS":      "* @org/everyone\n/services/api/ @org/api-team\n",
+		"services/api/main.go": "",
+	})
+	code, out, errOut := runCLI(t, "sync", "--repo", repo, "--policy", pol,
+		"--file", ".github/CODEOWNERS", "--format", "json")
+	if code != cli.ExitRefused {
+		t.Fatalf("want exit 2, got %d — exit 3 would halt a fleet over one repo's layout\nstdout:\n%s\nstderr:\n%s", code, out, errOut)
+	}
+	if _, err := os.Stat(filepath.Join(repo, ".github")); err == nil {
+		t.Error("a .github/ directory was created for a file that was never written")
+	}
+	if got := syncReadFile(t, filepath.Join(repo, "docs", "CODEOWNERS")); got != "* @org/everyone\n/services/api/ @org/api-team\n" {
+		t.Errorf("the governing file changed:\n%s", got)
+	}
+
+	rec := syncDecodeRecord(t, out)
+	if rec.Status != cli.StatusRefused {
+		t.Errorf("status = %q, want %q", rec.Status, cli.StatusRefused)
+	}
+	if rec.Created {
+		t.Error("created = true on a run that wrote nothing")
+	}
+	if v, present := pfRawRecord(t, out)["codeowners_path"]; present {
+		t.Errorf("codeowners_path is present on a refused run: %v", v)
+	}
+	fixWantNamesBothFiles(t, rec.Error, ".github/CODEOWNERS", "docs/CODEOWNERS")
+}
+
+// fixWantNamesBothFiles pins the two paths a superseding-create refusal is
+// about: the one --file asked for and the one that governs today. Either name
+// alone leaves the operator unable to tell which file to keep.
+func fixWantNamesBothFiles(t *testing.T, msg, wrote, governing string) {
+	t.Helper()
+	for _, want := range []string{wrote, governing, "S-8"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("refusal must name %q; got:\n%s", want, msg)
+		}
+	}
+}

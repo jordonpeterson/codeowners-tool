@@ -1201,6 +1201,27 @@ R-25's refusal names only the ops that would have APPLIED: an op whose rule
 was already satisfied changed zero paths, so naming it sent the operator
 narrowing an op that was never behind the number.
 
+### `TestFix_CreateAtRootOverDocsIsRefused`
+
+SPEC R-23 (S-8): the superseding-create refusal is about PRECEDENCE, not
+about .github/ — `--file CODEOWNERS --create` over a docs/-governed repo is
+refused on the same rule.
+
+Root outranks docs/ exactly as .github/ does, so a guard narrowed to the
+one location the finding happened to use would leave this spelling writing
+a file that silently takes the whole repository's ownership.
+
+### `TestFix_CreateBelowTheGoverningFileStillWrites`
+
+SPEC R-23/R-24 (S-8): `--create` at a location BELOW the one this repo is
+governed from still writes, and still says the rules govern nothing.
+
+The direction that is refused (superseding the governing file) and the one
+that is allowed differ only in which way the precedence runs, so a guard
+written as "--file plus an existing CODEOWNERS" would take this case with
+it. Nothing is lost by writing here — .github/CODEOWNERS keeps governing —
+and the R-24 warning is what tells the operator that.
+
 ### `TestFix_DetachedHeadLabelIsBareSHA`
 
 headLabel's contract: on a detached HEAD the label is the bare abbreviated
@@ -1231,6 +1252,17 @@ Every sync exit-3 verdict asked for a sink discloses that no record was
 written — not only the two paths the first fix covered. A fleet aggregating
 --out records otherwise loses these repos silently, the exact hazard the
 note exists to disclose.
+
+### `TestFix_PolicyCreateWithAPinnedFileIsRefused`
+
+SPEC R-23/R-34d (S-8): the policy spelling is refused identically —
+`"create": true` with a pinned `--file` is the fleet-scale shape of this
+hazard, set once and run against a hundred clones.
+
+The record is the whole assertion. A refused repo carries no
+codeowners_path, so `.error` is all a `needs-human` pile has to triage on,
+and `created: false` is what keeps a commit step from staging a file that
+was never written.
 
 ### `TestFix_PositionalArgsRejectedOnEveryVerb`
 
@@ -7602,4 +7634,4 @@ DIFFERENT states; transitioning between them is a real ownership change.
 
 ---
 
-703 documented test cases across 13 packages.
+706 documented test cases across 13 packages.
