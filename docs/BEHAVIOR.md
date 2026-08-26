@@ -1167,6 +1167,18 @@ SPEC R-17: exit 1 no-op, exit 3 invalid input.
 Review finding: a typo'd --scope must be a loud exit-3 error, not silently
 dropped (which turned every change into an inexplicable violation).
 
+### `TestFix_ApplyAcceptsAnotherNameForTheSameCommit`
+
+SPEC S-7: the branch guard compares RESOLVED COMMITS, not ref names, so a
+second name for the commit the clone is on still applies.
+
+checkBranchIsWritable's contract has always been the commit, and `apply`
+is now a third verb relying on it — but nothing pinned it: adding a
+name-equality requirement passed the entire suite while breaking every
+alias and tag. An `apply` that refused a plan naming `release` while the
+clone sat on `main` at the same commit would fail a rollout over a
+difference no tree reflects.
+
 ### `TestFix_ApplyBelowRepoRootRefused`
 
 The repo-root guard reaches `apply` too: --repo can point the apply at a
@@ -1189,6 +1201,17 @@ sync and lint both refuse this shape (S-7, checkBranchIsWritable) and sync's
 refusal points the operator at `plan`, so the tool routed people into the
 unguarded path. The defect is wider than submodules: any ref whose tree
 differs from the checkout lands a change justified by a tree nobody wrote to.
+
+### `TestFix_ApplyRefusesAPlanWhoseRefIsGoneWithoutGitPlumbing`
+
+SPEC S-7: a plan whose ref no longer resolves is refused in words, not in
+git plumbing.
+
+The branch was deleted or renamed since the plan was written — a fact about
+THIS clone, so exit 2 like the mismatch it sits beside. Before this, the
+error was `git rev-parse --verify --end-of-options release^{commit}: exit
+status 128: fatal: Needed a single revision`, which names a command nobody
+ran and a flag this tool passes on the operator's behalf.
 
 ### `TestFix_ApplyRefusesSymlinkedCodeowners`
 
@@ -7721,4 +7744,4 @@ DIFFERENT states; transitioning between them is a real ownership change.
 
 ---
 
-715 documented test cases across 13 packages.
+717 documented test cases across 13 packages.

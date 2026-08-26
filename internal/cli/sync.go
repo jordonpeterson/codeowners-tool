@@ -639,6 +639,17 @@ func (r *syncRun) checkBranchIsWritable() error {
 // writes the working tree, and which therefore has exactly the same way to
 // land a change justified by a tree nobody wrote to. Sharing it is the point:
 // a second copy of this reasoning is a second chance to omit it.
+// refPhrase names a ref the way the verb's operator set it, so the two
+// refusals below agree on wording. `apply` has neither --branch nor --dry-run
+// — its ref came from the plan file — so naming a flag its operator never
+// typed would send them looking for one that does not exist.
+func refPhrase(branch, verb string) string {
+	if verb == "apply" {
+		return "the ref this plan was computed against, " + branch + ","
+	}
+	return "--branch " + branch
+}
+
 func checkBranchIsWritable(repoDir, branch, verb string, dryRun bool) error {
 	if branch == "HEAD" || dryRun {
 		return nil
@@ -651,7 +662,15 @@ func checkBranchIsWritable(repoDir, branch, verb string, dryRun bool) error {
 	}
 	want, err := gitLine(repoDir, "rev-parse", "--verify", "--end-of-options", branch+"^{commit}")
 	if err != nil {
-		return err
+		// A ref that does not resolve here is a fact about this clone — the
+		// branch was deleted or renamed since the plan was written, or was
+		// never fetched — so it is exit 2 like the mismatch below, not an
+		// internal error. It reaches an operator, so it says that rather
+		// than echoing `git rev-parse ... fatal: Needed a single revision`,
+		// which names a plumbing command nobody ran.
+		return &plan.RefusalError{Msg: fmt.Sprintf(
+			"%s does not resolve in this clone, so %s cannot prove the change against its tree — fetch it, or re-run `plan` against a ref this clone has (S-7)",
+			refPhrase(branch, verb), verb)}
 	}
 	if head != want {
 		// Each verb names the ref the way ITS operator set it and offers only

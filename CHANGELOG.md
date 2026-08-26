@@ -40,8 +40,12 @@ changes to which class a failure lands in are called out explicitly.
   submodule's file at exit 0. `tree_sha256` cannot see this: the tree the plan
   names did not change — the clone is elsewhere. Plans that name no ref, or
   name `HEAD`, are unaffected; they are covered by the tree digest and
-  `sha256_before` as before. **Exit-code change:** exit 0 → exit 2 for an apply
-  run from the wrong checkout.
+  `sha256_before` as before. A plan whose ref no longer resolves here — the
+  branch was deleted or renamed since it was written — is refused in words
+  rather than by echoing `git rev-parse`. **Exit-code changes:** exit 0 → exit
+  2 for an apply run from the wrong checkout, and exit 3 → exit 2 when the
+  plan's ref does not resolve in the clone, which is a fact about this
+  repository rather than about the plan.
 
 - **A `declare` batched with an op on one tracked file is no longer refused
   (R-22b).** R-8's zero-match guard exists because two `declare`d rules both land

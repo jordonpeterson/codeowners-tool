@@ -854,7 +854,10 @@ func TestFix_ApplyRefusesAPlanFromARefThisCloneIsNotOn(t *testing.T) {
 	if got := syncReadFile(t, filepath.Join(repo, ".github", "CODEOWNERS")); got != before {
 		t.Errorf("the submodule's own CODEOWNERS was written by the parent repository:\n%s", got)
 	}
-	if !strings.Contains(out, "not what this clone has checked out") || !strings.Contains(out, "main") {
+	// "computed against main," and not a bare "main": the fixture's own
+	// services/api/main.go puts that substring in unrelated output, so the
+	// bare form would pass on a refusal that never named the ref at all.
+	if !strings.Contains(out, "not what this clone has checked out") || !strings.Contains(out, "computed against main,") {
 		t.Errorf("the refusal must name the ref and say the clone is not on it:\n%s", out)
 	}
 	// apply has neither flag, and sending an operator to a flag that does not
@@ -889,6 +892,74 @@ func TestFix_TrackedFileAtACodeownersLocationIsNamedNeutrally(t *testing.T) {
 	for _, absent := range []string{"submodule", "symlink"} {
 		if strings.Contains(out, absent) {
 			t.Errorf("the refusal claims %q for a plain tracked file:\n%s", absent, out)
+		}
+	}
+}
+
+// SPEC S-7: the branch guard compares RESOLVED COMMITS, not ref names, so a
+// second name for the commit the clone is on still applies.
+//
+// checkBranchIsWritable's contract has always been the commit, and `apply`
+// is now a third verb relying on it — but nothing pinned it: adding a
+// name-equality requirement passed the entire suite while breaking every
+// alias and tag. An `apply` that refused a plan naming `release` while the
+// clone sat on `main` at the same commit would fail a rollout over a
+// difference no tree reflects.
+func TestFix_ApplyAcceptsAnotherNameForTheSameCommit(t *testing.T) {
+	repo := initRepo(t, map[string]string{
+		".github/CODEOWNERS":   "* @org/everyone\n",
+		"services/api/main.go": "m\n",
+	})
+	gitRun(t, repo, "branch", "release")
+
+	planPath := filepath.Join(t.TempDir(), "plan.json")
+	if code, _, errOut := runCLI(t, "plan", "--repo", repo, "--branch", "release",
+		"--op", "add_owner(/services/api/, @org/api)", "--out", planPath); code != cli.ExitOK {
+		t.Fatalf("plan --branch release: want exit 0, got %d\n%s", code, errOut)
+	}
+	// The clone is on main; release names the same commit.
+	if code, stdout, stderr := runCLI(t, "apply", "--repo", repo, "--plan", planPath); code != cli.ExitOK {
+		t.Fatalf("apply of a plan naming another ref at the SAME commit: want exit 0, got %d\nstdout:\n%s\nstderr:\n%s",
+			code, stdout, stderr)
+	}
+	if got := syncReadFile(t, filepath.Join(repo, ".github", "CODEOWNERS")); !strings.Contains(got, "@org/api") {
+		t.Errorf("apply exited 0 without writing the change:\n%s", got)
+	}
+}
+
+// SPEC S-7: a plan whose ref no longer resolves is refused in words, not in
+// git plumbing.
+//
+// The branch was deleted or renamed since the plan was written — a fact about
+// THIS clone, so exit 2 like the mismatch it sits beside. Before this, the
+// error was `git rev-parse --verify --end-of-options release^{commit}: exit
+// status 128: fatal: Needed a single revision`, which names a command nobody
+// ran and a flag this tool passes on the operator's behalf.
+func TestFix_ApplyRefusesAPlanWhoseRefIsGoneWithoutGitPlumbing(t *testing.T) {
+	repo := initRepo(t, map[string]string{
+		".github/CODEOWNERS":   "* @org/everyone\n",
+		"services/api/main.go": "m\n",
+	})
+	gitRun(t, repo, "switch", "-qc", "release")
+	planPath := filepath.Join(t.TempDir(), "plan.json")
+	if code, _, errOut := runCLI(t, "plan", "--repo", repo, "--branch", "release",
+		"--op", "add_owner(/services/api/, @org/api)", "--out", planPath); code != cli.ExitOK {
+		t.Fatalf("plan --branch release: want exit 0, got %d\n%s", code, errOut)
+	}
+	gitRun(t, repo, "switch", "-q", "main")
+	gitRun(t, repo, "branch", "-qD", "release")
+
+	code, stdout, stderr := runCLI(t, "apply", "--repo", repo, "--plan", planPath)
+	out := stdout + stderr
+	if code != cli.ExitRefused {
+		t.Fatalf("apply of a plan whose ref is gone: want exit 2, got %d\noutput:\n%s", code, out)
+	}
+	if !strings.Contains(out, "release") || !strings.Contains(out, "does not resolve in this clone") {
+		t.Errorf("the refusal must name the ref and say it does not resolve here:\n%s", out)
+	}
+	for _, plumbing := range []string{"rev-parse", "--end-of-options", "^{commit}", "exit status"} {
+		if strings.Contains(out, plumbing) {
+			t.Errorf("the refusal leaks %q, git plumbing the operator never invoked:\n%s", plumbing, out)
 		}
 	}
 }
