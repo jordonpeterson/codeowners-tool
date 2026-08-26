@@ -129,10 +129,6 @@ plan's **ref** too: `apply` refuses (exit 2) off `ref`, the same S-7 rule `sync`
 enforce, at the verb that writes. To roll one intent across many repos use `sync --policy`;
 a plan is per-repository by construction.
 
-A snapshot distinguishes the **two ways a path can have no owner**: `null` is "no rule
-matched", a gap nobody has addressed; `[]` is a rule deliberately un-owning it (S-9), a
-decision someone defended in review. Collapsing them hides the second inside the first.
-
 `snapshot` and `verify` are the after-the-fact version of the same question — prove in CI
 that a merged change moved nothing outside its declared scope:
 
@@ -146,20 +142,22 @@ codeowners-tool verify --before before.json --after after.json --scope /services
 
 `snapshot` resolves the CODEOWNERS **committed at `--branch`** (default `HEAD`) against
 that ref's tracked tree — an uncommitted edit is invisible to it, exactly as it is to
-GitHub. In the `ownership` map, `[]` means a rule matches the path and deliberately
-assigns no owners; `null` means no rule matches it at all. A path whose bytes are not
-valid UTF-8 is written under an escaped key ([JSON.md](JSON.md#snapshot-paths-that-are-not-valid-utf-8)).
+GitHub. Its `ownership` map keeps the **two ways a path can have no owner** apart: `null`
+means no rule matched it — a gap nobody has addressed — while `[]` means a rule matched
+and deliberately un-owns it (S-9), a decision someone defended in review. Bytes that are
+not valid UTF-8 get an escaped key ([JSON.md](JSON.md#paths-that-are-not-valid-utf-8)).
 
 `--file` decides which CODEOWNERS the map comes from — the one flag that can make
 `snapshot` answer about a file GitHub does not read — in place of the S-8 path.
 
-`verify` compares two snapshots and exits `0` when every ownership change falls inside a
-declared `--scope` (repeatable), `2` — printing each offending path — when any falls outside
-them (with no `--scope`, any change at all violates), and `3` for a malformed snapshot, or
-for a pair with no tracked path in common: two snapshots of different repositories compare
-nothing, so they could only ever report `ok` (the fleet loop with one wrong filename). A
-path in only one snapshot is a **tree delta**, reported `added:`/`removed:` and never a
-violation: INV-2 preserves what a path resolved to before, and an added path has none (R-18).
+`verify` compares two snapshots and exits `0` when every ownership change falls inside
+a declared `--scope` (repeatable), `2` — printing each offending path — when any change
+falls outside them (with no `--scope`, any change at all violates), and `3` for a
+malformed snapshot, or for a pair with no tracked path in common: nothing in such a pair
+is compared, so it could only ever report `ok`. Usually that pair is two repositories —
+a fleet loop having named one file wrong. A path present in only one snapshot is a **tree
+delta**, reported as `added:`/`removed:` and never a violation: INV-2 preserves what a
+path resolved to before, and an added path has no before (R-18).
 
 ## Exit codes
 

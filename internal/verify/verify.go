@@ -110,6 +110,10 @@ func decodeKey(k string) (string, error) {
 
 // MarshalJSON writes the escaped keys through the plain encoder, so key
 // ordering and string escaping are byte for byte what they always were.
+// No collision check mirrors UnmarshalJSON's: encodeKey is injective — only
+// an invalid-UTF-8 path takes the marker, which no valid path can carry, and
+// EscapePath escapes its own `%` — so two paths cannot meet in one key. The
+// read side checks because a snapshot is a FILE, which anything may write.
 func (o Ownership) MarshalJSON() ([]byte, error) {
 	if o == nil {
 		return []byte("null"), nil
@@ -194,6 +198,13 @@ func Load(path string) (*Snapshot, error) {
 // invariant is checked nowhere. `apply` refuses the same class of mistake at
 // the other end of the pipeline.
 //
+// Mispairing is the usual cause, not the condition: ONE repository lands here
+// when a single commit relocates every tracked path (a monorepo absorption),
+// and a hand-written `{"ownership":{}}` baseline lands here too. The refusal
+// is right in those cases for the same reason — there is no shared path for
+// the invariant to be about — so the message reports what was observed and
+// offers mispairing as the likely cause.
+//
 // The evidence is the path sets, NOT the `repo` field: that is whatever path
 // the operator passed to `snapshot`, so it differs between machines, between
 // two clones of one repository, and between a CI job's main and pull-request
@@ -217,9 +228,15 @@ func (e *MismatchError) Error() string {
 	if a == "" {
 		a = "the after snapshot"
 	}
-	return fmt.Sprintf("refusing: %s and %s have no tracked path in common (%d and %d path(s)), so nothing in this pair was compared: %s vs %s. "+
-		"A verify pair is two snapshots of the SAME repository; when they share no path every row is a tree delta, which is never a violation (R-18), so this run could only ever report ok. "+
-		"Check which two files the loop paired, and re-take the pair against one repository — nothing was verified",
+	// What was observed, then the likely cause — never the cause as the
+	// diagnosis: one repository reaches this state too (a commit that
+	// relocated every tracked path, a baseline listing none), and telling
+	// that operator to re-pair against one repository sends them after a
+	// mistake they did not make.
+	return fmt.Sprintf("refusing: %s and %s have no tracked path in common (%d and %d path(s)), so nothing in this pair was compared — "+
+		"every row is a tree delta, which is never a violation (R-18), so this run could only ever report ok. "+
+		"The snapshots record %s and %s. Usually the two files are from different repositories, a fleet loop having named one of them wrong; "+
+		"one repository lands here as well, when a single commit relocated every tracked path or when a baseline lists none — and there too nothing is left for the invariant to be about. Nothing was verified",
 		b, a, len(e.Before.Ownership), len(e.After.Ownership), describe(e.Before), describe(e.After))
 }
 
