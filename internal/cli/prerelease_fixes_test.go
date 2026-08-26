@@ -577,9 +577,16 @@ func TestFix_PolicyCreateWithAPinnedFileIsRefused(t *testing.T) {
 // fixWantNamesBothFiles pins the two paths a superseding-create refusal is
 // about: the one --file asked for and the one that governs today. Either name
 // alone leaves the operator unable to tell which file to keep.
+//
+// The write target is matched as `creating <path> `, not as the bare path: at
+// the root the bare spelling "CODEOWNERS" is a substring of the governing
+// "docs/CODEOWNERS", so a refusal that named only the governing file would
+// satisfy both halves and the assertion would prove nothing (the vacuous pass
+// CONTRIBUTING warns about — confirmed by mutating Error() to drop the write
+// target, which this test then still accepted).
 func fixWantNamesBothFiles(t *testing.T, msg, wrote, governing string) {
 	t.Helper()
-	for _, want := range []string{wrote, governing, "S-8"} {
+	for _, want := range []string{"creating " + wrote + " ", governing, "S-8"} {
 		if !strings.Contains(msg, want) {
 			t.Errorf("refusal must name %q; got:\n%s", want, msg)
 		}
