@@ -4987,6 +4987,13 @@ The snapshot also stops being true on its own terms: it names a path that
 is not in the repository, so anyone grepping it for their file finds
 nothing.
 
+### `TestSnapshotOfAnAsciiTreeIsByteIdentical`
+
+An ordinary snapshot is byte-for-byte what it has always been. The escape
+for non-UTF-8 paths must be invisible here: a literal `a%E9.md`, a
+multi-byte rune and the encoder's own HTML escaping all keep their exact
+spelling, so no existing consumer of the documented format breaks.
+
 ### `TestStagedHigherPrecedenceCodeownersIsNotIgnored`
 
 FINDING: discovery can only ADD a CODEOWNERS from the working tree, never
@@ -5099,6 +5106,53 @@ refusal names sparse-checkout, partial clones and local deletion by name),
 and S-7's checkBranchIsWritable exists to stop "a rule justified by one tree
 and landing in another". An unmerged index is the same class, and one
 `git status --porcelain` settles it.
+
+### `TestVerifyAcceptsAHandWrittenBootstrapBaseline`
+
+The bootstrap pair: a repository whose base ref has NO CODEOWNERS at all
+(`snapshot` refuses it, exit 3) is verified against a hand-written baseline
+that lists every path as unowned. It carries no `repo`, `ref`,
+`codeowners_path` or `codeowners_sha256` — so a guard built on any of those
+fields would refuse the one flow that most needs the gate.
+
+### `TestVerifyAcceptsSnapshotsTakenFromTwoClones`
+
+Two clones of one repository have different `--repo` paths — CI checking
+main and the pull request into separate directories is the ordinary shape —
+so the pair must be judged on the tree it describes, never on that string.
+
+### `TestVerifyAcceptsSnapshotsTakenWithDifferentFileFlags`
+
+Two snapshots taken with different `--file` describe the same tree governed
+by different CODEOWNERS files, so `codeowners_path` and `codeowners_sha256`
+differ by construction. That is a comparison worth making, not a mismatched
+pair.
+
+### `TestVerifyComparesEachNonUTF8PathSeparately`
+
+SPEC R-18: two tracked paths differing only in a byte that is not valid
+UTF-8 are compared SEPARATELY. Both spell `bin/a�.md` once JSON has
+folded them, so before the fix each snapshot held one key for the two files
+and the gate reported half the reassignment it was looking at.
+
+### `TestVerifyPassesTheDocumentedTwoRefRecipeAcrossAChurnedTree`
+
+The documented recipe — snapshot two refs of ONE repository, verify against
+the declared scope — keeps working across a branch that renames, adds and
+deletes files. The guard above fires only on an empty intersection, so a
+pull request that churns most of the tree still gets a real answer.
+
+### `TestVerifyRefusesAPairWithNoPathInCommon`
+
+SPEC R-18: `verify` refuses a before/after pair whose snapshots share no
+tracked path, exit 3, naming both files. Such a pair was never compared —
+every row is a tree delta, which R-18 never counts as a violation — so the
+run could only ever print `ok`. That is the green a fleet loop reports on
+all 100 repositories when one filename in it is wrong.
+
+Exit 3, not 2: no path changed out of scope, so there is no offending path
+to print, and the same wrong invocation fails identically in every repo —
+the "stop the rollout" class, alongside a malformed snapshot.
 
 ### `TestVerifyRefusesSnapshotsFromDifferentRepositories`
 
@@ -7794,6 +7848,48 @@ including the no-scope "assert nothing changed" mode — the strictest one.
 Unowned (no rule matched, null in JSON) vs explicitly-zero-owners ([]) are
 DIFFERENT states; transitioning between them is a real ownership change.
 
+### `TestCompareAcceptsAPairSharingASinglePath`
+
+The conservative boundary: ONE shared path is enough to compare, and the
+pair is accepted. A false refusal here breaks the documented CI gate on
+every repository whose branch renamed most of the tree, so the guard fires
+only when the intersection is genuinely empty.
+
+### `TestCompareIgnoresTheRepoFieldWhenTheTreesMatch`
+
+The `repo` field is whatever path the operator passed to `snapshot`, so two
+snapshots of one repository taken from two clones (CI checks main and the
+feature branch into separate directories) carry different `repo` strings.
+Identity is the tree they describe, never that string.
+
+### `TestCompareRefusesAPairWithNoPathInCommon`
+
+SPEC R-18: a before/after pair with no tracked path in common is refused,
+because nothing in it was compared. Every row of such a pair is a tree
+delta, and R-18 says a tree delta is never a violation, so the run can only
+ever report `ok` — the vacuous green a fleet loop with one wrong filename
+gets on every repository it visits.
+
+### `TestLoadRejectsEscapedKeysThatCollide`
+
+A snapshot whose escaped keys decode to the same path is malformed: keeping
+either one silently would lose a tracked path, which is the defect this
+encoding exists to prevent.
+
+### `TestSnapshotJSONLeavesValidUTF8KeysByteIdentical`
+
+The encoding is applied ONLY to paths that are not valid UTF-8: every other
+key, including a literal percent escape and a multi-byte rune, keeps the
+exact bytes the plain encoder produced, so an existing consumer of an
+ordinary snapshot sees no difference.
+
+### `TestSnapshotJSONRoundTripsNonUTF8Paths`
+
+SPEC R-18: a path git stores as bytes that are not valid UTF-8 round-trips
+through the snapshot exactly. encoding/json folds every such byte to
+U+FFFD, so `a\xe9.md` and `a\xff.md` used to be written as the same key
+twice and one tracked file vanished from the gate.
+
 ---
 
-722 documented test cases across 13 packages.
+735 documented test cases across 13 packages.
