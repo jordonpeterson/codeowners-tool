@@ -87,7 +87,9 @@ one: `@ alice /docs` assembles `@alice` and then stops.
 **Case-only typos.** `/Src/` where the directory is `src/` matches nothing, but it is a
 typo, not a dead rule. `--remove-stale-paths` spares it and reports it, because deleting
 it would silently un-own the files it was aimed at. Fix the casing yourself — the tree's
-real casing may not be the naive lowercase, so the tool will not guess it either.
+real casing may not be the naive lowercase, so the tool will not guess it either. The
+sibling invisible mismatch — an NFC pattern against an NFD path — is reported by `audit`
+(A-5) but is **not** spared here, so audit first if your tree holds accented paths.
 
 Both are reported and both make the run exit 4.
 
