@@ -40,25 +40,33 @@ version  print the build this binary was stamped with
 files, so an uncommitted edit will not show up in either. `lint` is the exception, for the
 same reason `sync` is: the file it is about to rewrite is the one on disk. Its *path* is
 still discovered from `--branch`'s tree, so a CODEOWNERS that is not committed yet needs
-`--file`.
+`--file` — and a `--file` the ref does not carry is refused by `audit` and `snapshot`
+(exit 3), naming the path rather than echoing git plumbing.
+
+Whenever the file a run writes is not the file S-8 picks, the run says so on stderr and in
+`warnings` — `sync`, `plan`, `apply` and `lint` alike (R-24). So does one git has never
+recorded: `sync` still edits it, since discovery falls back to the working tree so a job
+that created the file yesterday can amend it today. Two shapes are refused (exit 2)
+instead: one the repository's ignore rules forbid committing, which no re-run can fix, and
+a higher-precedence CODEOWNERS sitting uncommitted beside the tracked one — mid-migration
+neither can be edited soundly, so `--file` has to say which.
 
 ## `sync` and `check`
 
 `sync` runs the whole pipeline — plan, assert, apply, validate — in one step.
 
 `check` reads no repository and writes nothing. It exits `0` for a valid policy, `3` for a
-broken one, and never `1` — so under `set -e` a good policy always lets the script
-continue and a bad one always stops it. Syntax errors stop at the first one; everything
-else (bad enum values, ops that can't carry the `on_zero_match` you gave them, a
-`remove_owner` with no `on_empty`) is reported all at once, because fixing a generated
-40-op policy one error per run is miserable.
+broken one, and never `1` — so under `set -e` a good policy always lets the script continue
+and a bad one always stops it. Syntax errors stop at the first; everything else (bad enums,
+ops that can't carry your `on_zero_match`, a `remove_owner` with no `on_empty`) is reported
+at once, because fixing a generated 40-op policy one error per run is miserable.
 
 | Flag | Meaning |
 |---|---|
 | `--op` / `--policy` | Where the ops come from. Mutually exclusive; passing both or neither is exit 3. |
 | `--repo` | Local git repository. Default `.` when the flag is absent; an explicitly empty `--repo ""` is refused (exit 3), because that is what a shell produces from an unset variable. |
 | `--branch` | Ref whose tracked tree governs resolution (S-7). Default `HEAD`. |
-| `--file` | CODEOWNERS path override, repo-relative. |
+| `--file` | CODEOWNERS path override, repo-relative. A path that is nowhere in the repository is refused naming *that* path, with `--create` offered at it. |
 | `--on-empty` | Policy when `remove_owner` empties an owner set. Allowed only with `--op`; with `--policy`, set `on_empty` in the file instead. An unknown value is exit 3, checked before any repository is opened. |
 | `--create` | Permission to write a CODEOWNERS if the repo has none — not an instruction to. Off by default, never overwrites, and a run with nothing to write creates nothing (no file, no `.github/`). With `--file`, the file is created at that path instead of `.github/CODEOWNERS` — unless that path outranks the CODEOWNERS this repo is already governed by, which is exit 2, since the new file would supersede it under S-8. Allowed only with `--op`; with `--policy`, set `create` in the file instead (R-34b), or the artifact in git is not the policy that ran. |
 | `--max-paths-changed` | R-25 ceiling: refuse (exit 2) if the run would change the owners of more than N paths. Off by default. Allowed only with `--op`; with `--policy`, set `max_paths_changed` in the file. |
@@ -71,16 +79,14 @@ else (bad enum values, ops that can't carry the `on_zero_match` you gave them, a
 without asking, and they are *not* contained to `--repo`. Unlike `--file` and the
 discovered CODEOWNERS path, no repository can influence them.
 
-An **unmerged CODEOWNERS is refused** (exit 2) by every verb that reads its bytes to
-decide an edit — `sync`, `plan`, `apply` and `lint`. After a conflicted merge, rebase or
-cherry-pick the file holds both sides at once (`=======` is a legal zero-owner rule, S-9),
-so the "before" ownership is a state no commit has ever had. Resolve the conflict and
-`git add` it, then re-run. A conflict in any *other* file changes nothing and is not
-refused.
+An **unmerged CODEOWNERS is refused** (exit 2) by every verb that reads its bytes to decide
+an edit — `sync`, `plan`, `apply`, `lint`. After a conflicted merge, rebase or cherry-pick
+the file holds both sides at once (`=======` is a legal zero-owner rule, S-9), so the
+"before" ownership is a state no commit ever had. Resolve it and `git add`, then re-run; a
+conflict in any *other* file is not refused.
 
-Three different things in this tool are called "policy". `--policy` is your ops file — and
-that file is always "the policy file". `--on-empty` and `on_zero_match` are per-situation
-rules the tool follows.
+Three things here are called "policy". `--policy` is your ops file, always "the policy
+file"; `--on-empty` and `on_zero_match` are per-situation rules the tool follows.
 
 ## `plan` and `apply`
 
@@ -91,18 +97,17 @@ intent (ops) ──▶ PLAN ──▶ ASSERT ──▶ APPLY ──▶ VALIDATE
                   └── resolves ownership before/after over the real git tree
 ```
 
-`sync` runs that whole pipeline in one step. Run the halves separately when you want the
-reviewable artifact in the middle — a JSON plan with resolved ownership per path plus the
-literal line diff:
+`sync` runs that whole pipeline in one step. Run the halves separately for the reviewable
+artifact in the middle — a JSON plan with resolved ownership per path and the line diff:
 
 ```sh
 codeowners-tool plan --op 'add_owner(/services/api/, @org/team-1)' --out plan.json
 codeowners-tool apply --plan plan.json
 ```
 
-The size flags are `plan`'s alone. `--max-size` (default 3,000,000) is the S-4 hard cap:
-a result over it is refused at exit 2, because GitHub silently ignores a CODEOWNERS past
-3 MB. `--warn-size` (default 2,500,000) only warns (R-9) and still exits 0.
+The size flags are `plan`'s alone. `--max-size` (default 3,000,000) is the S-4 hard cap: a
+result over it is refused at exit 2, since GitHub silently ignores a CODEOWNERS past 3 MB.
+`--warn-size` (default 2,500,000) only warns (R-9) and still exits 0.
 
 A plan records `sha256_before`, `sha256_after`, `size_before`/`size_after`, `changes`,
 `ownership_rows`, `diff`, `after_content` and `op_results`. Two hashes, two different
@@ -112,25 +117,21 @@ applied to another. `sha256_after` pins `after_content` itself, so a plan corrup
 truncated or hand-edited between review and apply is refused rather than written. A plan
 carrying no `sha256_after` is refused too: a missing integrity field is not a waived
 check. The success line reports the bytes the write actually moved, measured on disk
-rather than read back out of the plan.
+rather than read back out of the plan, and names the CODEOWNERS by its repo-relative path —
+`repo` is recorded absolute so a plan travels, and two runners must log the same line.
 
-A plan is also bound to the **repository and tree** it was computed in. `repo` is
-recorded absolute, so a plan applies from any working directory; passing `apply --repo` a
-different repository is refused rather than silently obeyed. `tree_sha256` fingerprints
-the tracked tree, and `apply` refuses when it has moved — the `ownership_rows` a human
-reviewed are facts about one tree, so a colleague's merge under a reviewed scope would
-otherwise widen the blast radius after approval. It is bound to the plan's **ref** as
-well: `apply` refuses (exit 2) when the clone is not standing on `ref`, because the rows
-were proven against that ref's tree while the bytes written are the working tree's — the
-same S-7 rule `sync` and `lint` enforce, at the verb that performs the write. To roll one
-intent across many repositories, use `sync --policy`; a plan is per-repository by
-construction.
+A plan is also bound to the **repository and tree** it was computed in. `repo` is recorded
+absolute, so a plan applies from any working directory; `apply --repo` naming a different
+repository is refused. `tree_sha256` fingerprints the tracked tree and `apply` refuses when
+it has moved — `ownership_rows` are facts about one tree, so a colleague's merge under a
+reviewed scope would otherwise widen the blast radius after approval. It is bound to the
+plan's **ref** too: `apply` refuses (exit 2) off `ref`, the same S-7 rule `sync` and `lint`
+enforce, at the verb that writes. To roll one intent across many repos use `sync --policy`;
+a plan is per-repository by construction.
 
-A snapshot distinguishes the **two ways a path can have no owner**, and the difference is
-the point: `null` means no rule matched it — a gap nobody has addressed — while `[]` means
-a rule matched and deliberately un-owns it (S-9), which is a decision someone made and
-defended in review. Collapsing them would hide "we chose to leave vendored code unowned"
-inside "nobody has looked at this yet".
+A snapshot distinguishes the **two ways a path can have no owner**: `null` is "no rule
+matched", a gap nobody has addressed; `[]` is a rule deliberately un-owning it (S-9), a
+decision someone defended in review. Collapsing them hides the second inside the first.
 
 `snapshot` and `verify` are the after-the-fact version of the same question — prove in CI
 that a merged change moved nothing outside its declared scope:
@@ -149,35 +150,29 @@ GitHub. In the `ownership` map, `[]` means a rule matches the path and deliberat
 assigns no owners; `null` means no rule matches it at all. A path whose bytes are not
 valid UTF-8 is written under an escaped key ([JSON.md](JSON.md#snapshot-paths-that-are-not-valid-utf-8)).
 
-`--file` decides which CODEOWNERS the map is derived from, and is the one flag that can
-make `snapshot` answer about a file GitHub does not read: it is taken as given, in place
-of the path S-8 precedence would have picked.
+`--file` decides which CODEOWNERS the map comes from — the one flag that can make
+`snapshot` answer about a file GitHub does not read — in place of the S-8 path.
 
-`verify` compares two snapshots and exits `0` when every ownership change falls inside
-a declared `--scope` (repeatable), `2` — printing each offending path — when any change
-falls outside them (with no `--scope`, any change at all violates), and `3` for a
-malformed snapshot — or for a pair with no tracked path in common, which is two snapshots
-of different repositories: nothing in such a pair is compared, so it could only ever
-report `ok` (the fleet loop with one wrong filename). A path present in only one snapshot
-is a **tree delta**, reported as `added:`/`removed:` and never a violation: INV-2 preserves what a path resolved to
-before, and an added path has no before (R-18).
+`verify` compares two snapshots and exits `0` when every ownership change falls inside a
+declared `--scope` (repeatable), `2` — printing each offending path — when any falls outside
+them (with no `--scope`, any change at all violates), and `3` for a malformed snapshot, or
+for a pair with no tracked path in common: two snapshots of different repositories compare
+nothing, so they could only ever report `ok` (the fleet loop with one wrong filename). A
+path in only one snapshot is a **tree delta**, reported `added:`/`removed:` and never a
+violation: INV-2 preserves what a path resolved to before, and an added path has none (R-18).
 
 ## Exit codes
 
 `sync` uses a coarse three-code contract — its question is "did this repo converge?" — and
-returns exactly `0`, `2`, or `3`, never anything else. Every other command uses the
-precise taxonomy below.
+returns exactly `0`, `2` or `3`. Every other command uses the precise taxonomy below.
 
-An exit-3 verdict is reached **before the repository is opened**, so that run emits
-no JSON record and writes neither `--out` nor `--summary-out`. This is deliberate — a
-row for a repo that was never read would be a phantom entry in the aggregation — but
-it means a fleet that aggregates `records/*.json` will not see those repos at all.
-The exit code is the signal, and `sync` says so on stderr when either sink was asked
-for.
+An exit-3 verdict is reached **before the repository is opened**, so that run writes no
+JSON record and neither `--out` nor `--summary-out` — a row for a repo never read would be
+a phantom entry. A fleet aggregating `records/*.json` therefore will not see those repos:
+the exit code is the signal, and `sync` says so on stderr when either sink was asked for.
 
 **The two tables do not use the same numbers for the same things**, so don't read across.
-`sync` maps the precise codes onto its own by asking a single question — *is this about
-the policy, or about this repo?*
+`sync` maps the precise codes onto its own by one question — *policy, or this repo?*
 
 | Precise code | Under `sync` | Why |
 |---|---|---|

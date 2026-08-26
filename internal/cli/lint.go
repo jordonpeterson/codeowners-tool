@@ -124,6 +124,15 @@ func cmdLint(args []string, stdout, stderr io.Writer) int {
 	token := fs.String("token", "", "GitHub token (default $GITHUB_TOKEN)")
 	apiURL := fs.String("api-url", "", "API base URL (GHES), default https://api.github.com")
 	format := fs.String("format", "text", "text|json")
+	// Defined so the refusal in runLint can be REACHED. Both flags are
+	// rejected there with the reason LINTING.md prints, and a flagset that
+	// simply omitted them answered `lint --cache-dir /tmp/c` with the flag
+	// package's `flag provided but not defined: -cache-dir` and a usage dump
+	// — no mention of caching, of revalidation, or of why the combination is
+	// refused, and the documented sentence reachable only through the older
+	// `audit --lint` spelling.
+	cacheDir := fs.String("cache-dir", "", "not available here: a cached \"this owner does not exist\" would delete an owner without revalidation (rejected, exit 3)")
+	cacheTTL := fs.Duration("cache-ttl", 24*time.Hour, "not available here: the disk cache is not used, so a TTL would govern nothing (rejected, exit 3)")
 	removeStale := fs.Bool("remove-stale-paths", false, "also delete rules whose pattern matches nothing tracked and nothing on disk (R-11 keeps this off by default)")
 	onEmpty := fs.String("on-empty", "", "R-6 policy when removing a dead owner empties a set: error|inherit|unowned (no default; inherit DELETES the rule line)")
 	dryRun := fs.Bool("dry-run", false, "report the fixes and write nothing (exit 4 if any are pending)")
@@ -155,6 +164,7 @@ func cmdLint(args []string, stdout, stderr io.Writer) int {
 	return runLint(lintRun{
 		repo: *repo, branch: *branch, filePath: *filePath,
 		githubRepo: *githubRepo, token: authToken, apiURL: *apiURL,
+		cacheDir: *cacheDir, cacheTTL: *cacheTTL, cacheTTLSet: isFlagSet(fs, "cache-ttl"),
 		format: *format, removeStale: removeStalePaths, onEmpty: onEmptyPolicy, dryRun: *dryRun,
 		policy: len(policyPaths) > 0,
 	}, stdout, stderr)
@@ -432,6 +442,16 @@ func runLint(r lintRun, stdout, stderr io.Writer) int {
 		verifier = client
 	}
 
+	// R-24's third missing call site. lint writes with no plan to review at
+	// all, so its own output is the only place the disclosure can appear: a
+	// `lint --file docs/CODEOWNERS` run repaired that file and reported it
+	// written, without saying GitHub reads .github/CODEOWNERS instead. Gathered
+	// before the repair so a run that goes on to refuse still reports them.
+	fileWarnings := governingWarnings(tree, r.branch, coPath, false, content)
+	for _, w := range fileWarnings {
+		fmt.Fprintln(stderr, "warning:", w)
+	}
+
 	res, buildErr := lint.Build(content, tree, verifier, lint.Options{
 		RemoveStalePaths: r.removeStale,
 		WorkTree:         workTree,
@@ -461,7 +481,7 @@ func runLint(r lintRun, stdout, stderr io.Writer) int {
 		// here: a CODEOWNERS that needs no repair is the SUCCESS case of a lint
 		// run, and every scheduled job that lints a fleet would see its healthy
 		// repos exit 1 and read as failures under `set -e`.
-		emitLint(res, coPath, false, r, stdout)
+		emitLint(res, coPath, false, r, fileWarnings, stdout)
 		return lintCode(res, false)
 	case buildErr != nil:
 		if r.policy {
@@ -478,7 +498,7 @@ func runLint(r lintRun, stdout, stderr io.Writer) int {
 	for _, w := range res.Plan.Warnings {
 		fmt.Fprintln(stderr, "warning:", w)
 	}
-	emitLint(res, coPath, !r.dryRun, r, stdout)
+	emitLint(res, coPath, !r.dryRun, r, fileWarnings, stdout)
 	return lintCode(res, r.dryRun)
 }
 
@@ -499,16 +519,18 @@ func lintCode(res *lint.Result, pending bool) int {
 	return ExitOK
 }
 
-func emitLint(res *lint.Result, coPath string, applied bool, r lintRun, stdout io.Writer) {
+func emitLint(res *lint.Result, coPath string, applied bool, r lintRun, fileWarnings []string, stdout io.Writer) {
 	if r.format == "json" {
 		code := lintCode(res, r.dryRun)
+		// R-24 requires the disclosure "on stderr and in `warnings`", so the
+		// JSON document carries the file warnings ahead of the repair's own.
 		doc := lintDoc{
 			Path: coPath, Applied: applied, DryRun: r.dryRun,
 			NeedsHuman: code == ExitFindings, ExitCode: code,
 			OwnerChecksSkipped: r.offline,
 			Actions:            res.Actions, Unverifiable: res.Unverifiable,
 			Changes: res.Plan.Changes, Rows: res.Plan.Rows,
-			Diff: res.Plan.Diff, Warnings: res.Plan.Warnings,
+			Diff: res.Plan.Diff, Warnings: append(append([]string(nil), fileWarnings...), res.Plan.Warnings...),
 		}
 		if doc.Actions == nil {
 			doc.Actions = []lint.Action{}

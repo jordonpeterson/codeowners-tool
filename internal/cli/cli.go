@@ -743,6 +743,13 @@ func cmdPlan(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		return errExit(err, stderr)
 	}
+	// R-24, in the artifact a human reviews. governingWarnings had one call
+	// site, in sync.go, so `plan --file docs/CODEOWNERS` in a repo GitHub
+	// resolves from .github/CODEOWNERS wrote its plan in total silence — and
+	// the plan is the one document somebody reads BEFORE the write. They lead
+	// the list: a location the reader may not have intended outranks anything
+	// the planner has to say about the edit itself.
+	p.Warnings = append(governingWarnings(tree, *branch, coPath, false, content), p.Warnings...)
 	pf := planFile{Plan: *p, Repo: absRepo(*repo), Ref: *branch, CodeownersPath: coPath, TreeSHA256: gittree.Digest(tree)}
 	b, _ := json.MarshalIndent(pf, "", "  ")
 	if *out != "" {
@@ -878,9 +885,30 @@ func cmdApply(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		return errExit(err, stderr)
 	}
+	// R-24 again, at the verb that moved the bytes: `apply` reported
+	// `applied: docs/CODEOWNERS (5 → 30 bytes)` and never said that GitHub
+	// resolves this repository from .github/CODEOWNERS. A plan travels, so the
+	// person running apply is often not the person who read the plan.
+	//
+	// Content is nil deliberately: the syntax half of governingWarnings would
+	// be about the bytes this run just wrote, which apply.Apply already
+	// validates before writing. Only the file's LOCATION is news here.
+	if tree, err := gittree.ListTracked(repoDir, planRef(pf)); err == nil {
+		for _, w := range governingWarnings(tree, planRef(pf), pf.CodeownersPath, false, nil) {
+			fmt.Fprintln(stderr, "warning:", w)
+		}
+	}
 	// The plan's size_before/size_after are claims by the document being
 	// applied. These two numbers were measured on disk.
-	fmt.Fprintf(stdout, "applied: %s (%d → %d bytes)\n", target, written.Before, written.After)
+	//
+	// The path is the plan's repo-RELATIVE one, not the absolute join above:
+	// `repo` is recorded absolute so a plan travels, and echoing that made the
+	// success line `applied: /home/me/clones/api-service/.github/CODEOWNERS`,
+	// different on every machine that applied the same plan. A rollout that
+	// diffs its logs across runners saw one line change per clone, and the
+	// repo-relative name is the one a reader can compare — and the one
+	// GUIDE.md documents.
+	fmt.Fprintf(stdout, "applied: %s (%d → %d bytes)\n", pf.CodeownersPath, written.Before, written.After)
 	return ExitOK
 }
 
@@ -894,6 +922,40 @@ func planRef(pf planFile) string {
 		return "HEAD"
 	}
 	return pf.Ref
+}
+
+// codeownersAtRef reads the CODEOWNERS committed at ref for the read-only
+// verbs, and refuses in the operator's own words when --file names a path the
+// ref does not carry.
+//
+// `snapshot --file docs/CODEOWNERS` on a ref without it answered with `git
+// cat-file --end-of-options blob HEAD:docs/CODEOWNERS: exit status 128:
+// fatal: path 'docs/CODEOWNERS' does not exist in 'HEAD'` — a plumbing command
+// nobody ran, carrying a flag this tool passes on the reader's behalf, which
+// sends them hunting for an option that does not exist.
+// TestBranchMismatchErrorNamesHeadCleanly pinned exactly that for the S-7
+// refusal, and `plan` already reports this same condition cleanly, so the three
+// verbs disagreed about one mistake.
+//
+// Only --file can reach the refusal: discovery picks coPath out of the tree
+// itself, so a discovered path is tracked by construction.
+//
+// Exit 3 is unchanged. It is the class locate's sibling verdict ("no CODEOWNERS
+// file found … use --file to specify one") already lands in on the same code
+// path, and splitting one "which file does this ref carry?" question across two
+// exit classes is worse for a script than either class alone. Neither `sync`
+// nor `check` — the verbs under the coarse contract — reach here.
+func codeownersAtRef(repoDir, ref string, tree, all []string, coPath string) ([]byte, error) {
+	if !trackedAt(tree, coPath) {
+		present := ""
+		if len(all) > 0 {
+			present = fmt.Sprintf(" (the one committed there is %s)", all[0])
+		}
+		return nil, &plan.InvalidError{Msg: fmt.Sprintf(
+			"--file %s is not in the tree at %s: this command reports what GitHub would do, and GitHub reads only committed files, so there is nothing to read at that path%s — commit the file, or name one the ref carries",
+			coPath, ref, present)}
+	}
+	return gittree.ReadFileAtRef(repoDir, ref, coPath)
 }
 
 func cmdSnapshot(args []string, stdout, stderr io.Writer) int {
@@ -914,13 +976,13 @@ func cmdSnapshot(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "error:", err)
 		return ExitInvalid
 	}
-	tree, coPath, _, err := locate(*repo, *branch, *filePath)
+	tree, coPath, all, err := locate(*repo, *branch, *filePath)
 	if err != nil {
 		return errExit(err, stderr)
 	}
-	content, err := gittree.ReadFileAtRef(*repo, *branch, coPath)
+	content, err := codeownersAtRef(*repo, *branch, tree, all, coPath)
 	if err != nil {
-		return errExit(&plan.InvalidError{Msg: err.Error()}, stderr)
+		return errExit(err, stderr)
 	}
 	res := plan.ResolveContent(string(content), tree)
 	snap := verify.Snapshot{Repo: *repo, Ref: *branch, Path: coPath, Ownership: map[string][]string{}}
@@ -1124,9 +1186,9 @@ func cmdAudit(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		return errExit(err, stderr)
 	}
-	content, err := gittree.ReadFileAtRef(*repo, *branch, coPath)
+	content, err := codeownersAtRef(*repo, *branch, tree, all, coPath)
 	if err != nil {
-		return errExit(&plan.InvalidError{Msg: err.Error()}, stderr)
+		return errExit(err, stderr)
 	}
 
 	in := audit.Input{Content: content, Tree: tree, CodeownersPath: coPath, AllPresent: all,
@@ -1155,6 +1217,12 @@ func cmdAudit(args []string, stdout, stderr io.Writer) int {
 			}
 			in.Checks[fmt.Sprintf("A-%d", n)] = true
 		}
+	}
+	// The working-tree half of A-10, gathered only when that check is running
+	// and only when the ref IS what this checkout has: on any other ref the
+	// files on disk belong to a different commit and say nothing about it.
+	if in.Checks == nil || in.Checks["A-10"] {
+		in.StagedHigher = stagedHigherCodeowners(*repo, *branch, tree, coPath)
 	}
 	apiChecksWanted := in.Checks == nil || in.Checks["A-1"] || in.Checks["A-2"] || in.Checks["A-3"]
 	if apiChecksWanted && authToken != "" && *githubRepo != "" {
@@ -1222,6 +1290,55 @@ func cmdAudit(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stdout, "audit clean")
 	}
 	return ExitOK
+}
+
+// stagedHigherCodeowners lists the CODEOWNERS files on disk, uncommitted at
+// ref, at an S-8 location that OUTRANKS the file this audit is about (A-10).
+//
+// `audit` reads the ref because GitHub reads the ref, and that stays true —
+// this only reports a file whose arrival redefines which document the whole
+// report was about. Ignored files are excluded (ListWorkTree uses
+// --exclude-standard): a CODEOWNERS git is told never to track can never
+// supersede anything.
+//
+// Everything it cannot establish answers "nothing found": the finding is an
+// assertion about the checkout, and asserting it from a lookup that failed
+// would turn a CI gate red on evidence nobody has.
+func stagedHigherCodeowners(repoDir, ref string, tree []string, coPath string) []string {
+	if !refIsCheckedOut(repoDir, ref) {
+		return nil
+	}
+	work, err := gittree.ListWorkTree(repoDir)
+	if err != nil {
+		return nil
+	}
+	onDisk := make(map[string]bool, len(work))
+	for _, p := range work {
+		onDisk[p] = true
+	}
+	var found []string
+	for _, loc := range gittree.CodeownersLocations {
+		if onDisk[loc] && !trackedAt(tree, loc) && outranksCodeowners(loc, coPath) {
+			found = append(found, loc)
+		}
+	}
+	return found
+}
+
+// refIsCheckedOut reports whether ref names the commit this working tree is
+// standing on, so a fact read off disk is a fact about that ref. Resolved
+// commits, not names, for the reason checkBranchIsWritable compares them that
+// way: a tag or an alias branch naming the same commit is the same tree.
+func refIsCheckedOut(repoDir, ref string) bool {
+	if ref == "HEAD" {
+		return true
+	}
+	head, err := gitLine(repoDir, "rev-parse", "--verify", "--end-of-options", "HEAD^{commit}")
+	if err != nil {
+		return false
+	}
+	want, err := gitLine(repoDir, "rev-parse", "--verify", "--end-of-options", ref+"^{commit}")
+	return err == nil && head == want
 }
 
 // The --fail-on thresholds, and the severity ladder they are compared on.

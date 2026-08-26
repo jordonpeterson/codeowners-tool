@@ -47,12 +47,16 @@ type Report struct {
 type Input struct {
 	Content        []byte
 	Tree           []string
-	CodeownersPath string          // for A-11
-	AllPresent     []string        // CODEOWNERS files at the three S-8 locations (A-10)
-	NestedPresent  []string        // CODEOWNERS files GitHub never searches (A-10)
-	SymlinkTarget  string          // set when CodeownersPath is a symlink at ref (A-10)
-	Checks         map[string]bool // nil = all
-	WarnSize       int             // default 2,500,000
+	CodeownersPath string   // for A-11
+	AllPresent     []string // CODEOWNERS files at the three S-8 locations (A-10)
+	NestedPresent  []string // CODEOWNERS files GitHub never searches (A-10)
+	// StagedHigher is the CODEOWNERS files sitting in the WORKING TREE at an
+	// S-8 location that OUTRANKS CodeownersPath and are not committed at the
+	// ref (A-10). The caller establishes both facts; audit only reports them.
+	StagedHigher  []string
+	SymlinkTarget string          // set when CodeownersPath is a symlink at ref (A-10)
+	Checks        map[string]bool // nil = all
+	WarnSize      int             // default 2,500,000
 
 	// API-dependent checks run only when Client is set.
 	Client              *ghapi.Client
@@ -246,6 +250,27 @@ func Run(in Input) *Report {
 		rep.add(Finding{Check: "A-10", Severity: "warning",
 			Message: fmt.Sprintf("%d CODEOWNERS file(s) GitHub never loads: %s — only .github/, root and docs/ at the repository ROOT are searched (S-8), so no rule in them takes effect however the team reads them",
 				len(in.NestedPresent), strings.Join(in.NestedPresent, ", "))})
+	}
+
+	// A-10, mid-migration shape: a higher-precedence CODEOWNERS in the working
+	// tree, not yet committed.
+	//
+	// The check above is tree-only, so a repo moving from root `CODEOWNERS` to
+	// `.github/CODEOWNERS` — the new file staged, the migration commit not yet
+	// made — came back `audit clean`, exit 0, while every rule in the file this
+	// report describes is one commit away from being ignored. Reporting it does
+	// not change what audit RESOLVES against: ownership below is still the ref's,
+	// because that is what GitHub reads. This is the one fact about the checkout
+	// that changes what the report will mean tomorrow.
+	//
+	// `error`, like two committed files and unlike the nested shape: both are
+	// ambiguity about which document GOVERNS, and the resolution here is a
+	// single `git commit` away rather than a permanent property of a migrated
+	// monorepo.
+	if in.enabled("A-10") && len(in.StagedHigher) > 0 {
+		rep.add(Finding{Check: "A-10", Severity: "error",
+			Message: fmt.Sprintf("%s is in the working tree but not committed at this ref, and outranks %s under S-8 (.github/ > root > docs/, first found wins, never merged) — this report describes %s, and every rule in it stops applying the moment that file is committed",
+				strings.Join(in.StagedHigher, ", "), in.CodeownersPath, in.CodeownersPath)})
 	}
 
 	// A-11: the CODEOWNERS file itself is unowned. A zero-owner match is

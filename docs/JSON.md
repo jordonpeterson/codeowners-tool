@@ -65,8 +65,8 @@ read (a bad `--branch`, no CODEOWNERS and no `--create`) have no file to name, a
 
 `warnings` carries what a human should look at in a repo the tool did not refuse over: a
 second CODEOWNERS file GitHub ignores (A-10), a run writing a file that is not the one
-GitHub reads, lines GitHub cannot parse and silently skips (S-3), and a comment still
-naming an owner a `rename_owner` renamed away. None of these is a reason to refuse a
+GitHub reads or one git has never recorded, lines GitHub cannot parse and silently skips
+(S-3), and a comment still naming an owner a `rename_owner` renamed away. None of these is a reason to refuse a
 correct edit, and none of them is visible at fleet scale unless the run that touched the
 file reports it. They are independent, so a run can carry several at once, and they ride
 on any record whose file was read — including a `refused` one, where the warning may be

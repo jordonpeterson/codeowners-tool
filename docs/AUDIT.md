@@ -21,16 +21,24 @@ remains the system's single writer path.
 | A-7 | Duplicate pattern | no | report only |
 | A-8 | Syntax errors | optional | no |
 | A-9 | Unowned path coverage | no | n/a |
-| A-10 | A CODEOWNERS file GitHub does not load | no | error for a second **root-level** file or a **symlinked** governing one; warning for a **nested** one |
+| A-10 | A CODEOWNERS file GitHub does not load, or is about to stop loading the one it does | no | error for a second **root-level** file, a **symlinked** governing one, or an uncommitted **higher-precedence** one; warning for a **nested** one |
 | A-11 | CODEOWNERS file itself unowned | no | report only |
 | A-12 | File size approaching 3 MB | no | n/a |
 
-**A-10's three shapes.** A second *root-level* file and a *symlinked* governing file are
+**A-10's four shapes.** A second *root-level* file and a *symlinked* governing file are
 `error`: what governs is wrong or absent, and with a symlink GitHub loads no rules at all,
 so the rest of the report is suppressed — `cat-file` returns the link target, not a
 document. A *nested* `packages/foo/CODEOWNERS` is `warning`: GitHub never searches it, so
 what governs is not in doubt, and it is often a deliberate leftover another tool consumes.
 Under `--checks` without `a10`, a symlinked file is exit 5, never a clean run.
+
+The fourth is *mid-migration*: a higher-precedence CODEOWNERS sitting in the working tree,
+uncommitted — `.github/CODEOWNERS` staged in a repo still governed by root `CODEOWNERS`.
+`error`, because every rule in the file this report describes stops applying the moment
+that commit lands. It is the one thing `audit` reads off disk, and it changes nothing else:
+ownership still resolves against `--branch`, because that is what GitHub sees. Reported
+only when `--branch` is the commit this clone is standing on — on any other ref the files
+on disk belong to a different tree — and ignored files never count.
 
 **A-5 and normalization.** NFC and NFD spellings of an accented name render identically and
 CODEOWNERS matches bytes, so the pattern is dead with nothing on screen to show why. The

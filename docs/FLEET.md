@@ -225,16 +225,20 @@ whose severity you can weigh.
 
 ## Repos the rollout should tell you about
 
-Four conditions do not stop a run — none is a reason to refuse a correct edit — but each
+Five conditions do not stop a run — none is a reason to refuse a correct edit — but each
 leaves something a human should look at, so the run that read the file says so in
-`warnings`. They are independent, so one repo can carry several, and they ride on any
-record whose file was read, including a `refused` one:
+`warnings`. They are independent, one repo can carry several, and they ride on any record
+whose file was read, including a `refused` one:
 
 - **A second CODEOWNERS file.** The right one was edited; the other still sits in the repo
   looking authoritative and usually says something different (A-10).
 - **The file being edited is not the one GitHub reads.** Almost always a `--file` pointed
   at the wrong location. The rules land in a file GitHub never loads, so the rollout
   reports success and moves no ownership at all.
+- **The file being edited is not committed.** Discovery falls back to the working tree, so
+  a CODEOWNERS a provisioning script dropped in — or one yesterday's pass created — is
+  amended and reported `applied` while GitHub still reads none from that repo; commit it.
+  (One the repo's ignore rules forbid committing is refused instead, exit 2.)
 - **Lines GitHub cannot parse.** It skips them individually and honors the rest (S-3), so
   the change is correct and those lines are left exactly as they were — but some paths in
   that repo are owned by nobody, and the reason is a line this run just read.
@@ -247,25 +251,23 @@ record whose file was read, including a `refused` one:
 jq -r 'select(.warnings) | "\(.repo)\t\(.warnings|join("; "))"' results.jsonl
 ```
 
-They also land in the PR body under **Worth a look**, which is where they get fixed: the
-PR is the one moment somebody is already reading that file.
+They also land in the PR body under **Worth a look**, where they get fixed: the PR is the
+one moment somebody is already reading that file.
 
 ## Owning less than you could
 
-A rollout's failure mode is not only "it didn't apply" — it is "it applied to more than
-anyone meant". Three things keep a wave narrow:
+A rollout's failure mode is not only "it didn't apply" but "it applied to more than anyone
+meant". Three things keep a wave narrow:
 
 **`"create": true` in the policy (or `--create` with `--op`) is permission, not
-instruction.** A repo where every op skips gets no file,
-no `.github/` directory, `"status": "skipped"`, and no `codeowners_path`. Nothing to
-commit, nothing to review, and the repo still answers "no CODEOWNERS yet" to whoever asks
-next. An empty file would answer *done* forever.
+instruction.** A repo where every op skips gets no file, no `.github/` directory,
+`"status": "skipped"`, no `codeowners_path` — nothing to commit, and the repo still answers
+"no CODEOWNERS yet" to whoever asks next. An empty file would answer *done* forever.
 
-**Unclaimed paths stay unclaimed.** Ownership covers exactly the scopes your ops name;
-nothing synthesizes a `*` catch-all to make coverage look complete. Afterwards
-`audit --checks a9 --fail-on never` lists what nobody owns, which is a report, not a
-failure. In a snapshot, `null` means no rule matched and `[]` means a rule matched and
-deliberately owns nobody (S-9) — the difference between a gap and a decision.
+**Unclaimed paths stay unclaimed.** Ownership covers exactly the scopes your ops name; no
+`*` catch-all is synthesized to make coverage look complete. Afterwards `audit --checks a9
+--fail-on never` lists what nobody owns — a report, not a failure. In a snapshot `null`
+means no rule matched and `[]` means one matched and owns nobody (S-9): gap vs decision.
 
 **A ceiling on the blast radius.** `max_paths_changed` in the policy (or
 `--max-paths-changed N` with `--op`) refuses any repo where the wave would move more

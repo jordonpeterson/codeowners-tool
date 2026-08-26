@@ -33,8 +33,8 @@ $ echo $?
 4
 ```
 
-Drop `--dry-run` to write it. Every flag is in
-[AUDIT.md](AUDIT.md#lint); the ones you will reach for:
+Drop `--dry-run` to write it. Every flag is in [AUDIT.md](AUDIT.md#lint); the ones you will
+reach for:
 
 | Flag | Why |
 |---|---|
@@ -95,7 +95,7 @@ Both are reported and both make the run exit 4.
 
 ## Wiring it into CI
 
-Gate on the **dry run**, not on the writing run:
+Gate on the **dry run**, not the writing run:
 
 ```yaml
 - run: codeowners-tool lint --dry-run --github-repo ${{ github.repository }}
@@ -103,12 +103,12 @@ Gate on the **dry run**, not on the writing run:
     GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 ```
 
-A *successful write* can also exit 4 — when it fixed what it could and something is still
-left for a person — so `lint && git commit` will not do what you want. If you are
-auto-committing, ignore the status and check the diff, or use the JSON record.
+A *successful write* can also exit 4 — it fixed what it could and something is still left
+for a person — so `lint && git commit` will not do what you want. Auto-committing? Ignore
+the status and check the diff, or use the JSON record.
 
-Scripting the JSON? `--format json` carries `needs_human`, set by the same function that
-produces the exit code, so the gate is one expression:
+`--format json` carries `needs_human`, set by the same function that produces the exit
+code, so the gate is one expression:
 
 ```console
 $ codeowners-tool lint --dry-run --github-repo org/repo --format json | jq -e .needs_human
@@ -137,17 +137,15 @@ One rule: **0 when the file needs nothing further from a person, 4 when it does.
 
 **`lint needs a token … and --github-repo`** (exit 5). Owner existence is not decidable
 offline; the refusal names whichever credential you left out. One exception: with
-`--remove-stale-paths` and *neither* credential given, the run proceeds offline and does
-stage 3 alone — dead rules are removed against the tree, invalid lines are still reported
-(exit 4), and no owner is verified, repaired, or removed; the skip is disclosed in the
-output and as `owner_checks_skipped` in the JSON record. Supplying one credential without
-the other still refuses — a run that named a repo or held a token asked for the full lint.
+`--remove-stale-paths` and *neither* credential given, the run does stage 3 alone — dead
+rules removed against the tree, invalid lines still reported (exit 4), no owner verified,
+repaired or removed, and the skip disclosed in the output and as `owner_checks_skipped` in
+the JSON. One credential without the other still refuses: that run asked for the full lint.
 
 **`inconclusive: … no owner was removed and nothing was written`** (exit 5). One lookup
-could not be answered — rate limit, expired token, an org your token cannot enumerate —
-so the *entire* run is held back, including the offline whitespace fixes. Partial
-knowledge does not earn a partial edit; re-run when the lookup works and you get the
-complete fix as one reviewable diff.
+could not be answered — rate limit, expired token, an org your token cannot enumerate — so
+the *entire* run is held back, whitespace fixes included: partial knowledge does not earn a
+partial edit. Re-run when the lookup works and the complete fix arrives as one diff.
 
 **`… this token is not an owner of that org`** (exit 5). A *secret* team you cannot see
 returns the same 404 as a deleted one, so only an org owner's 404 is definitive. Re-run
@@ -165,17 +163,22 @@ leave a rule with no owners at all, and there is deliberately no default. Pick o
 Whatever you pick, the resulting reassignment is listed in the ownership rows.
 
 **`--branch X is not what this clone has checked out`** (exit 2). `lint` proves against
-`--branch`'s tree and writes the working-tree file; on a clone standing elsewhere those
-are different trees, and a rule can be deleted as stale while the directory sits in your
-checkout. Check the branch out, or add `--dry-run`.
+`--branch`'s tree and writes the working-tree file; elsewhere those are different trees and
+a live directory's rule reads as stale. Check the branch out, or add `--dry-run`.
 
 **`--repo X is inside the repository rooted at Y`** (exit 2). Pointed below the root, git
-reports paths relative to the *root*, so the run would read one CODEOWNERS and rewrite a
-different file of the same name — leaving the one GitHub actually loads untouched.
+reports paths relative to the *root*, so the run rewrites a different file of the same name
+and leaves the one GitHub loads untouched.
 
 **`--cache-dir is not available with --lint`** (exit 3). A cached "this owner does not
 exist" is served without revalidation. Under `audit` that is a finding somebody reads;
-here it deletes an owner. Lookups are still cached in memory for the run.
+here it deletes an owner. `--cache-ttl` is refused the same way; both exist on `lint` only
+so it can say so instead of leaving the flag package to answer `flag provided but not
+defined`. Lookups are still cached in memory for the run.
+
+**`… but GitHub resolves ownership from .github/CODEOWNERS`** (warning; exit unchanged).
+`lint` repairs the file it was pointed at, and says so — on stderr and in the JSON
+`warnings` — when S-8 gives a different one, or when that file is not committed yet (R-24).
 
 ## Running it on a schedule
 
@@ -183,17 +186,14 @@ here it deletes an owner. Lookups are still cached in memory for the run.
 
 **Do not schedule `lint` and `sync` against overlapping owners.** `sync` adds the owners
 your policy names and never asks whether they exist; `lint` removes owners that do not and
-knows nothing about your policy. Pointed at the same repository on a timer they will undo
-each other forever, each exiting 0, each making a commit. Pick one.
+knows nothing about your policy. On a timer they undo each other forever. Pick one.
 
 ## What it will not do to your file
 
 Nothing here bypasses the invariants the rest of the tool holds to. The edits are proven
-against every tracked file before anything is written, then go through the same `apply`
-path as `sync` — the hash is pinned so a file that changed under the run is refused, the
-result is validated before the write, the write is an atomic rename, and a failure rolls
-back. Comments, blank lines, column alignment and CRLF endings all survive; `lint`
-corrects ownership, not spelling or layout.
+against every tracked file, then go through the same `apply` path as `sync` — the hash is
+pinned so a file that changed under the run is refused, the result is validated before the
+write, the write is an atomic rename, and a failure rolls back. Comments, blank lines,
+column alignment and CRLF endings all survive; `lint` corrects ownership, not layout.
 
-The full guarantee list, with the test that enforces each one, is in
-[BEHAVIOR.md](BEHAVIOR.md).
+The full guarantee list, with the test that enforces each one, is in [BEHAVIOR.md](BEHAVIOR.md).
