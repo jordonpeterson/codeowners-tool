@@ -934,8 +934,10 @@ func planRef(pf planFile) string {
 // nobody ran, carrying a flag this tool passes on the reader's behalf, which
 // sends them hunting for an option that does not exist.
 // TestBranchMismatchErrorNamesHeadCleanly pinned exactly that for the S-7
-// refusal, and `plan` already reports this same condition cleanly, so the three
-// verbs disagreed about one mistake.
+// refusal. `plan` is not the model here and never was: it reads the working
+// tree by design, so on this condition it exits 0 and emits a plan, and when
+// the path is missing from disk too it reports a raw Go syscall error over an
+// absolute host path — the same genre this refusal replaces.
 //
 // Only --file can reach the refusal: discovery picks coPath out of the tree
 // itself, so a discovered path is tracked by construction.
@@ -947,13 +949,16 @@ func planRef(pf planFile) string {
 // nor `check` — the verbs under the coarse contract — reach here.
 func codeownersAtRef(repoDir, ref string, tree, all []string, coPath string) ([]byte, error) {
 	if !trackedAt(tree, coPath) {
-		present := ""
+		// Name the file that GOVERNS, not "the one committed there": several
+		// may be committed, and `there` after "nothing to read at that path"
+		// reads as the missing path itself.
+		governing := ""
 		if len(all) > 0 {
-			present = fmt.Sprintf(" (the one committed there is %s)", all[0])
+			governing = fmt.Sprintf(" — %s is the file %s resolves ownership from", all[0], ref)
 		}
 		return nil, &plan.InvalidError{Msg: fmt.Sprintf(
-			"--file %s is not in the tree at %s: this command reports what GitHub would do, and GitHub reads only committed files, so there is nothing to read at that path%s — commit the file, or name one the ref carries",
-			coPath, ref, present)}
+			"--file %s is not in the tree at %s: this command reports what GitHub would do, and GitHub reads only committed files, so there is nothing to read at that path%s; commit the file, or name one %s carries",
+			coPath, ref, governing, ref)}
 	}
 	return gittree.ReadFileAtRef(repoDir, ref, coPath)
 }

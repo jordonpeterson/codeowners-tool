@@ -880,6 +880,15 @@ func (r *syncRun) refuseWorkTreeSupersede(tree []string) error {
 	if !outranksCodeowners(onDisk, present[0]) {
 		return nil
 	}
+	// A file git is told never to track can never supersede anything, so it is
+	// not a migration — it is a stray. findOnDisk is a bare os.Stat walk and
+	// honours no ignore rules, while audit's half of this check runs over
+	// `ls-files --exclude-standard`; without this the two disagreed about one
+	// repository, and the refusal's own advice ("commit the migration first")
+	// was something `git add` declines.
+	if gitIgnored(r.repoArg, onDisk) {
+		return nil
+	}
 	return &plan.RefusalError{Msg: fmt.Sprintf(
 		"refusing: this repository is governed by %s at %s, but %s is in the working tree and outranks it — GitHub loads only the first of .github/ > root > docs/ (S-8), so an edit to %s stops applying the moment %s is committed, while %s governs nothing until then. Commit the migration first, or pass --file to say which of the two this run should edit — nothing was written",
 		present[0], r.branch, onDisk, present[0], onDisk, onDisk)}
@@ -1258,7 +1267,7 @@ func governingWarnings(tree []string, ref, rel string, creating bool, content []
 	// tracked" is not news about it, and the record already says created.
 	if !creating && !trackedAt(tree, rel) {
 		out = append(out, fmt.Sprintf(
-			"%s is not tracked at %s — git has never recorded it, so GitHub reads nothing from it today and the before-state this run proved against is one GitHub has never seen; commit the file for this change to take effect",
+			"%s is not tracked at %s — git does not record it at that ref, so GitHub reads nothing from it today and the before-state this run proved against is one GitHub has never seen; commit the file for this change to take effect",
 			relClean(rel), ref))
 	}
 	// Independent facts, deliberately not an either/or: a repo can be in both,

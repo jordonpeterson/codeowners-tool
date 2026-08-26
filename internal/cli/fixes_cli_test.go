@@ -81,8 +81,16 @@ func TestFix_UntrackedButCommittableCodeownersStillConverges(t *testing.T) {
 		t.Errorf("an untracked CODEOWNERS the operator can still commit was refused (exit %d) — D5 exists so pass 2\n"+
 			"of a nightly job can amend what pass 1 created\noutput:\n%s", code, out)
 	}
-	if !strings.Contains(out, "git has never recorded it") {
+	// "does not record it at THAT REF", not "has never recorded it": the check
+	// is trackedAt over one tree, and a file committed then `git rm --cached`
+	// in a later commit has a history the second phrasing denies. A message a
+	// reader can falsify with one `git log` is the failure mode this branch
+	// has already turned back three times.
+	if !strings.Contains(out, "not tracked at HEAD") || !strings.Contains(out, "does not record it at that ref") {
 		t.Errorf("the run converged without disclosing that GitHub reads nothing from this file yet\noutput:\n%s", out)
+	}
+	if strings.Contains(out, "never recorded") {
+		t.Errorf("the disclosure claims the file has no history, which trackedAt cannot know:\n%s", out)
 	}
 	b, err := os.ReadFile(filepath.Join(repo, ".github/CODEOWNERS"))
 	if err != nil || !strings.Contains(string(b), "@org/platform") {
@@ -561,5 +569,44 @@ func TestFix_DryRunDoesNotLiftTheUnmergedGuard(t *testing.T) {
 	out := stdout + stderr
 	if code != cli.ExitRefused {
 		t.Errorf("--dry-run previewed a conflict-mangled file: want exit 2, got %d\noutput:\n%s", code, out)
+	}
+}
+
+// SPEC R-24 (S-8): a superseding CODEOWNERS that git is told never to track is
+// not a migration, so it does not refuse the run — and `sync` and `audit` agree
+// about that.
+//
+// Review finding. `stagedHigherCodeowners` reads the work tree through
+// `ls-files --exclude-standard` and its comment states the rule outright: a
+// file git will never track can never supersede anything. `findOnDisk`, which
+// the sync half used, is a bare os.Stat walk that honours no ignore rules. So
+// a repo governed by a tracked docs/CODEOWNERS, with an IGNORED root
+// CODEOWNERS on disk, was refused at exit 2 — banked by a fleet loop as
+// needs-human — while `audit` on the same repo said clean and `plan` exited 0.
+// The refusal even advised committing the migration, which `git add` declines
+// for an ignored path.
+func TestFix_AnIgnoredSupersedingCodeownersIsNotAMigration(t *testing.T) {
+	repo := initRepo(t, map[string]string{
+		"docs/CODEOWNERS":      "* @org/every\n",
+		".gitignore":           "/CODEOWNERS\n",
+		"services/api/main.go": "",
+	})
+	// Ignored, so `git add CODEOWNERS` refuses it and it can never govern.
+	if err := os.WriteFile(filepath.Join(repo, "CODEOWNERS"), []byte("* @org/stray\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	code, stdout, stderr := runCLI(t, "sync", "--repo", repo, "--op", "add_owner(/services/api/, @org/api)")
+	out := stdout + stderr
+	if code != cli.ExitOK {
+		t.Fatalf("an ignored root CODEOWNERS refused the run: want exit 0, got %d\n"+
+			"git will never track it, so it supersedes nothing and the advice to commit it is one git declines\noutput:\n%s", code, out)
+	}
+	if got := syncReadFile(t, filepath.Join(repo, "docs/CODEOWNERS")); !strings.Contains(got, "@org/api") {
+		t.Errorf("the governing file was not amended:\n%s", got)
+	}
+	// audit's half of the same check must agree.
+	if code, ao, ae := runCLI(t, "audit", "--repo", repo, "--checks", "a10"); code != cli.ExitOK {
+		t.Errorf("audit disagrees with sync about the same repository: want exit 0, got %d\n%s%s", code, ao, ae)
 	}
 }

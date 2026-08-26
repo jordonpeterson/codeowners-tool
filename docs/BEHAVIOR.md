@@ -1190,6 +1190,22 @@ SPEC R-17: exit 1 no-op, exit 3 invalid input.
 Review finding: a typo'd --scope must be a loud exit-3 error, not silently
 dropped (which turned every change into an inexplicable violation).
 
+### `TestFix_AnIgnoredSupersedingCodeownersIsNotAMigration`
+
+SPEC R-24 (S-8): a superseding CODEOWNERS that git is told never to track is
+not a migration, so it does not refuse the run — and `sync` and `audit` agree
+about that.
+
+Review finding. `stagedHigherCodeowners` reads the work tree through
+`ls-files --exclude-standard` and its comment states the rule outright: a
+file git will never track can never supersede anything. `findOnDisk`, which
+the sync half used, is a bare os.Stat walk that honours no ignore rules. So
+a repo governed by a tracked docs/CODEOWNERS, with an IGNORED root
+CODEOWNERS on disk, was refused at exit 2 — banked by a fleet loop as
+needs-human — while `audit` on the same repo said clean and `plan` exited 0.
+The refusal even advised committing the migration, which `git add` declines
+for an ignored path.
+
 ### `TestFix_ApplyAcceptsAnotherNameForTheSameCommit`
 
 SPEC S-7: the branch guard compares RESOLVED COMMITS, not ref names, so a
@@ -8277,4 +8293,4 @@ twice and one tracked file vanished from the gate.
 
 ---
 
-779 documented test cases across 13 packages.
+780 documented test cases across 13 packages.
