@@ -129,14 +129,9 @@ plan's **ref** too: `apply` refuses (exit 2) off `ref`, the same S-7 rule `sync`
 enforce, at the verb that writes. To roll one intent across many repos use `sync --policy`;
 a plan is per-repository by construction.
 
-`snapshot` and `verify` are the after-the-fact version of the same question — prove in CI
-that a merged change moved nothing outside its declared scope:
-
-```sh
-codeowners-tool snapshot --branch main    --out before.json
-codeowners-tool snapshot --branch feature --out after.json
-codeowners-tool verify --before before.json --after after.json --scope /services/api/
-```
+`snapshot` and `verify` ([below](#snapshot-and-verify)) are the after-the-fact version of
+the same question — prove in CI that a merged change moved nothing outside its declared
+scope. The worked run is in [GUIDE.md](GUIDE.md#reviewing-the-change-before-it-lands).
 
 ## `snapshot` and `verify`
 

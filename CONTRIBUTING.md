@@ -46,9 +46,8 @@ go run ./tools/difftest 500000 42     # a different region of the input space
 ```
 
 CI runs the full 500k with the default seed on every PR, in its own parallel job.
-Holding the seed fixed means raising the case count only extends the same
-sequence, so pass a different one to reach input that gate never visits. The seed
-prints with the result, so anything you find replays exactly.
+Why the seed is fixed, and how to reach input the gate never visits:
+[docs/TESTING.md](docs/TESTING.md#differential-fuzz-against-a-reference-matcher).
 
 ## Exit codes are a contract
 

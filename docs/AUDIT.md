@@ -107,10 +107,9 @@ rejected, because a subset of a whole-file repair is ambiguous rather than small
 revalidation, and here that answer deletes an owner rather than printing a finding.
 Lookups are still cached in memory per run.
 
-**Offline tree-only mode:** with `--remove-stale-paths` and *neither* a token nor
-`--github-repo`, the run does stage 3 alone — dead rules judged against the tree, invalid
-lines still reported at exit 4, no owner verified, repaired, or removed — and the skip is
-disclosed. One credential without the other still refuses at exit 5.
+**Offline tree-only mode:** with `--remove-stale-paths` and *neither* credential, the run
+does stage 3 alone and says so; one credential without the other still refuses (exit 5).
+What that run does and does not cover: [LINTING.md](LINTING.md#errors-you-will-actually-hit).
 
 | # | Stage | Opt-in | What it does |
 |---|---|---|---|
@@ -118,24 +117,13 @@ disclosed. One credential without the other still refuses at exit 5.
 | 2 | Remove dead owners | no | Drops users and teams that definitively do not exist (A-1 only; never A-2/A-3). |
 | 3 | Remove stale rules | `--remove-stale-paths` | Deletes rules matching nothing in the committed tree and nothing on disk. Off by default per R-11. A rule missing only by **case** is spared and reported. |
 
-**Refusals are deliberate.** A merge run may only start at a token that is not already a
-valid owner, and once the accumulator is a valid owner it may absorb only a bare `/`. So
-`@org /team` is not repaired: it is shaped exactly like `@alice /docs`, two rules on one
-line, and guessing wrong hands one rule's owner the other rule's files. Byte conservation
-over the owner region and a byte-identical pattern are checked on every repair.
-
-**Fail-closed applies to the whole run.** One inconclusive lookup and nothing is written,
-including the offline stages. Removing a **team** additionally requires an org-owner
-token: a secret team returns the same 404 as a deleted one, and only an owner sees secret
-teams. Email owners are `unverifiable`, never dead (R-13), and never make a run
-inconclusive.
-
-**Repository guards**, all exit 2: `--branch` must be the ref the clone has checked out
-(lifted by `--dry-run`), `--repo` must be the repository root (not lifted), and the
-governing CODEOWNERS must not be left unmerged by a conflict — a rule judged against both
-sides of a merge at once is judged against text no commit has ever had. They exist because
-lint proves against a tree and writes a file, and those are only the same document when
-the two agree.
+Everything `lint` refuses to guess at (the `@org /team` shape it will not rejoin — byte
+conservation over the owner region and a byte-identical pattern are checked on every
+repair), the fail-closed rule — one inconclusive lookup and nothing is written, an
+org-owner token to remove a **team**, email owners `unverifiable` and never inconclusive
+(R-13) — and the exit-2 repository guards behind the table below are the guide's:
+[what it refuses](LINTING.md#what-it-refuses-to-repair) and
+[the errors](LINTING.md#errors-you-will-actually-hit).
 
 | Exit | When |
 |---|---|
