@@ -4793,7 +4793,11 @@ go and look for.
 `declare`, so the echo fires), and `sync` also prints `ops[0..3]`, the last
 of them `applied (proven: structural)` — which GUIDE.md's own next paragraph
 says to look for. FLEET.md shows both echoes and reproduces exactly, so
-GUIDE is the outlier. The tool is right; the page is stale.
+GUIDE was the outlier.
+
+The fixture is the four files the section's prose describes, so every number
+in the block — `4 path(s) change owners` included — is the real one for the
+repo a reader following along would have.
 
 ### `TestLeadingHashScopeIsRefusedAtCheckTime`
 
@@ -4880,10 +4884,15 @@ it reads:
 	/services/api/   @org/api-team @org/platform @org/sre
 
 The real run reports 2 ops / 2 line changes / 2 paths, prints a per-op line
-for each, and writes a `/docs/` rule the block does not show. A reader
+for each, and writes a `/docs/` rule the block did not show. A reader
 comparing the two concludes the `owners`-array op wrote nothing — the exact
-misreading the page exists to prevent. The tool is right here; the
-documentation is what needs fixing.
+misreading the page exists to prevent.
+
+The assertion runs the documented policy against the documented tree and
+requires the PAGE to show what the tool really prints. Asserting the reverse
+— that the tool prints what the page claims — was this test's own first
+mistake: that form can only ever be satisfied by changing the tool, and here
+the tool is right.
 
 ### `TestPlanApplyAndLintWarnWhenTheyWriteAFileGitHubWillNotRead`
 
