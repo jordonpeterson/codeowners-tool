@@ -125,6 +125,24 @@ func TestAction_ManifestRunsTheScriptUnderTest(t *testing.T) {
 	}
 }
 
+// The step's only command is `sh <script>`, and the script is POSIX by contract —
+// shellcheck gates it as sh in CI. Asking the runner for bash would make the action
+// require an interpreter it never uses, and fail outright on the minimal Linux
+// images self-hosted runners are often built from, which carry /bin/sh and no bash.
+func TestAction_TheStepDoesNotRequireAShellItNeverUses(t *testing.T) {
+	body := repoFile(t, manifest)
+	shellRe := regexp.MustCompile(`(?m)^\s*shell:\s*["']?([a-z0-9-]+)`)
+	found := shellRe.FindAllStringSubmatch(body, -1)
+	if len(found) == 0 {
+		t.Fatal("action.yml declares no `shell:` at all; a composite run step requires one")
+	}
+	for _, m := range found {
+		if m[1] != "sh" {
+			t.Errorf("action.yml runs its step with `shell: %s`, but the step only invokes `sh` and the script it runs is POSIX.\nRequiring %s makes the action fail on a runner image that has /bin/sh and not %s.", m[1], m[1], m[1])
+		}
+	}
+}
+
 // This action runs inside a consumer's job, with the consumer's token. A mutable
 // tag here is a supply-chain hazard in someone else's repository, not just ours.
 func TestAction_ThirdPartyActionsInTheManifestArePinnedToACommitSHA(t *testing.T) {

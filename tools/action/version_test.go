@@ -155,6 +155,25 @@ func TestAction_FailsWhenTheInstalledBuildIsNotTheRequestedOne(t *testing.T) {
 	}
 }
 
+// The unpinned path — no version input, no gh to resolve one, install.sh picking
+// "latest" itself — has no tag to compare against, so whatever the binary says is
+// what the action reports. A release built without the -X stamp says "dev", and
+// that is precisely the "a fleet cannot be asked which build it is running" failure
+// the release workflow stamps the tag to prevent; exporting it would report a
+// version nobody can map back to a build.
+func TestAction_RefusesAnInstalledBuildThatNamesNoRelease(t *testing.T) {
+	r := run{version: "latest", stubVersion: "dev"}.exec(t)
+	if r.exitCode == 0 {
+		t.Fatalf("setup.sh accepted a binary reporting %q\n%s", "dev", r)
+	}
+	if len(r.pathAdds) != 0 {
+		t.Errorf("$GITHUB_PATH got %v; a build that names no release must not reach later steps", r.pathAdds)
+	}
+	if len(r.outputs) != 0 {
+		t.Errorf("outputs %v were set for a build that names no release", r.outputs)
+	}
+}
+
 // A failed install must not leave the job with a PATH entry pointing at nothing:
 // the next step would fail on "codeowners-tool: not found", which reads as a
 // broken workflow rather than a failed download.

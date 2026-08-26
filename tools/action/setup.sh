@@ -92,6 +92,12 @@ if [ -n "$version" ] && [ "$installed" != "$version" ]; then
   err "requested $version but the installed binary reports $installed — refusing to put a build on the PATH that is not the one this job asked for"
 fi
 
+# Nothing was pinned, so there is no tag to compare against — but the build still
+# has to name one. A release built without the -X stamp reports "dev", and a job
+# that exports it reports a version nobody can map back to a build, which is the
+# guesswork the release workflow stamps the tag to prevent.
+is_tag "$installed" || err "the installed binary reports '$installed', which is not a release tag — this build carries no version, so nothing downstream could say which one ran"
+
 # Exported only now: a PATH entry pointing at a failed install turns the next
 # step's "codeowners-tool: not found" into what looks like a broken workflow.
 if [ -n "${GITHUB_PATH:-}" ]; then

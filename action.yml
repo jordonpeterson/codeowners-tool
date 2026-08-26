@@ -40,7 +40,11 @@ runs:
     # script only through env, and a missing mapping is silent rather than an
     # error. tools/action's manifest test gates that.
     - id: setup
-      shell: bash
+      # sh, not bash: the step's only command is `sh <script>` and the script is
+      # POSIX by contract, so asking for bash would make the action require an
+      # interpreter it never uses — and fail on the minimal Linux images
+      # self-hosted runners are often built from, which carry /bin/sh and no bash.
+      shell: sh
       run: sh "$GITHUB_ACTION_PATH/tools/action/setup.sh"
       env:
         INPUT_VERSION: ${{ inputs.version }}
