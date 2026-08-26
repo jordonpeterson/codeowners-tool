@@ -1222,6 +1222,15 @@ written as "--file plus an existing CODEOWNERS" would take this case with
 it. Nothing is lost by writing here — .github/CODEOWNERS keeps governing —
 and the R-24 warning is what tells the operator that.
 
+### `TestFix_CreateIntoASubmoduleIsRefused`
+
+`--create` reaches the submodule by a different route than discovery does:
+the mount holds no CODEOWNERS at all, so D5 finds nothing on disk and the
+default location is chosen from scratch. Creating there puts a brand new
+file inside the submodule's checkout — a path the parent cannot stage —
+and reports created:true at exit 0. The refusal must fire before the file
+exists, since --create never overwrites and so would never fix it up.
+
 ### `TestFix_DetachedHeadLabelIsBareSHA`
 
 headLabel's contract: on a detached HEAD the label is the bare abbreviated
@@ -1235,6 +1244,11 @@ The other uncleaned spellings of a governing location: `.github//CODEOWNERS`
 and `docs/../CODEOWNERS` name the S-8 files they clean to, so neither draws
 the "governs nothing" warning — while a path that genuinely is not an S-8
 location still does.
+
+### `TestFix_FileInsideASubmoduleIsRefused`
+
+`--file` names the path directly, so discovery is bypassed entirely — the
+same dead-on-arrival write with the operator's spelling on it.
 
 ### `TestFix_LintRefusesSymlinkedCodeowners`
 
@@ -1252,6 +1266,13 @@ Every sync exit-3 verdict asked for a sink discloses that no record was
 written — not only the two paths the first fix covered. A fleet aggregating
 --out records otherwise loses these repos silently, the exact hazard the
 note exists to disclose.
+
+### `TestFix_PlainCodeownersDirectoryStillSyncs`
+
+The ordinary shape the guard must leave alone: a real `.github` DIRECTORY
+holding a tracked CODEOWNERS. `ls-tree -r` lists no directories, so `.github`
+is not itself a tracked path here and there is no gitlink to find — the
+distinction the whole guard rests on.
 
 ### `TestFix_PolicyCreateWithAPinnedFileIsRefused`
 
@@ -1278,6 +1299,13 @@ The stale-comment warning needs a LEADING token boundary too: a rename of
 @old-team must stay quiet about `someone@old-team`, where the match is the
 tail of an email, while a real mention — space-separated or glued to the
 comment glyph — still warns.
+
+### `TestFix_SubmoduleOffTheWritePathStaysIrrelevant`
+
+A submodule that is nowhere near a CODEOWNERS location is an ordinary part
+of the tree: the gitlink guard looks only at the components of the write
+path, exactly like its symlink sibling, so a vendored dependency must not
+cost this repo its run.
 
 ### `TestFix_SymlinkElsewhereStaysIrrelevant`
 
@@ -7634,4 +7662,4 @@ DIFFERENT states; transitioning between them is a real ownership change.
 
 ---
 
-706 documented test cases across 13 packages.
+710 documented test cases across 13 packages.

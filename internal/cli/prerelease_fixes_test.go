@@ -592,3 +592,114 @@ func fixWantNamesBothFiles(t *testing.T, msg, wrote, governing string) {
 		}
 	}
 }
+
+// fixMountSubmodule mounts sub inside parent at `at` and commits the gitlink.
+// A sandbox that forbids the file:// transport cannot build the fixture, which
+// is an environment limit rather than a result, so it skips.
+func fixMountSubmodule(t *testing.T, parent, sub, at string) {
+	t.Helper()
+	cmd := exec.Command("git", "-C", parent, "-c", "protocol.file.allow=always", "submodule", "add", "-q", sub, at)
+	cmd.Env = append(os.Environ(),
+		"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t", "GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Skipf("cannot mount a local submodule here: %v\n%s", err, out)
+	}
+	gitRun(t, parent, "commit", "-qm", "mount submodule at "+at)
+}
+
+// `--create` reaches the submodule by a different route than discovery does:
+// the mount holds no CODEOWNERS at all, so D5 finds nothing on disk and the
+// default location is chosen from scratch. Creating there puts a brand new
+// file inside the submodule's checkout — a path the parent cannot stage —
+// and reports created:true at exit 0. The refusal must fire before the file
+// exists, since --create never overwrites and so would never fix it up.
+func TestFix_CreateIntoASubmoduleIsRefused(t *testing.T) {
+	sub := initRepo(t, map[string]string{"README.md": "shared org files\n"})
+	parent := initRepo(t, map[string]string{"services/api/main.go": "m\n"})
+	fixMountSubmodule(t, parent, sub, ".github")
+
+	code, stdout, stderr := runCLI(t, "sync", "--repo", parent, "--create",
+		"--op", "add_owner(/services/api/, @org/api)", "--format", "json")
+	if code != cli.ExitRefused {
+		t.Fatalf("--create into a submodule: want exit 2, got %d\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+	}
+	if _, err := os.Stat(filepath.Join(parent, ".github", "CODEOWNERS")); err == nil {
+		t.Error("a CODEOWNERS was created inside the submodule's checkout")
+	}
+	fixWantSubmoduleRefusal(t, stdout+stderr, ".github")
+}
+
+// `--file` names the path directly, so discovery is bypassed entirely — the
+// same dead-on-arrival write with the operator's spelling on it.
+func TestFix_FileInsideASubmoduleIsRefused(t *testing.T) {
+	sub := initRepo(t, map[string]string{"CODEOWNERS": "* @sub/owners\n"})
+	parent := initRepo(t, map[string]string{"services/api/main.go": "m\n"})
+	fixMountSubmodule(t, parent, sub, "docs")
+	before := syncReadFile(t, filepath.Join(parent, "docs", "CODEOWNERS"))
+
+	code, stdout, stderr := runCLI(t, "sync", "--repo", parent, "--file", "docs/CODEOWNERS",
+		"--op", "add_owner(/services/api/, @org/api)", "--format", "json")
+	if code != cli.ExitRefused {
+		t.Fatalf("--file inside a submodule: want exit 2, got %d\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+	}
+	if got := syncReadFile(t, filepath.Join(parent, "docs", "CODEOWNERS")); got != before {
+		t.Errorf("the submodule's own CODEOWNERS was rewritten:\n%s", got)
+	}
+	fixWantSubmoduleRefusal(t, stdout+stderr, "docs")
+}
+
+// A submodule that is nowhere near a CODEOWNERS location is an ordinary part
+// of the tree: the gitlink guard looks only at the components of the write
+// path, exactly like its symlink sibling, so a vendored dependency must not
+// cost this repo its run.
+func TestFix_SubmoduleOffTheWritePathStaysIrrelevant(t *testing.T) {
+	sub := initRepo(t, map[string]string{"lib.go": "package lib\n"})
+	parent := initRepo(t, map[string]string{
+		".github/CODEOWNERS":   "* @org/everyone\n",
+		"services/api/main.go": "m\n",
+	})
+	fixMountSubmodule(t, parent, sub, "vendor/lib")
+
+	code, stdout, stderr := runCLI(t, "sync", "--repo", parent,
+		"--op", "add_owner(/services/api/, @org/api)")
+	if code != cli.ExitOK {
+		t.Fatalf("sync with a submodule at vendor/lib: want exit 0, got %d\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+	}
+	if got := syncReadFile(t, filepath.Join(parent, ".github", "CODEOWNERS")); !strings.Contains(got, "@org/api") {
+		t.Errorf("the parent's own CODEOWNERS was not amended:\n%s", got)
+	}
+}
+
+// The ordinary shape the guard must leave alone: a real `.github` DIRECTORY
+// holding a tracked CODEOWNERS. `ls-tree -r` lists no directories, so `.github`
+// is not itself a tracked path here and there is no gitlink to find — the
+// distinction the whole guard rests on.
+func TestFix_PlainCodeownersDirectoryStillSyncs(t *testing.T) {
+	repo := initRepo(t, map[string]string{
+		".github/CODEOWNERS":   "* @org/everyone\n",
+		"services/api/main.go": "m\n",
+	})
+	code, stdout, stderr := runCLI(t, "sync", "--repo", repo,
+		"--op", "add_owner(/services/api/, @org/api)")
+	if code != cli.ExitOK {
+		t.Fatalf("ordinary .github/CODEOWNERS: want exit 0, got %d\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+	}
+	if got := syncReadFile(t, filepath.Join(repo, ".github", "CODEOWNERS")); !strings.Contains(got, "/services/api/ @org/everyone @org/api") {
+		t.Errorf("the amendment did not land:\n%s", got)
+	}
+}
+
+// fixWantSubmoduleRefusal pins what a gitlink refusal has to say: the mount
+// point, the word an operator would search for, and the reason it is not a
+// syntax or ownership problem. The mount point is matched with its ` is a
+// submodule` suffix rather than bare, because ".github" is a substring of the
+// write path the same message names — a refusal that mentioned only the file
+// would otherwise satisfy the assertion and prove nothing.
+func fixWantSubmoduleRefusal(t *testing.T, out, mount string) {
+	t.Helper()
+	for _, want := range []string{mount + " is a submodule", "cannot stage", "nothing was written"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("refusal must contain %q; got:\n%s", want, out)
+		}
+	}
+}

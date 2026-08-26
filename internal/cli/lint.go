@@ -377,6 +377,12 @@ func runLint(r lintRun, stdout, stderr io.Writer) int {
 	if err := refuseSymlinkedTarget(target); err != nil {
 		return errExit(err, stderr)
 	}
+	// And the gitlink the filesystem cannot show: --file can name a path inside
+	// a submodule mounted at a CODEOWNERS location, where a repair would land
+	// in another repository's checkout. See refuseGitlinkedTarget.
+	if err := refuseGitlinkedTarget(tree, coPath); err != nil {
+		return errExit(err, stderr)
+	}
 	content, err := os.ReadFile(target)
 	if err != nil {
 		return errExit(&plan.InvalidError{Msg: err.Error()}, stderr)

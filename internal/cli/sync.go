@@ -427,6 +427,15 @@ func (r *syncRun) execute() (SyncRecord, int) {
 		rec.Error = err.Error()
 		return rec, ExitRefused
 	}
+	// And the one neither of those can see, because it is a fact about the
+	// TREE rather than about the filesystem: a submodule mounted at a
+	// CODEOWNERS location. See refuseGitlinkedTarget — ordered after the
+	// symlink guard, which names the link blob more precisely.
+	if err := refuseGitlinkedTarget(tree, rel); err != nil {
+		rec.Status = StatusRefused
+		rec.Error = err.Error()
+		return rec, ExitRefused
+	}
 
 	p, buildErr := plan.Build(content, tree, r.ops, plan.Options{OnEmpty: r.onEmpty})
 	var noop *plan.NoOpError

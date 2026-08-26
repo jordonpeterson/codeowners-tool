@@ -588,6 +588,41 @@ func writePathComponents(abs string) []string {
 	}
 }
 
+// refuseGitlinkedTarget refuses to write a CODEOWNERS that lives inside a
+// SUBMODULE mounted at one of the three locations — the shared-org-`.github`
+// layout is a real one.
+//
+// The same defect refuseSymlinkedTarget catches, one object type over: git
+// records a submodule as a GITLINK, not a tree, so with `.github` mounted
+// there is no `.github/CODEOWNERS` in the tree GitHub reads, and the parent
+// cannot even stage the path (`fatal: Pathspec '.github/CODEOWNERS' is in
+// submodule '.github'`). Discovery is right to find nothing there; sync's
+// working-tree fallback (D5) then adopted the file inside the SUBMODULE's own
+// checkout, amended it, proved the change against the SUBMODULE's owners and
+// reported `applied (proven: tree)` at exit 0 — a change the parent can never
+// commit, justified by a different repository's rules.
+//
+// The evidence is in the tracked tree already: `ls-tree -r --name-only` lists
+// no directories, so a tree entry that is a strict path prefix of the write
+// target is not a directory — it is a gitlink or a symlink's link blob. The
+// link blob is refused earlier and by name, so callers run this AFTER
+// refuseSymlinkedTarget and what reaches here is a gitlink.
+//
+// Exit 2, not 3: which clone mounts a submodule where is a fact about THIS
+// repository, so the fleet loop records it and steps to the next.
+func refuseGitlinkedTarget(tree []string, rel string) error {
+	clean := relClean(rel)
+	for _, p := range tree {
+		if p == "" || !strings.HasPrefix(clean, p+"/") {
+			continue
+		}
+		return &plan.RefusalError{Msg: fmt.Sprintf(
+			"refusing to write %s: %s is a submodule, and git records one as a gitlink rather than a tree, so no %s exists in the tree GitHub reads and this repository cannot stage that path (`git add %s` fails with \"is in submodule\") — the write would edit a file in the submodule's own checkout and prove it against the submodule's owners while reporting applied; keep this repository's CODEOWNERS in a path it tracks itself — nothing was written",
+			clean, p, clean, clean)}
+	}
+	return nil
+}
+
 type multiFlag []string
 
 func (m *multiFlag) String() string     { return strings.Join(*m, ",") }
