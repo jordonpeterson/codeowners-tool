@@ -29,6 +29,18 @@ is_tag() {
   printf '%s' "${1:-}" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'
 }
 
+# Refused up front, before any message below quotes what it was given: the runner
+# reads ::workflow commands:: from the start of a line, so echoing a value that
+# spans lines is itself the injection. The name is reported; the value is not.
+one_line() {
+  case "${2:-}" in
+  *"$NL"* | *"$CR"*) err "the $1 input must not span lines" ;;
+  esac
+}
+one_line version "${INPUT_VERSION:-}"
+one_line provenance "${INPUT_PROVENANCE:-}"
+one_line install-dir "${INPUT_INSTALL_DIR:-}"
+
 # Releases ship Windows builds, but as .zip archives install.sh does not unpack.
 # Saying so here beats a Git Bash `uname` failing partway through a download.
 case "${RUNNER_OS:-Linux}" in

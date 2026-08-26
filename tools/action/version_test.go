@@ -121,6 +121,26 @@ func TestAction_RefusesAVersionThatIsNotAReleaseTag(t *testing.T) {
 	}
 }
 
+// The refusals below quote what they were given, and the runner reads
+// ::workflow commands:: from the start of a line — so echoing a value that spans
+// lines hands a crafted input a way to write commands into the job's log. The
+// refusal has to happen before anything prints the value.
+func TestAction_DoesNotEchoAnInputThatSpansLines(t *testing.T) {
+	for _, c := range []run{
+		{version: "v0.0.9\n::error::forged"},
+		{version: "v0.0.9", provenance: "auto\n::error::forged"},
+		{version: "v0.0.9", installDir: "/tmp/ok\n::error::forged"},
+	} {
+		r := c.exec(t)
+		if r.exitCode == 0 {
+			t.Errorf("a line-spanning input was accepted\n%s", r)
+		}
+		if strings.Contains(r.output, "::error::forged") {
+			t.Errorf("the refusal echoed the line-spanning value into the log, where the runner reads workflow commands:\n%s", r)
+		}
+	}
+}
+
 // A version may be written the way people say it out loud.
 func TestAction_AcceptsAVersionWithoutItsLeadingV(t *testing.T) {
 	r := run{version: "0.0.9", stubVersion: "v0.0.9"}.exec(t)
