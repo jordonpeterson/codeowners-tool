@@ -1,49 +1,17 @@
 # Rolling a policy across many repos
 
-The tool works on one repo at a time and never clones, commits, branches, or opens PRs.
-Cloning, auth, hosts, parallelism and retries are already solved by `gh` and `ghorg`, so
-the loop stays in your script and the tool stays composable with whichever you use.
+The tool works on one repo at a time and never clones, commits, or opens PRs — cloning,
+auth, parallelism and retries are `gh` and `ghorg`'s job, so the loop stays in your script.
 
-## The idea, in five lines
+## One policy for the whole fleet
 
-Put the ops in a file once:
+Put the ops in a file once. Your 100 repos aren't identical, so an op can say what to do
+when nothing in a repo matches it — a plain string until it needs an object:
 
 ```json
 {
   "version": 1,
   "create": true,
-  "ops": [
-    "add_owner(/services/api/, @org/api-team)",
-    "add_owner(/.github/workflows/, @org/ci)"
-  ]
-}
-```
-
-`create` lets a repo with no CODEOWNERS get its first one, and never overwrites an
-existing file. It belongs in the policy: `--create` is for `--op` runs, and passing it
-next to `--policy` is exit 3, so the artifact in git is always the policy that ran.
-
-Then:
-
-```bash
-while read -r repo; do
-  gh repo clone "$repo" "work/$repo" -- --depth 1 -q
-  codeowners-tool sync --repo "work/$repo" --policy policy.json
-done < repos.txt          # one "org/name" per line
-```
-
-That is genuinely all you need for a first pass. Don't use it for a real 100-repo
-rollout, though: it stops dead the first time a clone fails or a repo needs a human.
-
-## Your 100 repos aren't identical
-
-An op can say what to do when nothing in a repo matches it. Write it as a plain string
-until it needs to say something extra, then swap in an object — both forms can sit in the
-same list:
-
-```json
-{
-  "version": 1,
   "ops": [
     "add_owner(/services/api/, @org/api-team)",
     { "op": "add_owner(**/*.tf, @org/infra)",          "on_zero_match": "skip"    },
@@ -54,19 +22,24 @@ same list:
 
 | `on_zero_match` | What happens when nothing in the repo matches |
 |---|---|
-| `require` *(default)* | Treat it as a problem. This repo gets no changes and exits 2; your script records it and carries on to the next one. Use it for paths every repo really does have. |
+| `require` *(default)* | A problem: this repo gets no changes and exits 2; your script records it and continues. For paths every repo really does have. |
 | `skip` | Move on. "*If* this repo has Terraform, `@org/infra` owns it." |
 | `declare` | Write the rule anyway, at the end of the file, ready for files added later. |
 
-`declare` is how you get an identical baseline into every repo without editing it again
-each time someone adds a file — at the cost of a weaker guarantee, explained in
-[what `declare` costs](GUARANTEES.md#what-declare-costs).
+`create` is permission, not instruction: a repo with no CODEOWNERS gets its first one, an
+existing file is never overwritten, and a repo where every op skips still gets no file
+([POLICY-FILE.md](POLICY-FILE.md#creating-a-file-r-23-and-not-creating-one)).
 
-One of those costs bites specifically here: an `add_owner` that is declared in some repos
-and amended in others produces **different owner sets**, because only the amended ones
-carry the catch-all owner onto the new rule. If the baseline is supposed to be identical,
-name the owners you want with `set_owners` instead of relying on that carry — otherwise
-you find it, as one reporter did, by diffing two output files against each other.
+`declare` buys an identical baseline at the cost of a weaker guarantee, plus one trap:
+an op declared in some repos and amended in others produces different owner sets. Both,
+with the `set_owners` remedy: [what `declare` costs](GUARANTEES.md#what-declare-costs).
+
+`max_paths_changed` (`--max-paths-changed N` with `--op`) ceilings the blast radius: a
+repo where the wave would move more ownership than anyone meant is refused — exit 2,
+nothing written, and the record keeps `paths_changed` so you can see what it would have
+been. Set it from the intent — a narrow wave changes dozens of files whether the repo
+has 500 files or 50,000 — and give a `*` baseline no ceiling, deliberately. Details in
+[POLICY-FILE.md](POLICY-FILE.md#the-blast-radius-ceiling-r-25).
 
 Check the policy before it reaches a single repo:
 
@@ -79,14 +52,9 @@ ok: policy.json — 3 op(s), no policy errors
 ```
 
 The echo is each op's *resolved* `on_zero_match`, so a `defaults` block that misses an op
-is visible before the first clone rather than after the hundredth.
-
-`check` reads no repo and writes nothing. It catches the problems that would fail
-identically on all 100, so you find them once instead of a hundred times.
+is visible before the first clone; `check` reads no repo and exits `0` or `3`, never `1`.
 
 ## The exit-code contract this depends on
-
-`sync` returns exactly three codes, never anything else:
 
 | Exit | Meaning | In a fleet script |
 |---|---|---|
@@ -94,28 +62,14 @@ identically on all 100, so you find them once instead of a hundred times.
 | 2 | **This repo** needs a human | record it, continue |
 | 3 | **The policy** is broken — it'll fail the same way everywhere | stop the run |
 
-That split is the whole contract: exit 3 is only ever for problems that have nothing to do
-with which repo you're standing in. `check` catches exactly that class, which is why
-running it first is worth the two seconds.
+`sync` returns exactly these three codes, never anything else. Exit 3 is only ever for
+problems that have nothing to do with which repo you're standing in — exactly the class
+`check` catches before the first clone.
 
-## Nor are the clones
-
-The repos differ; so does the state each clone is handed to the tool in. All of these are
-ordinary, and none of them changes a verdict:
-
-| Clone | What the tool does |
-|---|---|
-| Shallow (`--depth 1`, as above) | Works. Resolution reads the tree at `--branch`, which a shallow clone has. |
-| Detached HEAD (any CI checkout) | Works, on the default `--branch HEAD`. |
-| Default branch is `master`, or anything else | Works. Nothing here knows the name of your default branch. |
-| Freshly created, **no commits at all** | Exit 2, `"status": "error"` — there is no tree to read. Recorded, stepped over. |
-| Mid-merge or mid-rebase with **CODEOWNERS unmerged** | Exit 2, `"status": "refused"` — its bytes are both sides of the conflict. A conflict in any other file is fine. |
-
-`--branch` is the one to be careful with. It names the ref whose tree governs resolution,
-but the bytes are the working tree's, so writing while proving against a ref this clone
-does *not* have checked out is refused (exit 2, per repo). `--branch main` on a clone
-standing on `main` is fine — refs are compared by resolved commit, not by name. If you
-need the proof against another ref, add `--dry-run`, or use `plan`.
+Any ordinary clone state works — shallow, detached HEAD, any default-branch name; an
+empty repo or a mid-merge CODEOWNERS conflict is per-repo exit 2. `--branch` names the
+ref whose tree governs resolution while the bytes written are the working tree's, so a
+write proving against a ref not checked out here is refused; use `--dry-run` or `plan`.
 
 ## The script that survives a real rollout
 
@@ -124,7 +78,7 @@ need the proof against another ref, add `--dry-run`, or use `plan`.
 set -euo pipefail
 
 codeowners-tool check --policy policy.json     # fail on repo 0, not 100 times
-mkdir -p work bodies records
+mkdir -p work bodies records                   # outputs outside the clones, or a later `git add -A` commits them
 touch done.txt results.jsonl                   # jq at the end reads it even if every clone failed
 
 while read -r repo; do                         # repos.txt: one "org/name" per line
@@ -140,7 +94,8 @@ while read -r repo; do                         # repos.txt: one "org/name" per l
 
   code=0
   codeowners-tool sync --repo "work/$repo" --policy policy.json \
-    --format json --summary-out "bodies/${repo//\//__}.md" >> results.jsonl || code=$?
+    --format json --summary-out "bodies/${repo//\//__}.md" \
+    --out "records/${repo//\//__}.json" >> results.jsonl || code=$?
   case $code in
     # done.txt is the resume guard, so ONLY a converged repo goes in it. Marking
     # an exit-2 repo done as well retires it permanently: you fix the repo, re-run,
@@ -155,23 +110,18 @@ jq -s 'group_by(.status)|map({status:.[0].status, n:length})' results.jsonl
 wc -l done.txt needs-human clone-failed 2>/dev/null || true
 ```
 
-`check` exits `0` for a valid policy and `3` for a broken one — and never `1`. That
-matters under `set -e`: a valid policy lets the script proceed, a broken one stops it
-before the first clone, and there's no third case where a fine policy halts you for a
-non-error reason. Re-run it whenever you edit the policy; it's the only step that catches
-a mistake before it reaches a repo.
+Adding `--dry-run` to the `sync` line rehearses the whole fleet: no CODEOWNERS file
+changes, but the same records and summaries to review before the first real wave.
 
 ## Committing the change and opening the PR
 
-The tool never touches git, so the commit is yours to make — and *what to stage* is the
-part that differs per repo. Ownership lives in `.github/CODEOWNERS`, the root
-`CODEOWNERS`, or `docs/CODEOWNERS`, whichever GitHub would load, and across a hundred
-repos it is all three. Every record names the file that run actually wrote, under
-`codeowners_path`:
+The tool never touches git, so the commit is yours — and *what to stage* differs per
+repo: ownership lives in `.github/CODEOWNERS`, root `CODEOWNERS`, or `docs/CODEOWNERS`,
+and across a hundred repos it is all three. Each record names the file it wrote:
 
 ```bash
-# `select(.dry_run|not)`: a preview wave reports `applied` for what it WOULD write, so a
-# rehearsal's records must never reach the commit step.
+# Present only when the run changed the file — and a --dry-run record reports what it
+# WOULD write — so guard both, or `set -e` ends the rollout on an already-correct repo.
 file=$(jq -r 'select(.dry_run|not) | .codeowners_path // empty' "records/${repo//\//__}.json")
 [ -n "$file" ] || continue                     # nothing was written; nothing to commit
 
@@ -183,22 +133,8 @@ gh pr create --repo "$repo" --title 'chore: org baseline ownership' \
   --body-file "bodies/${repo//\//__}.md"
 ```
 
-That needs `--out "records/${repo//\//__}.json"` on the `sync` line (and a `mkdir -p
-records` beside the others), or pipe the same field out of `results.jsonl`. Staging the
-named file rather than `git add -A` is what keeps a stray build artifact — or the summary,
-if you wrote it inside the clone — out of a hundred PRs.
-
-The `// empty` guard is the load-bearing line. `codeowners_path` is emitted **only when
-the run changed the file** (or, under `--dry-run`, would have), so it is absent for the
-two outcomes most of your fleet will produce on a second wave — the repo that was already
-correct, and the repo the policy had nothing to say about. Without the guard those repos
-reach `git add` with nothing staged, `git commit` exits nonzero with "nothing to commit",
-and `set -euo pipefail` ends the rollout at a repo that was perfectly fine. `jq -r` would
-also hand you the string `null` as a path.
-
-The PR body from `--summary-out` names the same file, so a reviewer looking at one of a
-hundred near-identical PRs can see where that repo keeps its ownership before the diff
-means anything.
+Presence rules for `codeowners_path`: [JSON.md](JSON.md). The PR body from `--summary-out`
+names the same file, so a reviewer sees where that repo keeps its ownership before the diff.
 
 ## The CI gate afterwards
 
@@ -211,118 +147,46 @@ severity, or the rollout you just finished turns the fleet red:
     GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 ```
 
-Every op with `on_zero_match: declare` writes a rule that matches zero files — that is what
-a baseline *is* — and `audit` reports each one as A-4, a `warning` it labels report-only.
-With the default `--fail-on any`, the next push to every repo the rollout touched fails
-CI. `--fail-on error` still fails on the findings that mean something (a dead owner, an
-owner without write access, a second CODEOWNERS file, the 3 MB cliff) and still **prints
-every** finding, including the A-4s. It moves the gate, not the report. `--fail-on never`
-is the reporting-only mode for a dashboard job.
+A `declare`d rule matches zero files — that is what a baseline *is* — and `audit` reports
+each as A-4, a `warning`: the default `--fail-on any` fails the next push to every repo
+the rollout touched. `--fail-on error` moves the gate, not the report
+([AUDIT.md](AUDIT.md#audit-checks)).
 
-Inconclusive runs are a separate axis and `--fail-on` does not touch them: an unreachable
-API is exit 5 under every setting, because a check that could not run is not a finding
-whose severity you can weigh.
-
-## Repos the rollout should tell you about
-
-Five conditions do not stop a run — none is a reason to refuse a correct edit — but each
-leaves something a human should look at, so the run that read the file says so in
-`warnings`. They are independent, one repo can carry several, and they ride on any record
-whose file was read, including a `refused` one:
-
-- **A second CODEOWNERS file.** The right one was edited; the other still sits in the repo
-  looking authoritative and usually says something different (A-10).
-- **The file being edited is not the one GitHub reads.** Almost always a `--file` pointed
-  at the wrong location. The rules land in a file GitHub never loads, so the rollout
-  reports success and moves no ownership at all.
-- **The file being edited is not committed.** Discovery falls back to the working tree, so
-  a CODEOWNERS a provisioning script dropped in — or one yesterday's pass created — is
-  amended and reported `applied` while GitHub still reads none from that repo; commit it.
-  (One the repo's ignore rules forbid committing is refused instead, exit 2.)
-- **Lines GitHub cannot parse.** It skips them individually and honors the rest (S-3), so
-  the change is correct and those lines are left exactly as they were — but some paths in
-  that repo are owned by nobody, and the reason is a line this run just read.
-- **A comment naming an owner you just renamed.** `rename_owner` substitutes owner tokens
-  and never edits prose, so `# @org/acq owns the pipeline` survives a rename of
-  `@org/acq` and now points at a team that no longer exists. Nothing else finds these —
-  `audit` does not read comments, and the handle is gone, so no lookup will trip on it.
-
-```sh
-jq -r 'select(.warnings) | "\(.repo)\t\(.warnings|join("; "))"' results.jsonl
-```
-
-They also land in the PR body under **Worth a look**, where they get fixed: the PR is the
-one moment somebody is already reading that file.
-
-## Owning less than you could
-
-A rollout's failure mode is not only "it didn't apply" but "it applied to more than anyone
-meant". Three things keep a wave narrow:
-
-**`"create": true` in the policy (or `--create` with `--op`) is permission, not
-instruction.** A repo where every op skips gets no file, no `.github/` directory,
-`"status": "skipped"`, no `codeowners_path` — nothing to commit, and the repo still answers
-"no CODEOWNERS yet" to whoever asks next. An empty file would answer *done* forever.
-
-**Unclaimed paths stay unclaimed.** Ownership covers exactly the scopes your ops name; no
-`*` catch-all is synthesized to make coverage look complete. Afterwards `audit --checks a9
---fail-on never` lists what nobody owns — a report, not a failure. In a snapshot `null`
-means no rule matched and `[]` means one matched and owns nobody (S-9): gap vs decision.
-
-**A ceiling on the blast radius.** `max_paths_changed` in the policy (or
-`--max-paths-changed N` with `--op`) refuses any repo where the wave would move more
-ownership than you expected. It gates `sync`, which is the verb a rollout loops over;
-`plan`/`apply` is the deliberate two-step path where a human reads the artifact before
-anything is written, and it is not ceilinged:
-
-```json
-{ "version": 1, "max_paths_changed": 500, "ops": ["add_owner(/services/api/, @org/api-team)"] }
-```
-
-Exit 2, nothing written, and the record keeps `paths_changed` so you can see what it
-would have been. Use an absolute number and set it from the intent: a narrow wave should
-change dozens of files whether the repo has 500 files or 50,000, so a repo where it wants
-4,000 is telling you something. A `*` baseline is the wave that genuinely scales with repo
-size — give that one no ceiling, deliberately.
+Unclaimed paths stay unclaimed — no `*` catch-all is synthesized — and
+`audit --checks a9 --fail-on never` reports what nobody owns without failing anything.
 
 ## What's left at the end
 
-Two piles.
-
 **`clone-failed`** is infrastructure — re-run the loop against just that list.
 
-Re-run the whole loop after fixing anything in `needs-human`: converged repos are
-skipped by the resume guard, and the repos you fixed are picked up.
-
-**`needs-human`** is the interesting one, and it holds two different jobs. Split it on
-`.status` before you start triaging:
+**`needs-human`** holds two different jobs; split it on `.status` before triaging:
 
 ```sh
 jq -r 'select(.status=="refused") | .repo' results.jsonl   # a CODEOWNERS decision
 jq -r 'select(.status=="error")   | .repo' results.jsonl   # a clone that could not be read
 ```
 
-`refused` means the tool read the repository and declined: run `sync --dry-run` locally to
-see the refusal, then either restructure that repo's CODEOWNERS so the intent becomes
-expressible (usually: replace the over-broad rule the error names with narrower ones), or
-accept that this repo is a legitimate exception and drop it from `repos.txt`. `error`
-means it never got that far — an empty repository, a bad `--branch`, a clone that is not a
-repository — and belongs with `clone-failed`.
+`refused` means the tool read the repository and declined: run `sync --dry-run` locally
+to see why, then restructure that repo's CODEOWNERS (usually: replace the over-broad rule
+the error names with narrower ones) or drop it from `repos.txt` as a legitimate
+exception. `error` never got that far — an empty repository, a bad `--branch` — and
+belongs with `clone-failed`. After fixes, re-run the whole loop; the resume guard skips
+what converged.
 
-`--format json` prints one line per repo so `jq` can aggregate the fleet. `--summary-out`
-writes a markdown summary suitable for a PR body — keep it outside the clone, or
-`git add -A` will commit it. Add `--dry-run` for a preview of the whole fleet: it changes
-no CODEOWNERS file, but still emits the JSON and the summaries so there's something to
-review.
+**`warnings`** is what a human should look at in a repo the tool did not refuse over — a
+second CODEOWNERS file, an edit landing in a file GitHub doesn't read or git never
+committed, lines GitHub silently skips, a stale comment after a `rename_owner`.
+Catalogued in [JSON.md](JSON.md), rendered into the PR body under **Worth a look**, and
+surfaced fleet-wide with:
+
+```sh
+jq -r 'select(.warnings) | "\(.repo)\t\(.warnings|join("; "))"' results.jsonl
+```
 
 ## The `jq` habit worth having
 
-Project `.ops_skipped` too. A policy with one typo'd path prefix skips on every repo, and
-grouping on `.status` alone shows a reassuring wall of `skipped` rows that reads like
-success.
-
-More generally, `ops_applied + ops_skipped` does **not** have to equal your op count — an
-op that was already satisfied is `unchanged` and counted by neither. To ask "is this op
+Project `.ops_skipped` too: a policy with one typo'd path prefix skips on every repo, and
+`.status` alone then shows a reassuring wall of `skipped` rows. To ask "is this op
 reaching any repo at all", count it out of `.ops[]`:
 
 ```sh
@@ -330,11 +194,6 @@ jq -s '[.[] | (.ops // [])[]] | group_by(.op) | map({op: .[0].op, n: length,
         applied: (map(select(.status=="applied")) | length)})' results.jsonl
 ```
 
-Note the `// []`. Keys with nothing in them are **omitted entirely** rather than emitted
-empty — that applies to `ops`, `warnings` and `changes`. A repo refused before it was
-planned has no `.ops` at all, so the same query without the guard dies with `Cannot
-iterate over null` on the first repo that needed a human, which is the one you most wanted
-to see. (A repo refused by the R-25 ceiling is the exception: it was planned, so it keeps
-`.ops`, every entry reported `unchanged`.)
-
-Full JSON shape: [JSON.md](JSON.md).
+The `// []` guard is required — empty keys are omitted entirely, and a refused repo has
+no `.ops` at all — and `ops_applied + ops_skipped` need not equal your op count: an
+already-satisfied op is `unchanged`, counted by neither ([JSON.md](JSON.md)).
