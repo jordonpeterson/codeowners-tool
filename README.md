@@ -20,7 +20,7 @@ GitHub Enterprise Server.
 brew install jordonpeterson/tap/codeowners-tool
 ```
 
-In CI, `uses: jordonpeterson/codeowners-tool@v0`. Every other route — `curl | sh` with
+In CI, `uses: jordonpeterson/codeowners-tool@v1`. Every other route — `curl | sh` with
 build-provenance verification, direct download, `go install`, GHES, upgrading,
 uninstalling — is in **[docs/INSTALL.md](docs/INSTALL.md)**.
 

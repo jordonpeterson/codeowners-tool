@@ -98,7 +98,7 @@ Both are reported and both make the run exit 4.
 Gate on the **dry run**, not the writing run:
 
 ```yaml
-- uses: jordonpeterson/codeowners-tool@v0
+- uses: jordonpeterson/codeowners-tool@v1
 - run: codeowners-tool lint --dry-run --github-repo ${{ github.repository }}
   env:
     GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

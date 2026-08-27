@@ -7,7 +7,7 @@ branding:
 inputs:
   version:
     description: >-
-      Release to install, e.g. v0.0.28. "latest" always takes the newest
+      Release to install, e.g. v1.0.0. "latest" always takes the newest
       release, whatever the action is pinned at. Left empty (the default), a
       full-version pin installs exactly that release and any other ref takes
       the newest.

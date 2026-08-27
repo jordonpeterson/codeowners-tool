@@ -71,13 +71,13 @@ func TestAction_AnExplicitVersionOverridesTheActionTag(t *testing.T) {
 	}
 }
 
-// `uses: ...@v0` is the recommended pin and names no release, so the tag has to
+// `uses: ...@v1` is the recommended pin and names no release, so the tag has to
 // be resolved. Doing it through gh rather than an anonymous api.github.com call
 // matters on hosted runners: the anonymous limit is 60/hour per IP and runners
 // share addresses, so the resolution that only ever runs in CI is exactly the
 // one that must be authenticated.
 func TestAction_AMajorActionTagResolvesTheLatestReleaseThroughGH(t *testing.T) {
-	r := run{actionRef: "v0", withGH: true, ghTag: "v0.0.28", stubVersion: "v0.0.28"}.exec(t)
+	r := run{actionRef: "v1", withGH: true, ghTag: "v0.0.28", stubVersion: "v0.0.28"}.exec(t)
 	if r.exitCode != 0 {
 		t.Fatalf("setup.sh exited %d, want 0\n%s", r.exitCode, r)
 	}

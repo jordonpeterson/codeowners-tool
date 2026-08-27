@@ -28,7 +28,7 @@ brew install jordonpeterson/tap/codeowners-tool
 Add one step and the binary is on the `PATH` for every step after it:
 
 ```yaml
-- uses: jordonpeterson/codeowners-tool@v0
+- uses: jordonpeterson/codeowners-tool@v1
 - run: codeowners-tool lint --dry-run --github-repo ${{ github.repository }}
   env:
     GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -36,7 +36,7 @@ Add one step and the binary is on the `PATH` for every step after it:
 
 | Input | Effect |
 |---|---|
-| `version` | Release to install. Defaults to the tag the action is pinned at: a full-version pin installs exactly that release, `@v0` takes the newest. Set it to `latest` to float regardless of the pin. |
+| `version` | Release to install. Defaults to the tag the action is pinned at: a full-version pin installs exactly that release, `@v1` takes the newest. Set it to `latest` to float regardless of the pin. |
 | `provenance` | `auto` (default), `require`, or `skip` — see [below](#verifying-a-download). |
 | `install-dir` | Where to put the binary. Defaults to a directory under `RUNNER_TEMP`. |
 

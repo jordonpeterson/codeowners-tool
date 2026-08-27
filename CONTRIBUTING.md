@@ -54,8 +54,9 @@ Why the seed is fixed, and how to reach input the gate never visits:
 `internal/cli` documents seven; `sync`/`check` deliberately use a coarser
 three-code contract. Scripts depend on the difference between "this repo needs a
 human" (2) and "the policy is broken, stop the rollout" (3). Moving a failure
-between classes is a breaking change even with an identical message — the rule is
-that exit 3 is reachable only from facts independent of which repo you are in.
+between classes is a breaking change even with an identical message, and past
+`1.0.0` that means a major release — the rule is that exit 3 is reachable only
+from facts independent of which repo you are in.
 
 ## Vendored code
 
