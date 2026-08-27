@@ -51,6 +51,12 @@ type Op struct {
 	// tracked files AND the op will write (R-28): "" (== "require") |
 	// "require" | "allow". Policy object form only, like OnZeroMatch.
 	OnExceptZeroMatch string `json:"on_except_zero_match,omitempty"`
+	// OnUnowned selects behavior for in-scope paths that currently have no
+	// owner — unmatched, or matched by a rule listing zero owners (S-9):
+	// "" (== "assign") grants there as always; "skip" leaves them out of the
+	// op's effective scope, so a path any developer could approve stays that
+	// way (R-40). add_owner only; policy object form only, like OnZeroMatch.
+	OnUnowned string `json:"on_unowned,omitempty"`
 	// ID is a policy-file label used in results and errors; "" from --op.
 	ID string `json:"id,omitempty"`
 }
@@ -67,6 +73,14 @@ const (
 const (
 	ExceptZeroMatchRequire = "require"
 	ExceptZeroMatchAllow   = "allow"
+)
+
+// Unowned policies (R-40). Assign is the default and is today's behavior:
+// the zero value must keep every existing policy and --op run meaning what
+// it meant, exactly as OnZeroMatch's does.
+const (
+	UnownedAssign = "assign"
+	UnownedSkip   = "skip"
 )
 
 func (o Op) String() string { return o.Raw }
@@ -685,7 +699,14 @@ func StaticConflict(list []Op) error {
 // rollout — and a `declare`d rule lands at EOF where last-match-wins settles
 // the outcome, so there is no order ambiguity at all. Both go to plan.Build.
 func conditionalScope(op Op) bool {
-	return op.OnZeroMatch == ZeroMatchSkip || op.OnZeroMatch == ZeroMatchDeclare
+	// on_unowned=skip belongs here too (R-40): the op's effective scope is
+	// {in-scope paths that are owned}, a fact about each repo's CODEOWNERS.
+	// The same overlapping pair is order-dependent in a repo that owns
+	// something in the overlap and a clean skip in one that owns nothing, so
+	// refusing statically would halt a rollout over repos where the batch is
+	// fine — the exact miscall R-21's skip carved out of exit 3.
+	return op.OnZeroMatch == ZeroMatchSkip || op.OnZeroMatch == ZeroMatchDeclare ||
+		op.OnUnowned == UnownedSkip
 }
 
 // displacementWarning is appended to the R-8 remedy when running the broader op

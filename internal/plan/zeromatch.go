@@ -614,7 +614,7 @@ func warnDuplicateDeclaredPatterns(f *file.File, scope string, pl *Plan) {
 // opResultFor is R-24's per-op record. The fleet record is the only artifact of
 // an unattended run: "which repos lack Terraform" is answerable only if every
 // op reports itself, by id, in the order the policy lists them.
-func opResultFor(op ops.Op, skipped, declared, structural, changed bool) OpResult {
+func opResultFor(op ops.Op, skipped, openSkipped, declared, structural, changed bool) OpResult {
 	r := OpResult{ID: op.ID, Op: op.Raw}
 	if skipped {
 		// A skipped op must carry a reason — without it a fleet operator cannot
@@ -622,6 +622,15 @@ func opResultFor(op ops.Op, skipped, declared, structural, changed bool) OpResul
 		// skipped op proves nothing.
 		r.Status = "skipped"
 		r.Reason = fmt.Sprintf("scope %q matches zero tracked files and on_zero_match=skip (R-21)", op.Scope)
+		return r
+	}
+	if openSkipped {
+		// R-40's skip is the OTHER skip and must not share R-21's sentence:
+		// this scope exists in the repo, it just owns nothing — "which repos
+		// lack Terraform" and "which repos own nothing under /.github/" are
+		// different questions, answered by grouping on the reason.
+		r.Status = "skipped"
+		r.Reason = fmt.Sprintf("every tracked file in scope %q is currently unowned and on_unowned=skip — the grant applies nowhere here, and open paths stay open (R-40)", op.Scope)
 		return r
 	}
 	r.Status = "unchanged"

@@ -26,6 +26,10 @@ Real `sync --format json` output, abridged only in `changes`:
 when the result was checked against real files, `structural` when it wasn't — see
 [GUARANTEES.md](GUARANTEES.md#what-declare-costs).
 
+An op carrying `on_unowned: skip` also reports `left_open`: the sorted in-scope paths it
+deliberately did not grant because they had no owner (R-40). Additive and omitted when
+empty, so records from other ops are byte-identical to before the field existed.
+
 `codeowners_path` is the file this run wrote — one of the three locations in S-8, and
 which one differs per repo — so a fleet loop can stage exactly it instead of `git add -A`.
 

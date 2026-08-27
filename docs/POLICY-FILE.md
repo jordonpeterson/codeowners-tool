@@ -14,12 +14,13 @@ flags in [COMMANDS.md](COMMANDS.md).
 | `create` | top | no | Boolean. Permission to write a CODEOWNERS where the repo has none — the policy's spelling of `--create`, which is exit 3 alongside `--policy` (R-34). It amends the repo's governing CODEOWNERS wherever that lives and creates one only where there is none, so it is safe to leave set for a fleet where only some repos have a file; pinning `--file` to a location that outranks the governing file is refused (exit 2) rather than silently superseding it (S-8). |
 | `on_empty` | top | if any `remove_owner` | `error` \| `inherit` \| `unowned` |
 | `max_paths_changed` | top | no | R-25 ceiling, as a whole number of paths. Zero is legal and asserts the wave changes no ownership at all. |
-| `defaults` | top | no | Object supplying what an op does not state, so a 40-op baseline stays 40 strings (R-35). Accepts `on_zero_match` and `on_except_zero_match` only; a per-op value wins, and `check` echoes the resolved one. |
+| `defaults` | top | no | Object supplying what an op does not state, so a 40-op baseline stays 40 strings (R-35). Accepts `on_zero_match`, `on_except_zero_match` and `on_unowned` only; a per-op value wins, and `check` echoes the resolved one. |
 | `lint` | top | no | Object holding `lint`'s preferences — `remove_stale_paths` (boolean) and `on_empty` — so the repair policy is reviewed in the same artifact (R-36). `sync` ignores it and `lint` ignores `ops`, but **every command validates the whole file**. |
 | `op` | per op | yes | Op string, same syntax as `--op`. |
 | `id` | per op | no | Short label used in JSON results and error messages. |
 | `on_zero_match` | per op | no | `require` (default) \| `skip` \| `declare` |
 | `on_except_zero_match` | per op | no | `require` (default) \| `allow` — only on ops whose scope carries an `except` clause; governs an except pattern that matches zero tracked files ([OPERATIONS.md](OPERATIONS.md#except--carving-paths-out-of-a-scope-r-26r-32), R-28) |
+| `on_unowned` | per op | no | `assign` (default) \| `skip` — whether `add_owner` grants where no owner exists today; `skip` leaves open paths open ([OPERATIONS.md](OPERATIONS.md#on_unowned--leaving-open-paths-open-r-40), R-40) |
 | `owners` | per op | no | The op's owners as a JSON array — `["@org/a", "@org/b"]` — on an op string naming only its scope, equivalent to the `(scope, [owners])` spelling and exit 3 alongside it (R-39). Not on `rename_owner`. |
 | `except` | per op | no | Carve-out as a JSON array — `["/.github/CODEOWNERS"]` — equivalent to the `<scope> except <pat> …` string spelling, and exit 3 alongside it (R-37). Array elements need no delimiter escaping, so a space is written plainly: `"my dir/"`. |
 | `note` | per op | no | Reaches the PR reviewer via `--summary-out`. |
@@ -32,6 +33,9 @@ always ignored and can hold one.
 
 `on_zero_match` is rejected on `rename_owner` (its scope comes from current ownership, not
 a pattern) and `declare` is rejected on `remove_owner` (there is no rule to write).
+`on_unowned` is accepted only on `add_owner`, and `skip` never beside `declare` — a
+declared rule exists to own files that do not exist yet, which are unowned by definition
+(R-40).
 
 Ops in one batch must **commute**. Two ops whose scopes overlap on a path and whose order
 would change the outcome are refused rather than resolved by position (R-8):

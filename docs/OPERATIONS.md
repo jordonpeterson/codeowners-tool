@@ -108,6 +108,22 @@ already says `@org/sre` is `unchanged` at exit 0 with the file byte-identical �
 file's spelling wins**, because restyling a handle nobody asked to change would churn a
 diff on every repository in a fleet. Conversely a removal takes every spelling with it.
 
+### `on_unowned` — leaving open paths open (R-40)
+
+By default `add_owner` grants everywhere in scope, including paths no rule matches.
+`on_unowned: skip` drops every path with no current owner from the op's effective scope —
+a repo where only `build.gradle` is owned keeps everything else open for any reviewer,
+instead of handing it to the new owner. Both unmatched paths and paths matched by a
+zero-owner rule (S-9) count as open. `add_owner` only, policy form only, and never beside
+`on_zero_match: declare` (a declared rule exists to own files that do not exist yet).
+
+The scope is decided against the repo's state before the batch, so a sibling grant in the
+same run does not feed paths into a skipping op. If the restriction empties the effective
+scope the op reports `skipped`, with a reason distinct from R-21's; the paths left open
+are listed under `left_open` in the op's result either way. Note the convergence claim
+this changes: the fleet converges to "co-owns what was already owned", not "owns the
+scope everywhere" — the record, not the policy, says which paths that was per repo.
+
 ### Two reachability models, on purpose
 
 `remove_owner` is **path-scoped**: its scope is derived from tracked paths, so a rule whose

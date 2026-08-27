@@ -104,6 +104,14 @@ type OpResult struct {
 	// on_except_zero_match=allow, R-28).
 	Excepted        []ExceptedPath `json:"excepted,omitempty"`
 	ExceptUnmatched []string       `json:"except_unmatched,omitempty"`
+
+	// LeftOpen is R-40, additive and omitempty like Excepted: the tracked
+	// in-scope paths this op deliberately did not grant, because they had no
+	// owner and the op carries on_unowned=skip. Sorted, decided against the
+	// before-batch state. An excepted path never appears here — except is the
+	// stronger statement (out of scope whatever its state), and one path must
+	// not be reported under two reasons.
+	LeftOpen []string `json:"left_open,omitempty"`
 }
 
 // ExceptedPath is one carved-out path and who holds it after the batch — the
@@ -172,9 +180,28 @@ func Build(content []byte, tree []string, opList []ops.Op, opts Options) (*Plan,
 	exceptUnmatched := make([][]string, len(opList))
 	structural := make([]bool, len(opList))
 	skipped := make([]bool, len(opList))
+	openSkipped := make([]bool, len(opList))
+	leftOpen := make([][]string, len(opList))
 	declared := make([]bool, len(opList))
 	var allowWarnings []string
 	for i, op := range opList {
+		// R-40's two Build-level defenses, mirroring on_zero_match's: the
+		// struct is exported, so a library caller can put the field where the
+		// policy validator would have refused it — and silently running the
+		// default under a spelling that says otherwise is the failure class
+		// the strict parser exists to prevent. Both are facts about the op
+		// alone, so exit 3, identically on every repo.
+		switch op.OnUnowned {
+		case "", ops.UnownedAssign, ops.UnownedSkip:
+		default:
+			return nil, &InvalidError{Msg: fmt.Sprintf(
+				"unknown on_unowned value %q on %s; legal values are %q or %q",
+				op.OnUnowned, op.Raw, ops.UnownedAssign, ops.UnownedSkip)}
+		}
+		if op.OnUnowned != "" && op.Kind != ops.AddOwner {
+			return nil, &InvalidError{Msg: fmt.Sprintf(
+				"on_unowned is only meaningful on add_owner, and %s is not one (R-40): remove_owner cannot touch an open path, set_owners displaces owners by design, and rename_owner has no scope", op.Raw)}
+		}
 		set := map[string]bool{}
 		if op.Kind == ops.RenameOwner {
 			// R-21 never reaches a rename: its scope comes from current
@@ -240,6 +267,15 @@ func Build(content []byte, tree []string, opList []ops.Op, opts Options) (*Plan,
 						return nil, &InvalidError{Msg: fmt.Sprintf(
 							"on_zero_match=declare is meaningless on %s: there is no rule to remove an owner from (R-21)", op.Raw)}
 					}
+					if op.OnUnowned == ops.UnownedSkip {
+						// The R-30-shaped contradiction, restated for a library
+						// caller: a declared rule exists to own files that do
+						// not exist yet, which are unowned by definition, so
+						// declare and on_unowned=skip state opposite intents
+						// about the same paths (R-40).
+						return nil, &InvalidError{Msg: fmt.Sprintf(
+							"on_unowned=skip cannot be combined with on_zero_match=declare on %s: a declared rule exists to own files that do not exist yet, which are unowned by definition (R-40)", op.Raw)}
+					}
 					declared[i] = true
 				case ops.ZeroMatchRequire, "":
 					// "" and "require" are the same state, and this arm — not a
@@ -276,39 +312,73 @@ func Build(content []byte, tree []string, opList []ops.Op, opts Options) (*Plan,
 						"unknown on_zero_match value %q on %s; legal values are %q, %q, or %q",
 						op.OnZeroMatch, op.Raw, ops.ZeroMatchRequire, ops.ZeroMatchSkip, ops.ZeroMatchDeclare)}
 				}
-			} else if len(zeroPats) > 0 {
-				// R-28's second question, reached only when the op WILL write.
-				switch op.OnExceptZeroMatch {
-				case ops.ExceptZeroMatchAllow:
-					// Declare-class weakening of INV-1, marked like one: the
-					// grant goes in with no carve for the unmatched pattern,
-					// so nothing in this repo can verify the carve-out — the
-					// op is proven "structural", listed in except_unmatched
-					// (R-32), and warned about. No dead rule is written for
-					// the pattern (R-5).
-					exceptUnmatched[i] = zeroPats
-					structural[i] = true
-					for _, e := range zeroPats {
-						allowWarnings = append(allowWarnings, fmt.Sprintf(
-							"except pattern %q matches zero tracked files; on_except_zero_match=allow writes the grant with NO carve for it, so a matching file created later falls under the grant — a declare-class weakening of INV-1, marked proven=structural (R-28)", e))
+			} else {
+				if op.OnUnowned == ops.UnownedSkip {
+					// R-40: paths with no owner today — unmatched, or matched
+					// by a zero-owner rule (S-9) — leave the op's EFFECTIVE
+					// scope, exactly as except's mechanism works: everything
+					// downstream (R-8, synthesis, the INV-1/INV-2 gate, the
+					// ownership rows) ranges over the restricted set, so the
+					// existing invariants, not new machinery, prove the open
+					// paths untouched. Decided against the BEFORE-batch state,
+					// so a sibling grant in the same batch cannot feed paths
+					// into this op's scope and the batch stays deterministic
+					// in either order.
+					var open []string
+					for p := range set {
+						if len(beforeOwners[p]) == 0 {
+							open = append(open, p)
+							delete(set, p)
+						}
 					}
-				case ops.ExceptZeroMatchRequire, "":
-					// "" and "require" are one state, exactly as above. An
-					// except that bites nothing means the carve-out this
-					// policy promises does not exist here — in the motivating
-					// case, granting .github/ to a repo whose CODEOWNERS
-					// still sits at the root would reopen the S-8
-					// precedence-escalation hole for a later-created
-					// /.github/CODEOWNERS.
-					return nil, &RefusalError{Msg: fmt.Sprintf(
-						"refusing: except pattern %q matches zero tracked files — the carve-out this policy promises does not exist in this repo, and writing the grant without it would reopen the hole the except exists to close (R-28); normalize this repo first, or set on_except_zero_match=allow to accept the weakening", zeroPats[0])}
-				default:
-					// Same defense as on_zero_match: an unrecognized value is
-					// bad input that fails identically everywhere (exit 3),
-					// not a per-repo refusal masquerading as require.
-					return nil, &InvalidError{Msg: fmt.Sprintf(
-						"unknown on_except_zero_match value %q on %s; legal values are %q or %q",
-						op.OnExceptZeroMatch, op.Raw, ops.ExceptZeroMatchRequire, ops.ExceptZeroMatchAllow)}
+					sort.Strings(open)
+					leftOpen[i] = open
+					if len(set) == 0 {
+						// Emptied by the restriction: the op skips, under its
+						// own reason — this scope EXISTS here (R-5 was passed
+						// above), it just owns nothing, and a fleet operator
+						// must be able to tell the two skips apart.
+						openSkipped[i] = true
+					}
+				}
+				if len(set) > 0 && len(zeroPats) > 0 {
+					// R-28's second question, reached only when the op WILL
+					// write — which the R-40 restriction above may have just
+					// decided it will not: an op that writes nothing can
+					// reopen nothing, so an emptied op skips without
+					// consulting on_except_zero_match.
+					switch op.OnExceptZeroMatch {
+					case ops.ExceptZeroMatchAllow:
+						// Declare-class weakening of INV-1, marked like one: the
+						// grant goes in with no carve for the unmatched pattern,
+						// so nothing in this repo can verify the carve-out — the
+						// op is proven "structural", listed in except_unmatched
+						// (R-32), and warned about. No dead rule is written for
+						// the pattern (R-5).
+						exceptUnmatched[i] = zeroPats
+						structural[i] = true
+						for _, e := range zeroPats {
+							allowWarnings = append(allowWarnings, fmt.Sprintf(
+								"except pattern %q matches zero tracked files; on_except_zero_match=allow writes the grant with NO carve for it, so a matching file created later falls under the grant — a declare-class weakening of INV-1, marked proven=structural (R-28)", e))
+						}
+					case ops.ExceptZeroMatchRequire, "":
+						// "" and "require" are one state, exactly as above. An
+						// except that bites nothing means the carve-out this
+						// policy promises does not exist here — in the motivating
+						// case, granting .github/ to a repo whose CODEOWNERS
+						// still sits at the root would reopen the S-8
+						// precedence-escalation hole for a later-created
+						// /.github/CODEOWNERS.
+						return nil, &RefusalError{Msg: fmt.Sprintf(
+							"refusing: except pattern %q matches zero tracked files — the carve-out this policy promises does not exist in this repo, and writing the grant without it would reopen the hole the except exists to close (R-28); normalize this repo first, or set on_except_zero_match=allow to accept the weakening", zeroPats[0])}
+					default:
+						// Same defense as on_zero_match: an unrecognized value is
+						// bad input that fails identically everywhere (exit 3),
+						// not a per-repo refusal masquerading as require.
+						return nil, &InvalidError{Msg: fmt.Sprintf(
+							"unknown on_except_zero_match value %q on %s; legal values are %q or %q",
+							op.OnExceptZeroMatch, op.Raw, ops.ExceptZeroMatchRequire, ops.ExceptZeroMatchAllow)}
+					}
 				}
 			}
 		}
@@ -392,7 +462,7 @@ func Build(content []byte, tree []string, opList []ops.Op, opts Options) (*Plan,
 	// planned before this existed can start refusing now.
 	for i := 0; i < len(opList); i++ {
 		for j := i + 1; j < len(opList); j++ {
-			if skipped[i] || skipped[j] || (!declared[i] && !declared[j]) {
+			if skipped[i] || skipped[j] || openSkipped[i] || openSkipped[j] || (!declared[i] && !declared[j]) {
 				continue
 			}
 			// R-22b. The hazard above is two rules stacked at EOF, which needs
@@ -462,9 +532,9 @@ func Build(content []byte, tree []string, opList []ops.Op, opts Options) (*Plan,
 		mark := len(pl.Changes)
 		var err error
 		switch {
-		case skipped[i]:
-			// R-21: a skipped op changes nothing and does not stop the rest of
-			// the batch from applying.
+		case skipped[i] || openSkipped[i]:
+			// R-21/R-40: a skipped op changes nothing and does not stop the
+			// rest of the batch from applying.
 		case declared[i]:
 			err = synthDeclare(f, op, batch, &declares, pl)
 		default:
@@ -496,7 +566,15 @@ func Build(content []byte, tree []string, opList []ops.Op, opts Options) (*Plan,
 		if err != nil {
 			return nil, err
 		}
-		pl.OpResults = append(pl.OpResults, opResultFor(op, skipped[i], declared[i], structural[i], len(pl.Changes) > mark))
+		pl.OpResults = append(pl.OpResults, opResultFor(op, skipped[i], openSkipped[i], declared[i], structural[i], len(pl.Changes) > mark))
+	}
+
+	// R-40's disclosure, the R-32 shape: the paths this op deliberately did
+	// not grant, so a reviewer can see "these stayed open by policy" rather
+	// than silence. Populated before the converged early-return below, for
+	// R-19's reason — run 2 must keep disclosing what run 1 did.
+	for i := range opList {
+		pl.OpResults[i].LeftOpen = leftOpen[i]
 	}
 
 	// ASSERT: the gate. Serialize, RE-PARSE, and re-resolve over the real
@@ -1350,7 +1428,17 @@ func deriveIntersection(scope string, rule *file.Rule, scopeSet map[string]bool,
 		if !strings.HasPrefix(scope, "/") && !scopeContainedInRule(scope, rule.PatternText) {
 			return globScopeIntersect(scope, rule, scopeSet, tree)
 		}
-		return scope, true
+		if treeExact(scope, rule, scopeSet, tree) {
+			return scope, true
+		}
+		// Reachable only when the derive domain is NARROWER than the scope
+		// pattern's own matches: on_unowned=skip dropped open paths from it
+		// (R-40). Without R-40 the domain is exactly the scope's tracked
+		// matches — except adds its paths back via deriveDomain — so
+		// `subset` implies tree-exactness and this line is never hit; the
+		// guard therefore widens nothing that derived before. The verbatim
+		// scope would capture the dropped open paths, so fall through to the
+		// anchored shapes below, which intersectPattern proves per candidate.
 	}
 	prefix, ok := anchoredDirPrefix(scope)
 	if !ok {
