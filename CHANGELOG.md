@@ -4,11 +4,17 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); version
 are [semantic](https://semver.org/), with `MAJOR.MINOR` set by hand in `VERSION`
 and `PATCH` assigned by the release workflow.
 
-While the version is `0.x`, flag names, JSON record fields, and the exit-code
-contract may change in a minor release. Exit codes are what scripts depend on, so
-changes to which class a failure lands in are called out explicitly.
+From `1.0.0` on, flag names, JSON record fields, and the exit-code contract are
+stable within the major line: they may be added to in a minor release, never
+removed or repurposed. Exit codes are what scripts depend on, so moving a failure
+between classes is a major release and is called out explicitly either way.
 
 ## [Unreleased]
+
+## [1.0.0] - 2026-08-27
+
+Everything below accumulated across the `0.0` line; publishing it as `1.0.0` is
+what puts that interface under the compatibility promise above.
 
 ### Fixed (from five user-test personas driving the shipped binary)
 
@@ -330,7 +336,7 @@ changes to which class a failure lands in are called out explicitly.
   behavior. The `defaults` block carries it fleet-wide, `check` echoes the resolved
   value per op, and the op's result lists the paths deliberately left open under
   `left_open` (additive; absent on ops that never state the field).
-- **A composite GitHub Action: `uses: jordonpeterson/codeowners-tool@v0`.** The
+- **A composite GitHub Action: `uses: jordonpeterson/codeowners-tool@v1`.** The
   documented use of this tool is a CI gate, and nothing said how the binary reaches
   the runner: `go install` installs a Go toolchain to compile a dependency-free
   binary that was already built six ways at release time, and a hand-rolled
@@ -341,8 +347,8 @@ changes to which class a failure lands in are called out explicitly.
   hands off to `install.sh` — so there is one verified download path to audit
   rather than two. A full-version pin installs exactly that release: the action
   ships from this repository, so resolving a pinned tag to the newest build would
-  make it a pin in name only. Releases now also move the `v0` tag that pin resolves
-  through, without which every consumer on `@v0` would be frozen at the commit it
+  make it a pin in name only. Releases now also move the `v1` tag that pin resolves
+  through, without which every consumer on `@v1` would be frozen at the commit it
   first pointed at.
 - **`--max-paths-changed N` / `max_paths_changed` (R-25)**, an opt-in ceiling on how much
   ownership one run may move. Over it, the run refuses (exit 2, per repo), writes nothing,

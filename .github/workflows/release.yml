@@ -7,8 +7,8 @@ name: Release
 #   - MAJOR.MINOR is read from the committed VERSION file and bumped MANUALLY
 #     (edit VERSION in a PR when you want a minor/major release).
 #   - PATCH auto-increments from the existing git tags on that MAJOR.MINOR line,
-#     starting at 1. So the first release is v0.0.1, then v0.0.2, ...; bumping
-#     VERSION to 0.1 restarts the line at v0.1.1.
+#     starting at 0. So bumping VERSION to 1.0 publishes v1.0.0, then v1.0.1, ...
+#     The v0.0 line predates this and opened at v0.0.1.
 #
 # Runs when a merge to main changes the binary — the command or its internal
 # packages, the module files, or the VERSION file (for a manual minor/major
@@ -94,7 +94,9 @@ jobs:
             | grep -E '^[0-9]+$' \
             | sort -n | tail -1 || true)"
           if [ -z "${latest_patch:-}" ]; then
-            patch=1
+            # A line opens at .0: v1.0.0 is the release a 1.0 announcement names,
+            # and starting at .1 would leave that tag pointing at nothing.
+            patch=0
           else
             patch=$((latest_patch + 1))
           fi
@@ -180,9 +182,9 @@ jobs:
             --title "${{ steps.ver.outputs.tag }}" \
             --generate-notes
 
-      # `uses: jordonpeterson/codeowners-tool@v0` resolves through the major tag,
+      # `uses: jordonpeterson/codeowners-tool@v1` resolves through the major tag,
       # which is the pin the docs recommend and the only one that picks up fixes.
-      # Nothing else moves it: without this step every consumer on @v0 stays on
+      # Nothing else moves it: without this step every consumer on @v1 stays on
       # whichever commit it first pointed at. Moved after the release is created,
       # so a release that failed to publish does not advance the pin.
       - name: Move the major tag onto this release

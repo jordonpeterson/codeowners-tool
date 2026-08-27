@@ -3,6 +3,13 @@
 What the tool proves, where a guarantee deliberately weakens, and the GitHub semantics it
 encodes.
 
+## Compatibility
+
+From `1.0.0`, flag names, JSON record fields and the exit-code contract are stable within
+the major line — added to in a minor release, never removed or repurposed. Moving a
+failure between exit classes is a major release, because that difference is what scripts
+branch on.
+
 ## The two invariants
 
 - **INV-1 (in scope):** after apply, every in-scope path resolves to exactly what the op

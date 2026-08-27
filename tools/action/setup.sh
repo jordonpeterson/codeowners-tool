@@ -80,12 +80,12 @@ elif [ -n "$requested" ]; then
   v*) version="$requested" ;;
   *) version="v$requested" ;;
   esac
-  is_tag "$version" || err "version must be a release tag like v0.0.28 or 'latest' (got '$requested'); see https://github.com/$REPO/releases"
+  is_tag "$version" || err "version must be a release tag like v1.0.0 or 'latest' (got '$requested'); see https://github.com/$REPO/releases"
 elif is_tag "${GITHUB_ACTION_REF:-}"; then
   version="$GITHUB_ACTION_REF"
 fi
 
-# `uses: ...@v0` names no release, so the tag has to be looked up. Through gh
+# `uses: ...@v1` names no release, so the tag has to be looked up. Through gh
 # rather than an anonymous api.github.com call: that limit is 60/hour per IP and
 # hosted runners share addresses, so the lookup that only ever runs in CI is the
 # one that must be authenticated. Where gh cannot answer, install.sh resolves

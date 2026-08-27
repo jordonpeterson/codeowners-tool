@@ -4,7 +4,7 @@
 #   curl -fsSL https://raw.githubusercontent.com/jordonpeterson/codeowners-tool/main/install.sh | sh
 #
 # Environment overrides:
-#   VERSION=v0.0.1   install a specific release (default: latest)
+#   VERSION=v1.0.0   install a specific release (default: latest)
 #   BINDIR=~/.local/bin   install location (default: /usr/local/bin)
 #   PROVENANCE=auto|require|skip   build-provenance check (default: auto)
 #
