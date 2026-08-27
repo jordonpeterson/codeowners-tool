@@ -11,6 +11,29 @@ between classes is a major release and is called out explicitly either way.
 
 ## [Unreleased]
 
+### Changed
+
+- **`on_zero_match: declare` and `on_unowned: skip` now compose (R-40b).** The pair was
+  refused at exit 3 on the reasoning that a declared rule owns files that do not exist
+  yet, "which are unowned by definition" — conflating *unowned* with *nonexistent*. A file
+  that does not exist is in no op's path universe (scope is derived from the tree), and the
+  two settings are the two arms of one branch: `declare` acts where the scope matches no
+  tracked file, `skip` on tracked files that have no owner. They can never speak about the
+  same path, so together they state one intent across two repo shapes — pre-own what does
+  not exist, never close what is open today — which the refusal made unstatable.
+  `on_zero_match: declare` alongside `except` (R-30) is a different rule and still refused:
+  there the declared line really does capture future files under the excepted pattern.
+
+  **Exit-code change:** a policy carrying both settings on one op moves exit 3 → runs. Two
+  shapes that were already legal also change, because the `defaults` block no longer holds
+  either setting back from an op stating the other. An op with `on_unowned: skip` under
+  `defaults: {"on_zero_match": "declare"}` previously ran as `require` and **refused
+  (exit 2)** in a repo whose scope matched nothing; it now declares and **exits 0**. An op
+  with `on_zero_match: declare` under `defaults: {"on_unowned": "skip"}` previously granted
+  to open paths and now leaves them open — different bytes in repos that have them. A
+  policy that never states `on_unowned` is unaffected in every respect.
+
+
 ## [1.0.0] - 2026-08-27
 
 Everything below accumulated across the `0.0` line; publishing it as `1.0.0` is
@@ -325,28 +348,6 @@ what puts that interface under the compatibility promise above.
   `GET /orgs/org` — 200, and a nonexistent team reported as valid. A `ref`
   containing `&` appended parameters nobody wrote; one containing a space failed
   to form a URL at all.
-
-### Changed
-
-- **`on_zero_match: declare` and `on_unowned: skip` now compose (R-40b).** The pair was
-  refused at exit 3 on the reasoning that a declared rule owns files that do not exist
-  yet, "which are unowned by definition" — conflating *unowned* with *nonexistent*. A file
-  that does not exist is in no op's path universe (scope is derived from the tree), and the
-  two settings are the two arms of one branch: `declare` acts where the scope matches no
-  tracked file, `skip` on tracked files that have no owner. They can never speak about the
-  same path, so together they state one intent across two repo shapes — pre-own what does
-  not exist, never close what is open today — which the refusal made unstatable.
-  `on_zero_match: declare` alongside `except` (R-30) is a different rule and still refused:
-  there the declared line really does capture future files under the excepted pattern.
-
-  **Exit-code change:** a policy carrying both settings on one op moves exit 3 → runs. Two
-  shapes that were already legal also change, because the `defaults` block no longer holds
-  either setting back from an op stating the other. An op with `on_unowned: skip` under
-  `defaults: {"on_zero_match": "declare"}` previously ran as `require` and **refused
-  (exit 2)** in a repo whose scope matched nothing; it now declares and **exits 0**. An op
-  with `on_zero_match: declare` under `defaults: {"on_unowned": "skip"}` previously granted
-  to open paths and now leaves them open — different bytes in repos that have them. A
-  policy that never states `on_unowned` is unaffected in every respect.
 
 ### Added
 
