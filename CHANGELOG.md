@@ -322,6 +322,20 @@ changes to which class a failure lands in are called out explicitly.
 
 ### Added
 
+- **A composite GitHub Action: `uses: jordonpeterson/codeowners-tool@v0`.** The
+  documented use of this tool is a CI gate, and nothing said how the binary reaches
+  the runner: `go install` installs a Go toolchain to compile a dependency-free
+  binary that was already built six ways at release time, and a hand-rolled
+  `curl | sh` step verifies provenance only on a runner where `gh` happens to be
+  signed in. The action installs a release and puts it on the `PATH`, and verifies
+  provenance by default, because hosted runners ship `gh` and the action hands it a
+  token. It downloads nothing itself — it resolves which release to ask for and
+  hands off to `install.sh` — so there is one verified download path to audit
+  rather than two. A full-version pin installs exactly that release: the action
+  ships from this repository, so resolving a pinned tag to the newest build would
+  make it a pin in name only. Releases now also move the `v0` tag that pin resolves
+  through, without which every consumer on `@v0` would be frozen at the commit it
+  first pointed at.
 - **`--max-paths-changed N` / `max_paths_changed` (R-25)**, an opt-in ceiling on how much
   ownership one run may move. Over it, the run refuses (exit 2, per repo), writes nothing,
   and keeps `paths_changed` in the record so the operator can see what it would have been.

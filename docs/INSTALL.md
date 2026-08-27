@@ -3,6 +3,7 @@
 Every release ships Linux, macOS, and Windows builds for both amd64 and arm64.
 
 - [Homebrew](#homebrew) — the short one
+- [GitHub Actions](#github-actions) — for CI
 - [Install script](#install-script) — for a machine with nothing on it
 - [Direct download](#direct-download)
 - [From source](#from-source)
@@ -21,6 +22,30 @@ brew install jordonpeterson/tap/codeowners-tool
 > Homebrew derives its `sha256` from `checksums.txt`, so `brew install` inherits the
 > weaker of the two guarantees below. Verify the attestation directly if that matters to
 > you.
+
+## GitHub Actions
+
+Add one step and the binary is on the `PATH` for every step after it:
+
+```yaml
+- uses: jordonpeterson/codeowners-tool@v0
+- run: codeowners-tool lint --dry-run --github-repo ${{ github.repository }}
+  env:
+    GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+```
+
+| Input | Effect |
+|---|---|
+| `version` | Release to install. Defaults to the tag the action is pinned at: a full-version pin installs exactly that release, `@v0` takes the newest. Set it to `latest` to float regardless of the pin. |
+| `provenance` | `auto` (default), `require`, or `skip` — see [below](#verifying-a-download). |
+| `install-dir` | Where to put the binary. Defaults to a directory under `RUNNER_TEMP`. |
+
+It outputs `version` (the build actually installed) and `path`. Unlike `curl | sh` on a
+laptop, provenance here is verified by default: hosted runners ship `gh`, and the action
+hands it a token.
+
+Linux and macOS runners. On Windows, download the `.zip`
+[from the release](#direct-download) in a `run:` step.
 
 ## Install script
 
