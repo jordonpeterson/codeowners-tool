@@ -114,8 +114,25 @@ By default `add_owner` grants everywhere in scope, including paths no rule match
 `on_unowned: skip` drops every path with no current owner from the op's effective scope —
 a repo where only `build.gradle` is owned keeps everything else open for any reviewer,
 instead of handing it to the new owner. Both unmatched paths and paths matched by a
-zero-owner rule (S-9) count as open. `add_owner` only, policy form only, and never beside
-`on_zero_match: declare` (a declared rule exists to own files that do not exist yet).
+zero-owner rule (S-9) count as open. `add_owner` only, policy form only.
+
+It composes with `on_zero_match`, `declare` included (R-40b), because the two answer
+questions about disjoint sets of paths — `declare` where the scope matches **no** tracked
+file, `skip` on the tracked files that have **no owner**. Together they state the rule in
+one line: pre-own what does not exist, never close what is open today.
+
+```json
+{ "op": "add_owner(/.github/, @org/platform)", "on_zero_match": "declare", "on_unowned": "skip" }
+```
+
+| Repo | Outcome |
+|---|---|
+| no `/.github/` | rule declared for the future (`proven: structural`) |
+| `/.github/`, some owned | grant lands on the owned paths only |
+| `/.github/`, all open | `skipped`; no rule written, so nothing is closed |
+
+The third row is a limit of the format, not a choice: CODEOWNERS has no negation (S-2), so
+no single line covers future files in a directory without also capturing today's open ones.
 
 The scope is decided against the repo's state before the batch, so a sibling grant in the
 same run does not feed paths into a skipping op. If the restriction empties the effective

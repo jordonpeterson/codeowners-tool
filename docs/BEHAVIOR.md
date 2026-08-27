@@ -4084,6 +4084,16 @@ The control matters as much as the refusals: an ordinary email owner is
 legal in the array (R-13), and an implementation that refused every email to
 be safe would break the one owner form GitHub allows for individuals.
 
+### `TestR40b_FleetPolicyAcrossThreeRepoShapes`
+
+SPEC R-40b: the real fleet policy, run unchanged across the three repo
+shapes it must survive. One reviewed op, `declare` + `skip`, states the
+whole rule — pre-own what does not exist, never close what is open today —
+and each shape gets the outcome that rule implies, all at exit 0.
+
+This policy was exit 3 before the refusal lift: `check` halted the wave at
+repo 0, so none of these outcomes was reachable.
+
 ### `TestRecord_OpRunOmitsThePolicyKey`
 
 SPEC R-20/R-24: an `--op` run emits no `policy` key at all.
@@ -7687,6 +7697,19 @@ wider: a future .github/CODEOWNERX matches it, and so does a declared
 ADirectoryPrefix — a disjointness claim that the tree happens to satisfy
 and the pattern does not, which is a wrong write rather than a missed one.
 
+### `TestR40b_DeclareAndSkipComposeAcrossRepoShapes`
+
+SPEC R-40b: on_zero_match and on_unowned COMPOSE on one op, and the pair is
+the user-facing rule in one line — pre-own what does not exist, never close
+what is open today. They are the two arms of the same branch and range over
+disjoint domains, so no repo can consult both: where declare fires the scope
+matches no tracked file, and where skip fires it matches some.
+
+This was refused at exit 3 on the reasoning that files which do not exist
+are "unowned by definition" — but a nonexistent file is in no op's path
+universe, which is derived from the tree, so the two never spoke about one
+path. The refusal blocked precisely the policy the rule calls for.
+
 ### `TestRenameOwner_Global`
 
 rename_owner replaces the identifier everywhere; it cannot change any
@@ -8314,19 +8337,6 @@ SPEC R-40: bad values are rejected at load with the legal set enumerated,
 and a PRESENT-but-empty value is not the same as an absent one — "" states
 no decision while reading to a reviewer as though a choice was made.
 
-### `TestR40_ContradictoryDefaultsRejected`
-
-SPEC R-40/R-35: a defaults block stating BOTH on_zero_match=declare and
-on_unowned=skip is refused outright. For any op stating neither, the two
-defaults contradict — and which one silently won would be a decision nobody
-reviewed. The refusal is repo-independent: exit 3, caught by check.
-
-### `TestR40_DefaultedDeclareDoesNotReachSkipOp`
-
-SPEC R-40/R-35: a defaulted declare must not reach an op that explicitly
-states on_unowned=skip — the pair is the contradiction the per-op check
-refuses, and a default is applied only where the op can carry it (R-35e).
-
 ### `TestR40_DefaultsSupplyOnUnowned`
 
 SPEC R-40/R-35: `defaults` carries on_unowned, so a 40-op baseline states
@@ -8356,14 +8366,6 @@ SPEC R-40: the field is legal only on add_owner. remove_owner cannot touch
 an open path anyway, set_owners displaces owners by design, and
 rename_owner has no scope — accepting-and-ignoring the field on any of them
 is the same class of failure as a typo'd field name.
-
-### `TestR40_SkipRejectedBesideDeclare`
-
-SPEC R-40/R-30: skip cannot ride beside on_zero_match=declare. A declared
-rule exists to own files that do not exist yet — files that are by
-definition unowned when they appear — so the pair states two opposite
-intents about the same paths. Explicit "assign" beside declare is legal:
-it spells the default.
 
 ### `TestR35e_DefaultDeclareSkipsTheOpsThatRefuseIt`
 
@@ -8447,6 +8449,38 @@ by a bare space, and the string grammar splits that into two patterns.
 Observed before the fix, at exit 0 on a repo holding `my dir/x.txt` and
 `dir/y.txt`: a carve line for `dir/` — a directory nobody named — while
 `my dir/x.txt`, the path the carve existed for, stayed inside the grant.
+
+### `TestR40b_DefaultedDeclareReachesSkipOp`
+
+SPEC R-40b/R-35: a defaulted declare DOES reach an op that explicitly states
+on_unowned=skip. The exclusion existed only because the pairing was illegal
+— folding a default that produced a refusal would have failed a policy on a
+combination its author never wrote. With the pair legal, R-35's plain rule
+applies: the block fills in what the op did not state.
+
+This is the one behavior change of the lift that touches a policy which was
+already legal: before, the op ran under `require` and refused (exit 2) in a
+repo whose scope matched nothing; now it declares and exits 0.
+
+### `TestR40b_DefaultedSkipReachesDeclaredOp`
+
+SPEC R-40b/R-35: the mirror — a defaulted skip reaches an op that explicitly
+declares, for the same reason.
+
+### `TestR40b_DefaultsMayStateBoth`
+
+SPEC R-40b/R-35: a defaults block may state BOTH, and both reach every op
+that can carry them. One reviewed line then states the whole fleet posture:
+pre-own what does not exist, never close what is open today.
+
+### `TestR40b_SkipComposesWithDeclare`
+
+SPEC R-40b: skip rides beside on_zero_match=declare, and both land on the
+op. The pair ranges over disjoint domains — declare acts where the scope
+matches no tracked file, skip on tracked files with no owner — so it states
+one intent across two repo shapes: pre-own what does not exist, never close
+what is open today. It was refused on the reasoning that nonexistent files
+are "unowned by definition"; they are in no op's path universe at all.
 
 ## internal/resolve
 
@@ -8606,4 +8640,4 @@ twice and one tracked file vanished from the gate.
 
 ---
 
-816 documented test cases across 13 packages.
+819 documented test cases across 13 packages.

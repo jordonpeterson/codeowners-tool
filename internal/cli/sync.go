@@ -2019,12 +2019,9 @@ func resolvedUnowned(pol *policy.Policy, o ops.Op) (s resolvedSetting, stated bo
 		// treatment as a rename under on_zero_match (R-35e).
 		return resolvedSetting{Value: "n/a", Note: "only add_owner has an on_unowned"}, true
 	}
-	// The one add_owner the default does not reach: a declared op (R-40).
-	if o.OnZeroMatch == ops.ZeroMatchDeclare {
-		return resolvedSetting{Value: ops.UnownedAssign, Note: "built-in; the default does not reach a declared op"}, true
-	}
-	// Unreachable while the loader folds the default in, kept as the honest
-	// fallback for a caller that built the ops another way.
+	// Unreachable while the loader folds the default in — including onto a
+	// declared op, which the default now reaches (R-40b) — and kept as the
+	// honest fallback for a caller that built the ops another way.
 	return resolvedSetting{Value: ops.UnownedAssign, Note: "built-in"}, true
 }
 

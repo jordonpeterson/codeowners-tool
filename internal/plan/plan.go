@@ -202,18 +202,18 @@ func Build(content []byte, tree []string, opList []ops.Op, opts Options) (*Plan,
 			return nil, &InvalidError{Msg: fmt.Sprintf(
 				"on_unowned is only meaningful on add_owner, and %s is not one (R-40): remove_owner cannot touch an open path, set_owners displaces owners by design, and rename_owner has no scope", op.Raw)}
 		}
-		if op.OnUnowned == ops.UnownedSkip && op.OnZeroMatch == ops.ZeroMatchDeclare {
-			// The R-30-shaped contradiction, restated for a library caller: a
-			// declared rule exists to own files that do not exist yet, which
-			// are unowned by definition, so declare and on_unowned=skip state
-			// opposite intents about the same paths (R-40). Checked HERE,
-			// before the tree decides anything — nested under the zero-match
-			// branch it would fire only on repos where the scope matches
-			// nothing, and an exit-3 verdict that depends on the tree is the
-			// classification exit 3 exists to rule out (review finding).
-			return nil, &InvalidError{Msg: fmt.Sprintf(
-				"on_unowned=skip cannot be combined with on_zero_match=declare on %s: a declared rule exists to own files that do not exist yet, which are unowned by definition (R-40)", op.Raw)}
-		}
+		// on_zero_match and on_unowned COMPOSE (R-40b). They are the two arms
+		// of the `len(set) == 0` branch below and range over disjoint domains:
+		// declare acts where the scope matches NO tracked file, skip acts on
+		// tracked files that have no owner. An earlier refusal of the pair
+		// argued that files which do not exist are "unowned by definition" —
+		// but nonexistent files are not in any op's path universe, which is
+		// derived from `tree`. The two can never speak about the same path, so
+		// the pair states one intent per repo shape rather than two intents
+		// about one path: pre-own what does not exist, never close what is
+		// open today. Contrast R-30 (declare + except), still refused: there
+		// the declared line DOES capture future files under the excepted
+		// pattern, so that carve promise is void rather than vacuous.
 		set := map[string]bool{}
 		if op.Kind == ops.RenameOwner {
 			// R-21 never reaches a rename: its scope comes from current

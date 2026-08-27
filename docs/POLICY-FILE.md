@@ -33,9 +33,10 @@ always ignored and can hold one.
 
 `on_zero_match` is rejected on `rename_owner` (its scope comes from current ownership, not
 a pattern) and `declare` is rejected on `remove_owner` (there is no rule to write).
-`on_unowned` is accepted only on `add_owner`, and `skip` never beside `declare` — a
-declared rule exists to own files that do not exist yet, which are unowned by definition
-(R-40).
+`on_unowned` is accepted only on `add_owner`. It composes with every `on_zero_match`,
+`declare` included: the two range over disjoint domains — `declare` acts where the scope
+matches no tracked file, `skip` on tracked files with no owner — so the pair states one
+intent across two repo shapes (R-40b).
 
 Ops in one batch must **commute**. Two ops whose scopes overlap on a path and whose order
 would change the outcome are refused rather than resolved by position (R-8):

@@ -428,7 +428,6 @@ func (v *validator) defaults(p *Policy, m *member) {
 		v.at(val.off, -1, "", `field "defaults" must be an object holding the per-op settings this policy states once, like {"on_zero_match": "skip"}, got %s`, val.describe())
 		return
 	}
-	var zeroM, unownedM *member
 	for _, f := range val.members {
 		if ignoredKey(f.key) {
 			continue
@@ -437,7 +436,6 @@ func (v *validator) defaults(p *Policy, m *member) {
 		case "on_zero_match":
 			if s, ok := v.zeroMatch(f, -1, ""); ok {
 				p.Defaults.OnZeroMatch = s
-				zeroM = f
 			}
 		case "on_except_zero_match":
 			if s, ok := v.exceptZeroMatch(f, -1, ""); ok {
@@ -446,22 +444,17 @@ func (v *validator) defaults(p *Policy, m *member) {
 		case "on_unowned":
 			if s, ok := v.unowned(f, -1, ""); ok {
 				p.Defaults.OnUnowned = s
-				unownedM = f
 			}
 		default:
 			v.unknownDefaultsField(f)
 		}
 	}
-	// R-40: declare and skip defaulted TOGETHER is refused. For any op stating
-	// neither field the two contradict — declare pre-owns files that do not
-	// exist yet, skip declines to own even the ones that do — and which one
-	// silently won would be a decision nobody reviewed. Repo-independent, so
-	// exit 3, once, at repo 0.
-	if zeroM != nil && unownedM != nil &&
-		p.Defaults.OnZeroMatch == ops.ZeroMatchDeclare && p.Defaults.OnUnowned == ops.UnownedSkip {
-		v.at(unownedM.val.off, -1, "", `"defaults" cannot state both on_zero_match %q and on_unowned %q: for any op stating neither field the two contradict — declare writes a rule for files that do not exist yet, which are unowned by definition, while skip declines to own even the unowned files that do exist (R-40) — state one of them per op instead`,
-			ops.ZeroMatchDeclare, ops.UnownedSkip)
-	}
+	// on_zero_match: declare and on_unowned: skip are legal TOGETHER, here as
+	// on an op (R-40b): they range over disjoint domains — a repo whose scope
+	// matches nothing, and the tracked-but-unowned files of a repo whose scope
+	// matches something — so a block stating both says "pre-own what does not
+	// exist, never close what is open today", which is one intent covering two
+	// repo shapes rather than two intents about one path.
 }
 
 // unknownDefaultsField names the offending key AND the set the block accepts.
@@ -698,24 +691,23 @@ func (v *validator) op(p *Policy, i int, e *jsonValue) opInfo {
 	}
 	v.checkExceptLegality(zeroM, exceptM, parsed, zero, exceptArrOK, i, info.id)
 	if unownedM != nil && unownedOK {
-		v.checkUnownedLegality(unownedM, parsed.Kind, unowned, zero, i, info.id)
+		v.checkUnownedLegality(unownedM, parsed.Kind, i, info.id)
 	}
 
 	// R-35a/R-35e: the block fills in only what this op did not state, and only
-	// where this op can carry it. The two R-40 exclusions are symmetric: a
-	// defaulted declare must not land beside an explicit on_unowned=skip, and a
-	// defaulted skip must not land beside an explicit declare — either pairing
-	// is the contradiction checkUnownedLegality refuses when both are spelled
-	// out, and a default is applied only where the op can carry it.
-	if zeroM == nil && p.Defaults.OnZeroMatch != "" && zeroMatchReaches(parsed, p.Defaults.OnZeroMatch) &&
-		!(p.Defaults.OnZeroMatch == ops.ZeroMatchDeclare && unowned == ops.UnownedSkip) {
+	// where this op can carry it. Neither R-40 setting excludes the other any
+	// more (R-40b): the pair composes, so a defaulted declare lands beside an
+	// explicit on_unowned=skip and a defaulted skip lands beside an explicit
+	// declare. Both were held back only because the pairing used to be illegal
+	// — folding a default that produced a refusal would have failed a policy
+	// on a combination its author never wrote.
+	if zeroM == nil && p.Defaults.OnZeroMatch != "" && zeroMatchReaches(parsed, p.Defaults.OnZeroMatch) {
 		zero = p.Defaults.OnZeroMatch
 	}
 	if exceptM == nil && p.Defaults.OnExceptZeroMatch != "" && len(parsed.Except) > 0 {
 		exceptZero = p.Defaults.OnExceptZeroMatch
 	}
-	if unownedM == nil && p.Defaults.OnUnowned != "" &&
-		parsed.Kind == ops.AddOwner && zero != ops.ZeroMatchDeclare {
+	if unownedM == nil && p.Defaults.OnUnowned != "" && parsed.Kind == ops.AddOwner {
 		unowned = p.Defaults.OnUnowned
 	}
 
@@ -1176,14 +1168,16 @@ func (v *validator) unowned(m *member, i int, id string) (string, bool) {
 }
 
 // checkUnownedLegality enforces R-40's legality table, which depends only on
-// the op KIND and its zero-match policy — repo-independent facts, caught on
-// repo 0. The field is add_owner's alone: remove_owner cannot touch an open
-// path in the first place, set_owners displaces owners by design (a "only
-// where owned" set is a different intent, spelled as add_owner), and
-// rename_owner has no scope. skip beside declare is the R-30-shaped
-// contradiction: a declared rule exists to own files that do not exist yet,
-// which are unowned by definition.
-func (v *validator) checkUnownedLegality(m *member, kind ops.Kind, unowned, zero string, i int, id string) {
+// the op KIND — a repo-independent fact, caught on repo 0. The field is
+// add_owner's alone: remove_owner cannot touch an open path in the first
+// place, set_owners displaces owners by design (a "only where owned" set is a
+// different intent, spelled as add_owner), and rename_owner has no scope.
+//
+// The kind is the WHOLE table. on_zero_match no longer appears in it: skip
+// beside declare reads as an R-30-shaped contradiction and is not one, because
+// the two range over disjoint domains — declare acts where the scope matches
+// no tracked file, skip acts on tracked files with no owner (R-40b).
+func (v *validator) checkUnownedLegality(m *member, kind ops.Kind, i int, id string) {
 	switch kind {
 	case ops.RemoveOwner:
 		v.at(m.val.off, i, id, `field "on_unowned" is not meaningful on remove_owner: a path with no owner has nothing to remove, so the op already leaves open paths open — remove the field (R-40)`)
@@ -1191,11 +1185,6 @@ func (v *validator) checkUnownedLegality(m *member, kind ops.Kind, unowned, zero
 		v.at(m.val.off, i, id, `field "on_unowned" is not meaningful on set_owners: it REPLACES the owners of every path in scope by design, and "only where owned" is a different intent — spell it as add_owner (R-40)`)
 	case ops.RenameOwner:
 		v.at(m.val.off, i, id, `field "on_unowned" is not meaningful on rename_owner: its scope is derived from current ownership rather than from a pattern, so it can never reach an unowned path — remove the field (R-40)`)
-	case ops.AddOwner:
-		if unowned == ops.UnownedSkip && zero == ops.ZeroMatchDeclare {
-			v.at(m.val.off, i, id, `field "on_unowned" %q cannot be combined with on_zero_match %q: a declared rule exists to own files that do not exist yet, which are unowned by definition, so the two state opposite intents about the same paths (R-40) — drop one of them`,
-				ops.UnownedSkip, ops.ZeroMatchDeclare)
-		}
 	}
 }
 

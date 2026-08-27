@@ -342,12 +342,6 @@ func TestR40_BuildRefusesIllegalOnUnowned(t *testing.T) {
 		{"on remove_owner", uoOp{spec: "remove_owner(/x/, @a)", unowned: ops.UnownedSkip}, []string{"on_unowned", "add_owner"}},
 		{"on rename_owner", uoOp{spec: "rename_owner(@a, @b)", unowned: ops.UnownedSkip}, []string{"on_unowned", "add_owner"}},
 		{"unknown value", uoOp{spec: "add_owner(/x/, @p)", unowned: "SKIP"}, []string{"on_unowned", "assign", "skip"}},
-		{"skip with declare", uoOp{spec: "add_owner(/z/, @p)", unowned: ops.UnownedSkip, zero: ops.ZeroMatchDeclare}, []string{"on_unowned", "declare"}},
-		// The contradiction refuses BEFORE the tree decides anything: an op
-		// whose scope matches tracked files must get the same exit 3 as one
-		// whose scope matches nothing, or the "identically on every repo"
-		// contract of exit 3 breaks per repo (review finding).
-		{"skip with declare, scope matches", uoOp{spec: "add_owner(/x/, @p)", unowned: ops.UnownedSkip, zero: ops.ZeroMatchDeclare}, []string{"on_unowned", "declare"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -362,6 +356,71 @@ func TestR40_BuildRefusesIllegalOnUnowned(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// SPEC R-40b: on_zero_match and on_unowned COMPOSE on one op, and the pair is
+// the user-facing rule in one line — pre-own what does not exist, never close
+// what is open today. They are the two arms of the same branch and range over
+// disjoint domains, so no repo can consult both: where declare fires the scope
+// matches no tracked file, and where skip fires it matches some.
+//
+// This was refused at exit 3 on the reasoning that files which do not exist
+// are "unowned by definition" — but a nonexistent file is in no op's path
+// universe, which is derived from the tree, so the two never spoke about one
+// path. The refusal blocked precisely the policy the rule calls for.
+func TestR40b_DeclareAndSkipComposeAcrossRepoShapes(t *testing.T) {
+	op := uoOp{spec: "add_owner(/gh/, @p)", unowned: ops.UnownedSkip, zero: ops.ZeroMatchDeclare, id: "gh"}
+
+	// Shape 1 — the scope matches NO tracked file: declare writes the rule, so
+	// files created there later are owned. Nothing is open to protect.
+	p, err := buildUO(t, "/src/ @a\n", []string{"src/m.go"}, plan.Options{}, op)
+	if err != nil {
+		t.Fatalf("shape 1 (no /gh/): %v", err)
+	}
+	if !strings.Contains(p.AfterContent, "/gh/ @p") {
+		t.Errorf("shape 1 must declare the rule, got:\n%s", p.AfterContent)
+	}
+	if r := p.OpResults[0]; r.Status != "applied" || r.Proven != "structural" {
+		t.Errorf("shape 1 result = %+v, want applied/structural", r)
+	}
+	if p.OpResults[0].LeftOpen != nil {
+		t.Errorf("shape 1 LeftOpen = %v, want none: a declared op restricts nothing", p.OpResults[0].LeftOpen)
+	}
+
+	// Shape 2 — the scope matches files, some owned: declare cannot fire, and
+	// skip grants only where an owner exists.
+	tree := []string{"gh/owned.yml", "gh/open.yml"}
+	p, err = buildUO(t, "/gh/owned.yml @a\n", tree, plan.Options{}, op)
+	if err != nil {
+		t.Fatalf("shape 2 (mixed): %v", err)
+	}
+	after := plan.ResolveContent(p.AfterContent, tree)
+	got := after["gh/owned.yml"].Owners
+	sort.Strings(got)
+	if !reflect.DeepEqual(got, []string{"@a", "@p"}) {
+		t.Errorf("shape 2: gh/owned.yml owners = %v, want {@a, @p}", got)
+	}
+	if after["gh/open.yml"].Matched {
+		t.Error("shape 2: gh/open.yml must stay open — declare must not widen a skip op's scope")
+	}
+	if !reflect.DeepEqual(p.OpResults[0].LeftOpen, []string{"gh/open.yml"}) {
+		t.Errorf("shape 2: LeftOpen = %v, want the open path", p.OpResults[0].LeftOpen)
+	}
+
+	// Shape 3 — the scope matches files, ALL open: skip empties the op. No
+	// rule is written; declare must NOT step in and grant the whole directory,
+	// which is the failure mode that would silently close every open path.
+	p, err = buildUO(t, "/src/ @a\n", []string{"src/m.go", "gh/open.yml"}, plan.Options{}, op)
+	var noop *plan.NoOpError
+	if !errors.As(err, &noop) {
+		t.Fatalf("shape 3 (all open): want NoOpError, got %v", err)
+	}
+	if strings.Contains(p.AfterContent, "/gh/") {
+		t.Errorf("shape 3 must write NO rule for the scope, got:\n%s", p.AfterContent)
+	}
+	if r := p.OpResults[0]; r.Status != "skipped" || !strings.Contains(r.Reason, "on_unowned") {
+		t.Errorf("shape 3 result = %+v, want skipped with the on_unowned reason", r)
 	}
 }
 

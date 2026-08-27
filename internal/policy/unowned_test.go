@@ -73,20 +73,29 @@ func TestR40_OnUnownedRejectedOnOtherVerbs(t *testing.T) {
 	}
 }
 
-// SPEC R-40/R-30: skip cannot ride beside on_zero_match=declare. A declared
-// rule exists to own files that do not exist yet — files that are by
-// definition unowned when they appear — so the pair states two opposite
-// intents about the same paths. Explicit "assign" beside declare is legal:
-// it spells the default.
-func TestR40_SkipRejectedBesideDeclare(t *testing.T) {
-	err := mustReject(t, `{"version":1,"ops":[{"op":"add_owner(/x/, @a)","on_zero_match":"declare","on_unowned":"skip"}]}`)
-	assertMentions(t, err, "on_unowned", "declare")
-	assertNoGoInternals(t, err)
-
-	p := mustParse(t, `{"version":1,"ops":[{"op":"add_owner(/x/, @a)","on_zero_match":"declare","on_unowned":"assign"}]}`)
-	if p.Ops[0].OnUnowned != ops.UnownedAssign {
-		t.Errorf("OnUnowned = %q, want assign", p.Ops[0].OnUnowned)
+// SPEC R-40b: skip rides beside on_zero_match=declare, and both land on the
+// op. The pair ranges over disjoint domains — declare acts where the scope
+// matches no tracked file, skip on tracked files with no owner — so it states
+// one intent across two repo shapes: pre-own what does not exist, never close
+// what is open today. It was refused on the reasoning that nonexistent files
+// are "unowned by definition"; they are in no op's path universe at all.
+func TestR40b_SkipComposesWithDeclare(t *testing.T) {
+	for _, val := range []string{ops.UnownedAssign, ops.UnownedSkip} {
+		t.Run(val, func(t *testing.T) {
+			p := mustParse(t, `{"version":1,"ops":[{"op":"add_owner(/x/, @a)","on_zero_match":"declare","on_unowned":"`+val+`"}]}`)
+			if p.Ops[0].OnUnowned != val {
+				t.Errorf("OnUnowned = %q, want %q", p.Ops[0].OnUnowned, val)
+			}
+			if p.Ops[0].OnZeroMatch != ops.ZeroMatchDeclare {
+				t.Errorf("OnZeroMatch = %q, want declare — lifting the pair must not drop the other half", p.Ops[0].OnZeroMatch)
+			}
+		})
 	}
+	// R-30 is a different rule and stays: a declared line captures future
+	// files under the excepted pattern, so THAT carve promise is void.
+	err := mustReject(t, `{"version":1,"ops":[{"op":"add_owner(/x/ except /x/gen/, @a)","on_zero_match":"declare","on_unowned":"skip"}]}`)
+	assertMentions(t, err, "declare", "except")
+	assertNoGoInternals(t, err)
 }
 
 // SPEC R-40/R-35: `defaults` carries on_unowned, so a 40-op baseline states
@@ -102,7 +111,9 @@ func TestR40_DefaultsSupplyOnUnowned(t *testing.T) {
 		{"op":"add_owner(/g/, @g)","on_zero_match":"declare"}
 	]}`
 	p := mustParse(t, src)
-	want := []string{"skip", "assign", "", "", "", ""}
+	// The declared op (index 5) DOES receive the default now (R-40b): the two
+	// settings compose, so the block reaches every add_owner.
+	want := []string{"skip", "assign", "", "", "", "skip"}
 	for i, w := range want {
 		if got := p.Ops[i].OnUnowned; got != w {
 			t.Errorf("Ops[%d] (%s) OnUnowned = %q, want %q", i, p.Ops[i].Raw, got, w)
@@ -110,34 +121,57 @@ func TestR40_DefaultsSupplyOnUnowned(t *testing.T) {
 	}
 }
 
-// SPEC R-40/R-35: a defaulted declare must not reach an op that explicitly
-// states on_unowned=skip — the pair is the contradiction the per-op check
-// refuses, and a default is applied only where the op can carry it (R-35e).
-func TestR40_DefaultedDeclareDoesNotReachSkipOp(t *testing.T) {
+// SPEC R-40b/R-35: a defaulted declare DOES reach an op that explicitly states
+// on_unowned=skip. The exclusion existed only because the pairing was illegal
+// — folding a default that produced a refusal would have failed a policy on a
+// combination its author never wrote. With the pair legal, R-35's plain rule
+// applies: the block fills in what the op did not state.
+//
+// This is the one behavior change of the lift that touches a policy which was
+// already legal: before, the op ran under `require` and refused (exit 2) in a
+// repo whose scope matched nothing; now it declares and exits 0.
+func TestR40b_DefaultedDeclareReachesSkipOp(t *testing.T) {
 	src := `{"version":1,"defaults":{"on_zero_match":"declare"},"ops":[
 		"add_owner(/a/, @a)",
 		{"op":"add_owner(/b/, @b)","on_unowned":"skip"}
 	]}`
 	p := mustParse(t, src)
-	if p.Ops[0].OnZeroMatch != ops.ZeroMatchDeclare {
-		t.Errorf("Ops[0].OnZeroMatch = %q, want the defaulted declare", p.Ops[0].OnZeroMatch)
-	}
-	if p.Ops[1].OnZeroMatch != "" {
-		t.Errorf("Ops[1].OnZeroMatch = %q, want %q: declare cannot reach an op that skips open paths", p.Ops[1].OnZeroMatch, "")
+	for i := range p.Ops {
+		if p.Ops[i].OnZeroMatch != ops.ZeroMatchDeclare {
+			t.Errorf("Ops[%d].OnZeroMatch = %q, want the defaulted declare", i, p.Ops[i].OnZeroMatch)
+		}
 	}
 	if p.Ops[1].OnUnowned != ops.UnownedSkip {
-		t.Errorf("Ops[1].OnUnowned = %q, want skip", p.Ops[1].OnUnowned)
+		t.Errorf("Ops[1].OnUnowned = %q, want the op's own skip to survive", p.Ops[1].OnUnowned)
 	}
 }
 
-// SPEC R-40/R-35: a defaults block stating BOTH on_zero_match=declare and
-// on_unowned=skip is refused outright. For any op stating neither, the two
-// defaults contradict — and which one silently won would be a decision nobody
-// reviewed. The refusal is repo-independent: exit 3, caught by check.
-func TestR40_ContradictoryDefaultsRejected(t *testing.T) {
-	err := mustReject(t, `{"version":1,"defaults":{"on_zero_match":"declare","on_unowned":"skip"},"ops":["add_owner(/x/, @a)"]}`)
-	assertMentions(t, err, "on_unowned", "declare")
-	assertNoGoInternals(t, err)
+// SPEC R-40b/R-35: the mirror — a defaulted skip reaches an op that explicitly
+// declares, for the same reason.
+func TestR40b_DefaultedSkipReachesDeclaredOp(t *testing.T) {
+	src := `{"version":1,"defaults":{"on_unowned":"skip"},"ops":[
+		{"op":"add_owner(/b/, @b)","on_zero_match":"declare"}
+	]}`
+	p := mustParse(t, src)
+	if p.Ops[0].OnUnowned != ops.UnownedSkip {
+		t.Errorf("OnUnowned = %q, want the defaulted skip", p.Ops[0].OnUnowned)
+	}
+	if p.Ops[0].OnZeroMatch != ops.ZeroMatchDeclare {
+		t.Errorf("OnZeroMatch = %q, want the op's own declare", p.Ops[0].OnZeroMatch)
+	}
+}
+
+// SPEC R-40b/R-35: a defaults block may state BOTH, and both reach every op
+// that can carry them. One reviewed line then states the whole fleet posture:
+// pre-own what does not exist, never close what is open today.
+func TestR40b_DefaultsMayStateBoth(t *testing.T) {
+	p := mustParse(t, `{"version":1,"defaults":{"on_zero_match":"declare","on_unowned":"skip"},"ops":["add_owner(/x/, @a)"]}`)
+	if p.Ops[0].OnZeroMatch != ops.ZeroMatchDeclare || p.Ops[0].OnUnowned != ops.UnownedSkip {
+		t.Errorf("Ops[0] = {zero:%q unowned:%q}, want {declare skip}", p.Ops[0].OnZeroMatch, p.Ops[0].OnUnowned)
+	}
+	if p.Defaults.OnZeroMatch != ops.ZeroMatchDeclare || p.Defaults.OnUnowned != ops.UnownedSkip {
+		t.Errorf("Defaults = %+v, want both recorded", p.Defaults)
+	}
 }
 
 // SPEC R-40: a bad value inside defaults is rejected exactly as it is per-op

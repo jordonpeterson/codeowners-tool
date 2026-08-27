@@ -108,9 +108,9 @@ func TestR40_CheckCatchesBadOnUnowned(t *testing.T) {
 			`{"version":1,"ops":[{"id":"s","op":"set_owners(/x/, [@a])","on_unowned":"skip"}]}`,
 			[]string{"on_unowned", "add_owner"},
 		},
-		"beside declare": {
-			`{"version":1,"ops":[{"id":"d","op":"add_owner(/x/, @a)","on_zero_match":"declare","on_unowned":"skip"}]}`,
-			[]string{"on_unowned", "declare"},
+		"declare with except (R-30 stands)": {
+			`{"version":1,"ops":[{"id":"d","op":"add_owner(/x/ except /x/gen/, @a)","on_zero_match":"declare","on_unowned":"skip"}]}`,
+			[]string{"declare", "except"},
 		},
 	}
 	for name, tc := range cases {
@@ -169,7 +169,7 @@ func TestR40_CheckEchoesResolvedOnUnowned(t *testing.T) {
 	for _, want := range []string{
 		"ops[0]  on_zero_match: require (built-in); on_unowned: skip",
 		"b       on_zero_match: require (built-in); on_unowned: assign",
-		"d       on_zero_match: declare; on_unowned: assign (built-in; the default does not reach a declared op)",
+		"d       on_zero_match: declare; on_unowned: skip",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("check output missing %q:\n%s", want, out)
@@ -213,5 +213,78 @@ func TestR40_NightlyRerunConverges(t *testing.T) {
 		if got := syncReadFile(t, filepath.Join(repo, "CODEOWNERS")); got != first {
 			t.Errorf("run %d changed bytes:\n%s\nvs\n%s", run, first, got)
 		}
+	}
+}
+
+// SPEC R-40b: the real fleet policy, run unchanged across the three repo
+// shapes it must survive. One reviewed op, `declare` + `skip`, states the
+// whole rule — pre-own what does not exist, never close what is open today —
+// and each shape gets the outcome that rule implies, all at exit 0.
+//
+// This policy was exit 3 before the refusal lift: `check` halted the wave at
+// repo 0, so none of these outcomes was reachable.
+func TestR40b_FleetPolicyAcrossThreeRepoShapes(t *testing.T) {
+	pol := syncWritePolicy(t, `{"version":1,"create":true,"ops":[
+		{"id":"gh","op":"add_owner(/.github/, @org/platform)","on_zero_match":"declare","on_unowned":"skip"}
+	]}`)
+	if code, _, errOut := runCLI(t, "check", "--policy", pol); code != cli.ExitOK {
+		t.Fatalf("check: want exit 0, got %d\nstderr:\n%s", code, errOut)
+	}
+
+	// Shape 1 — no .github/ at all: the rule is declared for the future.
+	repo := initRepo(t, map[string]string{
+		"CODEOWNERS":  "/src/ @org/core\n",
+		"src/main.go": "package main\n",
+	})
+	code, out, errOut := runCLI(t, "sync", "--repo", repo, "--policy", pol, "--format", "json")
+	if code != cli.ExitOK {
+		t.Fatalf("shape 1: want exit 0, got %d\nstderr:\n%s", code, errOut)
+	}
+	pfWantFile(t, filepath.Join(repo, "CODEOWNERS"), "/src/ @org/core\n/.github/ @org/platform\n")
+	if rec := syncDecodeRecord(t, out); rec.Ops[0].Proven != "structural" {
+		t.Errorf("shape 1: proven = %q, want structural", rec.Ops[0].Proven)
+	}
+
+	// Shape 2 — .github/ with one owned file and one open: co-own the owned
+	// one, leave the open one open.
+	// No .github/CODEOWNERS in this fixture: it would become the GOVERNING
+	// file (S-8) and, being empty, would leave every path open — making this
+	// shape 3 by accident.
+	repo = initRepo(t, map[string]string{
+		"CODEOWNERS":               "/.github/dependabot.yml @org/admins\n",
+		".github/dependabot.yml":   "version: 2\n",
+		".github/workflows/ci.yml": "on: push\n",
+	})
+	code, out, errOut = runCLI(t, "sync", "--repo", repo, "--policy", pol, "--format", "json")
+	if code != cli.ExitOK {
+		t.Fatalf("shape 2: want exit 0, got %d\nstderr:\n%s", code, errOut)
+	}
+	rec := syncDecodeRecord(t, out)
+	if rec.Ops[0].Status != "applied" || rec.Ops[0].Proven != "tree" {
+		t.Errorf("shape 2: op = %+v, want applied/tree", rec.Ops[0])
+	}
+	if !reflect.DeepEqual(rec.Ops[0].LeftOpen, []string{".github/workflows/ci.yml"}) {
+		t.Errorf("shape 2: left_open = %v, want the workflow file", rec.Ops[0].LeftOpen)
+	}
+
+	// Shape 3 — .github/ exists and is entirely open: nothing is written, and
+	// the record says which paths stayed open. Declare must NOT step in here:
+	// a rule for the scope would close every one of them.
+	repo = initRepo(t, map[string]string{
+		"CODEOWNERS":               "/src/ @org/core\n",
+		"src/main.go":              "package main\n",
+		".github/workflows/ci.yml": "on: push\n",
+	})
+	code, out, errOut = runCLI(t, "sync", "--repo", repo, "--policy", pol, "--format", "json")
+	if code != cli.ExitOK {
+		t.Fatalf("shape 3: want exit 0, got %d\nstderr:\n%s", code, errOut)
+	}
+	pfWantFile(t, filepath.Join(repo, "CODEOWNERS"), "/src/ @org/core\n")
+	rec = syncDecodeRecord(t, out)
+	if rec.Status != cli.StatusSkipped {
+		t.Errorf("shape 3: status = %q, want skipped", rec.Status)
+	}
+	if !strings.Contains(rec.Ops[0].Reason, "on_unowned") {
+		t.Errorf("shape 3: reason = %q, want the on_unowned skip reason", rec.Ops[0].Reason)
 	}
 }
