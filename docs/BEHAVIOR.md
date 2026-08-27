@@ -942,6 +942,17 @@ a bare line deletion.
 > token is never a value the flag package can render. These tests pin both halves:
 > the secret never appears in output, and $GITHUB_TOKEN is still honored.
 
+**`unowned_test.go`**
+
+> R-40 end-to-end tests: `on_unowned` through check and sync, real repo,
+> real exit codes. Written ahead of the implementation.
+>
+> The motivating fleet: repos where only select files have owners (a
+> build.gradle, say). A blanket add_owner on /.github/ turned files any
+> developer could approve into files only the platform team could —
+> on_unowned=skip makes "co-own what is owned, leave open paths open" a
+> statable, reviewable intent.
+
 ### `TestApply_MatchingRepoFlagIsAccepted`
 
 Passing --repo that AGREES with the plan is the ordinary re-statement an
@@ -3073,6 +3084,49 @@ exists to fold against.
 The declare case is where an implementation that appended owners one at a
 time shows itself: two lines, or one line rewritten twice, in a repository
 where nothing tracked matches and structure is the whole proof (INV-6).
+
+### `TestR40_AllOpenRepoCreatesNothing`
+
+SPEC R-40/R-34: `create: true` composes — a repo with NO CODEOWNERS has
+every path open, so an all-skip policy creates nothing (an empty grant must
+not conjure a file, R-23), reports `skipped`, and exits 0. The same policy
+on a repo whose file owns something both applies and stays created:false.
+
+### `TestR40_CheckCatchesBadOnUnowned`
+
+SPEC R-40: a policy error is caught by `check` with no repository open —
+exit 3, naming the field, the op, and the legal set — and `sync` refuses
+identically before writing anything.
+
+### `TestR40_CheckEchoesResolvedOnUnowned`
+
+SPEC R-40/R-35b: `check` echoes the RESOLVED on_unowned beside the other
+per-op settings, so the reviewer sees the value in force at each op without
+folding the defaults block in their head — and a policy that never mentions
+the field keeps its pre-R-40 output byte for byte (the echo states only
+settings somebody asked about).
+
+### `TestR40_LeftOpenRendersInTextAndSummary`
+
+SPEC R-40 (by R-32's rule): the left-open facts render in EVERY format,
+not just JSON. The text output names each declined path under its op, and
+the PR summary — the artifact the reviewer actually reads — carries a
+"Left open" section, exactly as the carve-out facts do (review finding:
+the disclosure reached only --format json).
+
+### `TestR40_NightlyRerunConverges`
+
+SPEC R-40/R-19: nightly convergence. Run 1 applies; runs 2 and 3 report
+`unchanged` with byte-identical content — the skipped-open paths do not
+make a converged repo look like pending work, and they stay disclosed in
+`left_open` on every run (R-19's "run 2 keeps disclosing what run 1 did").
+
+### `TestR40_SyncSkipsOpenPaths`
+
+SPEC R-40: sync with on_unowned=skip grants only where an owner already
+exists. The owned file gains the co-owner; the open paths stay open — the
+record says which, under `left_open` — and a repo that owned nothing in
+scope reports `skipped` at exit 0 with the file untouched.
 
 ### `TestR22b_CheckCannotDecideDeclaredPairs`
 
@@ -6579,6 +6633,15 @@ line "a b @x" re-parses as pattern "a" owned by "b" — a different, valid
 rule that silently breaks both invariants (review finding). CODEOWNERS
 spells such patterns with escaped spaces, and so must ops.
 
+### `TestR40_StaticConflictDefersSkipUnownedOps`
+
+SPEC R-40/R-8: on_unowned=skip makes an op's effective scope depend on the
+repository's current ownership, so a provably-overlapping pair is
+order-dependent only in repos that actually own something in the overlap —
+a fact about the tree. Like on_zero_match=skip, the pair therefore belongs
+to plan.Build's per-repo exit 2, and StaticConflict must stand down rather
+than halt the whole rollout at exit 3.
+
 ### `TestSpelledKind_ReadsTheVerbBeforeTheOpParses`
 
 SPEC R-39c: SpelledKind reads the verb off text that may not parse yet, which
@@ -6846,6 +6909,18 @@ that owns nothing forever be written and called proven.
 > any other policy no rule is deleted, so divergence means a synthesis bug
 > (or a bad earlier batched edit) and must REFUSE — accepting it would
 > launder the error past the gate.
+
+**`unowned_test.go`**
+
+> These tests cover R-40 (on_unowned: assign | skip): an add_owner that leaves
+> open paths open. The motivating fleet: repos where only build.gradle has an
+> owner, where a blanket grant on /.github/ would turn files any developer
+> could approve into files only the new owner can — R-40 makes "co-own what is
+> already owned, own nothing new" a statable intent.
+>
+> "Open" is any path with no owner today: unmatched, or matched by a rule
+> listing zero owners (S-9). Both leave GitHub's code-owner review requirement
+> inert, which is the property the policy exists to preserve.
 
 **`zeromatch_test.go`**
 
@@ -7490,6 +7565,98 @@ accepted today. The refusal must cite R-8; a refusal citing R-5 means
 `declare` was never implemented and this test is passing for the wrong
 reason.
 
+### `TestR40_AllOpenScopeSkips`
+
+SPEC R-40: a scope whose every tracked file is open skips — status
+"skipped" with a reason naming on_unowned, nothing written. This is the
+fleet outcome: a repo that owns nothing under /.github/ is left exactly as
+it was, at exit 1's nothing-to-change.
+
+### `TestR40_BuildRefusesIllegalOnUnowned`
+
+SPEC R-40 (defense in depth): the struct is exported, so Build must refuse
+what the policy validator refuses — an on_unowned on a verb that cannot
+carry it, an unknown value, and skip alongside declare — rather than
+silently running the default under a spelling that says otherwise.
+
+### `TestR40_ComposesWithOnZeroMatchSkip`
+
+SPEC R-40/R-21: the two skips answer different questions and compose. A
+repo without the scope at all skips on zero-match; a repo with the scope
+but nothing owned in it skips on on_unowned; a repo with owned paths
+applies. One policy, three repos, three correct records.
+
+### `TestR40_EmptiedOpDoesNotConsultExceptZeroMatch`
+
+SPEC R-40: on_except_zero_match stays ordered AFTER the unowned question.
+An op emptied by the unowned restriction writes nothing, so an except
+pattern matching zero tracked files must not refuse the repo — an op that
+writes nothing can reopen nothing (R-28's own ordering, applied to R-40).
+
+### `TestR40_ExceptAndOnUnownedCompose`
+
+SPEC R-40/R-26: except and on_unowned compose — both subtract from the
+effective scope, for different reasons, and the record reports each under
+its own field. An excepted path is reported as excepted, never as left
+open: except is the stronger statement (deliberately out of scope whatever
+its state), and one path must not appear in two lists.
+
+### `TestR40_ExplicitZeroOwnerRuleCountsAsOpen`
+
+SPEC R-40/S-9: a path matched by a zero-owner rule is as open as an
+unmatched one — the rule states "nobody owns this", and on_unowned=skip must
+not overwrite that statement. The zero-owner line survives byte-for-byte.
+
+### `TestR40_MixedScopeGrantsOwnedAndLeavesOpenPathsOpen`
+
+SPEC R-40 (the core case): with on_unowned=skip, owned paths in scope gain
+the co-owner and open paths stay open — no rule is inserted for them, so a
+file every developer could approve yesterday is a file every developer can
+approve tomorrow.
+
+### `TestR40_NarrowingInsertStillWorksOverRestrictedScope`
+
+SPEC R-40/R-2: the narrowing machinery still works over the restricted
+scope. A rule that also governs out-of-scope paths gets a narrowing insert
+for the owned in-scope paths; out-of-scope resolution is untouched.
+
+### `TestR40_R8OverlapIsDecidedOverTheRestrictedScope`
+
+SPEC R-40/R-8: a skip-unowned add batched with a displacing set_owners is
+order-dependent exactly where they share an OWNED path — a per-repo fact
+(the same repo with /x/ fully open has no overlap and the batch is fine),
+so the refusal is the tree-based exit 2, not the static exit 3.
+
+### `TestR40_RepeatRunIsByteIdentical`
+
+SPEC R-40/R-19: a second run of the same policy over the produced file is a
+no-op, byte-identical. The owned path now carries the owner (nothing to
+add), the open paths are still open (still skipped) — idempotence is what
+makes the op safe on a nightly schedule.
+
+### `TestR40_ScopeIsDecidedAgainstBeforeBatchState`
+
+SPEC R-40: batch semantics are decided against the BEFORE state, so a
+sibling grant in the same batch does not feed paths into a skip-unowned
+op's scope. The batch is deterministic in either order (add ∘ add commutes,
+R-8), and the record shows which op declined the path.
+
+### `TestR40_UnmatchedExceptedPathStillRefusesWhenOpWrites`
+
+SPEC R-29 (pinned against R-40): the unconditional refusal for an excepted
+path that matches no rule survives on_unowned=skip — WHEN the op still
+writes. The refusal is deliberately not deferred to synthesis details, and
+skip-unowned is a synthesis-independent scope restriction, not a license to
+capture a path no carve can restore. Only an op the restriction empties
+outright escapes it, by writing nothing at all (see
+TestR40_EmptiedOpDoesNotConsultExceptZeroMatch).
+
+### `TestR40_ZeroValuePreservesGrantToOpenPaths`
+
+SPEC R-40 (compatibility): the zero value changes nothing. An op with no
+on_unowned grants open paths exactly as it always has — the scope rule is
+inserted before all existing rules and the open path gains the owner.
+
 ### `TestR22b_AnchoredExactFileScopeCommutesWithADeclare`
 
 SPEC R-22b: an anchored, wildcard-free scope naming one tracked file
@@ -7791,6 +7958,14 @@ rule.
 > Per-op zero-match (R-21) is validated here too, because whether an op may
 > carry `on_zero_match` at all depends only on the op kind — a repo-independent
 > fact, and therefore a policy error, caught on repo 0 rather than repo 47.
+
+**`unowned_test.go`**
+
+> These tests cover R-40's policy surface: the per-op `on_unowned` field
+> (assign | skip), its legality table (add_owner only, never beside declare),
+> and its defaults-block plumbing (R-35). Like on_zero_match, the field is
+> policy-only — the reviewed artifact, not a shell line, states that a wave
+> deliberately leaves open paths open.
 
 ### `TestBounds_AllocationIsLinearInInputSize`
 
@@ -8128,6 +8303,68 @@ carve, so the R-27.6 check reports `on_except_zero_match` as inapplicable —
 telling the operator to remove the one field that is not the problem. The
 reviewer's own reproduction printed both.
 
+### `TestR40_BadOnUnownedInDefaultsRejected`
+
+SPEC R-40: a bad value inside defaults is rejected exactly as it is per-op
+— a typo'd default is the WRONG default applied to every op at once.
+
+### `TestR40_BadOnUnownedValueRejected`
+
+SPEC R-40: bad values are rejected at load with the legal set enumerated,
+and a PRESENT-but-empty value is not the same as an absent one — "" states
+no decision while reading to a reviewer as though a choice was made.
+
+### `TestR40_ContradictoryDefaultsRejected`
+
+SPEC R-40/R-35: a defaults block stating BOTH on_zero_match=declare and
+on_unowned=skip is refused outright. For any op stating neither, the two
+defaults contradict — and which one silently won would be a decision nobody
+reviewed. The refusal is repo-independent: exit 3, caught by check.
+
+### `TestR40_DefaultedDeclareDoesNotReachSkipOp`
+
+SPEC R-40/R-35: a defaulted declare must not reach an op that explicitly
+states on_unowned=skip — the pair is the contradiction the per-op check
+refuses, and a default is applied only where the op can carry it (R-35e).
+
+### `TestR40_DefaultsSupplyOnUnowned`
+
+SPEC R-40/R-35: `defaults` carries on_unowned, so a 40-op baseline states
+"leave open paths open" once. It reaches only ops that can carry the field
+— add_owner without a declare — and a per-op value always wins.
+
+### `TestR40_LoadRoundTrip`
+
+SPEC R-40: check-level validation is load-level validation — a policy
+carrying the field parses identically through Load, so `check --policy`
+(which opens no repository) is the thing that catches every refusal above
+at repo 0. Sanity-check the happy path end to end.
+
+### `TestR40_NearMissTypoGetsAHint`
+
+SPEC R-40/R-20: the near-miss typo names the field it resembles, on the op
+and in defaults, so a generator drift is a one-edit fix rather than a hunt.
+
+### `TestR40_OnUnownedComesFromTheFile`
+
+SPEC R-40: the field parses on add_owner and lands on the op. An absent
+field is "", which plan.Build reads as assign — today's behavior.
+
+### `TestR40_OnUnownedRejectedOnOtherVerbs`
+
+SPEC R-40: the field is legal only on add_owner. remove_owner cannot touch
+an open path anyway, set_owners displaces owners by design, and
+rename_owner has no scope — accepting-and-ignoring the field on any of them
+is the same class of failure as a typo'd field name.
+
+### `TestR40_SkipRejectedBesideDeclare`
+
+SPEC R-40/R-30: skip cannot ride beside on_zero_match=declare. A declared
+rule exists to own files that do not exist yet — files that are by
+definition unowned when they appear — so the pair states two opposite
+intents about the same paths. Explicit "assign" beside declare is legal:
+it spells the default.
+
 ### `TestR35e_DefaultDeclareSkipsTheOpsThatRefuseIt`
 
 SPEC R-35e: a default reaches only the ops that can carry the VALUE, not
@@ -8369,4 +8606,4 @@ twice and one tracked file vanished from the gate.
 
 ---
 
-786 documented test cases across 13 packages.
+816 documented test cases across 13 packages.

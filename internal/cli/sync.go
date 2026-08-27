@@ -1627,6 +1627,13 @@ func renderRecordText(w io.Writer, rec SyncRecord) {
 		for _, pat := range o.ExceptUnmatched {
 			fmt.Fprintf(w, "    except %s matched no tracked file; the grant carries no carve for it (on_except_zero_match=allow)\n", pat)
 		}
+		// R-40, by R-32's rule: the left-open facts render in every format,
+		// not just JSON — the operator reading text output must see which
+		// paths a skip-unowned grant declined without re-running under
+		// --format json (review finding).
+		for _, p := range o.LeftOpen {
+			fmt.Fprintf(w, "    left open: %s had no owner, and this op declined to grant it (on_unowned=skip)\n", p)
+		}
 	}
 	if rec.Created {
 		fmt.Fprintln(w, "  created a new CODEOWNERS file")
@@ -1744,6 +1751,24 @@ func renderSummary(rec SyncRecord, r *syncRun) string {
 		b.WriteString(strings.Join(carve, "\n") + "\n")
 	}
 
+	// R-40, by the same rule as R-32 above: the PR reviewer is the audience
+	// the skip-unowned policy answers to, so the paths a grant deliberately
+	// declined have to be in the PR body, not only in results.jsonl.
+	var open []string
+	for i, o := range rec.Ops {
+		label := policy.OpLabel(o.ID, i)
+		for _, p := range o.LeftOpen {
+			open = append(open, fmt.Sprintf("- `%s`: `%s`", label, p))
+		}
+	}
+	if len(open) > 0 {
+		b.WriteString("\n## Left open (`on_unowned: skip`)\n\n")
+		b.WriteString("These paths had no owner when the run started, and the op declined to grant\n" +
+			"them (R-40) — any developer's review satisfies GitHub for them, unless a sibling\n" +
+			"op in this same run granted one (the ownership rows say which).\n\n")
+		b.WriteString(strings.Join(open, "\n") + "\n")
+	}
+
 	var structural []string
 	for i, o := range rec.Ops {
 		if o.Proven == "structural" {
@@ -1845,9 +1870,9 @@ func renderCheckOps(w io.Writer, pol *policy.Policy, list []ops.Op) {
 	if pol == nil {
 		return // --op carries no per-op settings, so there is nothing resolved to echo
 	}
-	echo := pol.Defaults.OnZeroMatch != "" || pol.Defaults.OnExceptZeroMatch != ""
+	echo := pol.Defaults.OnZeroMatch != "" || pol.Defaults.OnExceptZeroMatch != "" || pol.Defaults.OnUnowned != ""
 	for _, o := range list {
-		echo = echo || o.OnZeroMatch != "" || o.OnExceptZeroMatch != ""
+		echo = echo || o.OnZeroMatch != "" || o.OnExceptZeroMatch != "" || o.OnUnowned != ""
 	}
 	if !echo {
 		// No knob is set anywhere: every op runs under R-5's require, which the
@@ -1868,6 +1893,9 @@ func renderCheckOps(w io.Writer, pol *policy.Policy, list []ops.Op) {
 		// cannot have.
 		if len(o.Except) > 0 {
 			fmt.Fprintf(w, "; on_except_zero_match: %s", resolvedExceptZeroMatch(o))
+		}
+		if s, stated := resolvedUnowned(pol, o); stated {
+			fmt.Fprintf(w, "; on_unowned: %s", s)
 		}
 		fmt.Fprintln(w)
 	}
@@ -1908,6 +1936,11 @@ type checkResolvedOp struct {
 	OnZeroMatchNote       string `json:"on_zero_match_note,omitempty"`
 	OnExceptZeroMatch     string `json:"on_except_zero_match,omitempty"`
 	OnExceptZeroMatchNote string `json:"on_except_zero_match_note,omitempty"`
+	// on_unowned appears only when the policy states the field somewhere —
+	// per-op or in defaults — so a record from a policy that never mentions
+	// R-40 stays byte-identical to before the field existed.
+	OnUnowned     string `json:"on_unowned,omitempty"`
+	OnUnownedNote string `json:"on_unowned_note,omitempty"`
 }
 
 // resolvedOps is the JSON echo, one entry per op in policy order.
@@ -1930,6 +1963,9 @@ func resolvedOps(pol *policy.Policy, list []ops.Op) []checkResolvedOp {
 		if len(o.Except) > 0 {
 			except := resolvedExceptZeroMatch(o)
 			entry.OnExceptZeroMatch, entry.OnExceptZeroMatchNote = except.Value, except.Note
+		}
+		if s, stated := resolvedUnowned(pol, o); stated {
+			entry.OnUnowned, entry.OnUnownedNote = s.Value, s.Note
 		}
 		out = append(out, entry)
 	}
@@ -1963,6 +1999,33 @@ func resolvedExceptZeroMatch(o ops.Op) resolvedSetting {
 		return resolvedSetting{Value: o.OnExceptZeroMatch}
 	}
 	return resolvedSetting{Value: ops.ExceptZeroMatchRequire, Note: "built-in"}
+}
+
+// resolvedUnowned is what this op will do about open paths (R-40), after the
+// defaults block has been folded in by the loader. stated is false when the
+// policy never mentions the field — echoing "assign (built-in)" on every
+// add_owner of every pre-R-40 policy would change stable output to state a
+// setting nobody asked about.
+func resolvedUnowned(pol *policy.Policy, o ops.Op) (s resolvedSetting, stated bool) {
+	if o.OnUnowned != "" {
+		return resolvedSetting{Value: o.OnUnowned}, true
+	}
+	if pol.Defaults.OnUnowned == "" {
+		return resolvedSetting{}, false
+	}
+	if o.Kind != ops.AddOwner {
+		// R-40's legality table: the field is add_owner's alone, so the
+		// default cannot reach this op and no value is legal on it — same
+		// treatment as a rename under on_zero_match (R-35e).
+		return resolvedSetting{Value: "n/a", Note: "only add_owner has an on_unowned"}, true
+	}
+	// The one add_owner the default does not reach: a declared op (R-40).
+	if o.OnZeroMatch == ops.ZeroMatchDeclare {
+		return resolvedSetting{Value: ops.UnownedAssign, Note: "built-in; the default does not reach a declared op"}, true
+	}
+	// Unreachable while the loader folds the default in, kept as the honest
+	// fallback for a caller that built the ops another way.
+	return resolvedSetting{Value: ops.UnownedAssign, Note: "built-in"}, true
 }
 
 // lostAccess reduces the planner's ownership rows to the paths whose owner set
