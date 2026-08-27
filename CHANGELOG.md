@@ -322,6 +322,14 @@ changes to which class a failure lands in are called out explicitly.
 
 ### Added
 
+- **`on_unowned: assign | skip` (R-40)**, a per-op policy field on `add_owner` that
+  leaves open paths open. `skip` drops every in-scope path with no current owner —
+  unmatched, or matched by a zero-owner rule (S-9) — from the op's effective scope, so
+  a repo where only select files have owners keeps the rest reviewable by anyone
+  instead of handing it to the grantee. `assign` is the default and is exactly today's
+  behavior. The `defaults` block carries it fleet-wide, `check` echoes the resolved
+  value per op, and the op's result lists the paths deliberately left open under
+  `left_open` (additive; absent on ops that never state the field).
 - **A composite GitHub Action: `uses: jordonpeterson/codeowners-tool@v0`.** The
   documented use of this tool is a CI gate, and nothing said how the binary reaches
   the runner: `go install` installs a Go toolchain to compile a dependency-free
