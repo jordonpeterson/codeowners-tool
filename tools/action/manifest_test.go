@@ -160,14 +160,14 @@ func TestAction_ThirdPartyActionsInTheManifestArePinnedToACommitSHA(t *testing.T
 	}
 }
 
-// `uses: jordonpeterson/codeowners-tool@v0` is the pin the docs recommend, and it
-// resolves to whatever commit the v0 tag points at. Nothing moves that tag unless
-// the release does, so without this step every consumer on @v0 is frozen at the
+// `uses: jordonpeterson/codeowners-tool@v1` is the pin the docs recommend, and it
+// resolves to whatever commit the v1 tag points at. Nothing moves that tag unless
+// the release does, so without this step every consumer on @v1 is frozen at the
 // commit it first pointed to.
 func TestAction_ReleaseMovesTheMajorTagConsumersPin(t *testing.T) {
 	body := repoFile(t, releaseWorkflow)
 	if !strings.Contains(body, "git tag -f") && !strings.Contains(body, "git tag --force") {
-		t.Errorf("release.yml never force-moves a tag, so the major tag `uses: ...@v0` resolves through is never updated.\nConsumers pinned to it stay on the commit it first pointed at, and every action fix after that reaches nobody.")
+		t.Errorf("release.yml never force-moves a tag, so the major tag `uses: ...@v1` resolves through is never updated.\nConsumers pinned to it stay on the commit it first pointed at, and every action fix after that reaches nobody.")
 	}
 	if !strings.Contains(body, "--force") {
 		t.Errorf("release.yml moves a tag locally but never force-pushes it; the remote tag is what `uses:` resolves")
