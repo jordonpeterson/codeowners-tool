@@ -202,6 +202,19 @@ func Build(content []byte, tree []string, opList []ops.Op, opts Options) (*Plan,
 			return nil, &InvalidError{Msg: fmt.Sprintf(
 				"on_unowned is only meaningful on add_owner, and %s is not one (R-40): remove_owner cannot touch an open path, set_owners displaces owners by design, and rename_owner has no scope", op.Raw)}
 		}
+		// R-30, the same defense one rule over (review-bot finding). The
+		// policy validator refuses declare beside an except clause, but the
+		// struct is exported and nothing here re-stated it: a library caller's
+		// op reached the declare branch below, where synthDeclare writes the
+		// bare scope and never consults exceptSets — so the carve was dropped
+		// in silence and the declared line went on to govern the very paths
+		// the except existed to protect. Tree-independent, so exit 3, like its
+		// siblings above. It is also what makes the contrast drawn just below
+		// true at THIS layer rather than only in the validator.
+		if op.OnZeroMatch == ops.ZeroMatchDeclare && len(op.Except) > 0 {
+			return nil, &InvalidError{Msg: fmt.Sprintf(
+				"on_zero_match=declare cannot be combined with an except clause on %s: a declared rule is one literal CODEOWNERS line, and CODEOWNERS has no negation (S-2), so the line cannot encode subtraction (R-30)", op.Raw)}
+		}
 		// on_zero_match and on_unowned COMPOSE (R-40b). They are the two arms
 		// of the `len(set) == 0` branch below and range over disjoint domains:
 		// declare acts where the scope matches NO tracked file, skip acts on

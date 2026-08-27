@@ -7575,6 +7575,18 @@ accepted today. The refusal must cite R-8; a refusal citing R-5 means
 `declare` was never implemented and this test is passing for the wrong
 reason.
 
+### `TestR30_BuildRefusesDeclareWithExcept`
+
+SPEC R-30 (defense in depth, review-bot finding): Build refuses declare
+beside an except clause for a LIBRARY caller, as the policy validator does
+for a policy file. Nothing here re-stated the rule before, so such an op
+reached the declare branch, where synthDeclare writes the bare scope and
+never consults the excepted set — the carve vanished silently and the
+declared line governed exactly the paths it existed to protect.
+
+Tree-independent, so the verdict is the same on every repo: a scope that
+matches files and one that matches none both refuse.
+
 ### `TestR40_AllOpenScopeSkips`
 
 SPEC R-40: a scope whose every tracked file is open skips — status
@@ -8640,4 +8652,4 @@ twice and one tracked file vanished from the gate.
 
 ---
 
-819 documented test cases across 13 packages.
+820 documented test cases across 13 packages.

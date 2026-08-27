@@ -469,3 +469,36 @@ func TestR40_EmptiedOpDoesNotConsultExceptZeroMatch(t *testing.T) {
 		t.Errorf("status = %q, want skipped", s)
 	}
 }
+
+// SPEC R-30 (defense in depth, review-bot finding): Build refuses declare
+// beside an except clause for a LIBRARY caller, as the policy validator does
+// for a policy file. Nothing here re-stated the rule before, so such an op
+// reached the declare branch, where synthDeclare writes the bare scope and
+// never consults the excepted set — the carve vanished silently and the
+// declared line governed exactly the paths it existed to protect.
+//
+// Tree-independent, so the verdict is the same on every repo: a scope that
+// matches files and one that matches none both refuse.
+func TestR30_BuildRefusesDeclareWithExcept(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		tree []string
+	}{
+		{"scope matches nothing", []string{"src/m.go"}},
+		{"scope matches files", []string{"src/m.go", "gh/a.yml", "gh/gen/b.yml"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := buildUO(t, "/src/ @a\n", tc.tree, plan.Options{},
+				uoOp{spec: "add_owner(/gh/ except /gh/gen/, @p)", zero: ops.ZeroMatchDeclare})
+			var inv *plan.InvalidError
+			if !errors.As(err, &inv) {
+				t.Fatalf("want InvalidError (exit 3), got %v", err)
+			}
+			for _, w := range []string{"declare", "except", "R-30"} {
+				if !strings.Contains(err.Error(), w) {
+					t.Errorf("error must mention %q:\n%v", w, err)
+				}
+			}
+		})
+	}
+}
