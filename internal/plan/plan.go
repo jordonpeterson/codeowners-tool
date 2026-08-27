@@ -185,12 +185,12 @@ func Build(content []byte, tree []string, opList []ops.Op, opts Options) (*Plan,
 	declared := make([]bool, len(opList))
 	var allowWarnings []string
 	for i, op := range opList {
-		// R-40's two Build-level defenses, mirroring on_zero_match's: the
+		// R-40's Build-level defenses, mirroring on_zero_match's: the
 		// struct is exported, so a library caller can put the field where the
 		// policy validator would have refused it — and silently running the
 		// default under a spelling that says otherwise is the failure class
-		// the strict parser exists to prevent. Both are facts about the op
-		// alone, so exit 3, identically on every repo.
+		// the strict parser exists to prevent. All three are facts about the
+		// op alone, so exit 3, identically on every repo.
 		switch op.OnUnowned {
 		case "", ops.UnownedAssign, ops.UnownedSkip:
 		default:
@@ -201,6 +201,18 @@ func Build(content []byte, tree []string, opList []ops.Op, opts Options) (*Plan,
 		if op.OnUnowned != "" && op.Kind != ops.AddOwner {
 			return nil, &InvalidError{Msg: fmt.Sprintf(
 				"on_unowned is only meaningful on add_owner, and %s is not one (R-40): remove_owner cannot touch an open path, set_owners displaces owners by design, and rename_owner has no scope", op.Raw)}
+		}
+		if op.OnUnowned == ops.UnownedSkip && op.OnZeroMatch == ops.ZeroMatchDeclare {
+			// The R-30-shaped contradiction, restated for a library caller: a
+			// declared rule exists to own files that do not exist yet, which
+			// are unowned by definition, so declare and on_unowned=skip state
+			// opposite intents about the same paths (R-40). Checked HERE,
+			// before the tree decides anything — nested under the zero-match
+			// branch it would fire only on repos where the scope matches
+			// nothing, and an exit-3 verdict that depends on the tree is the
+			// classification exit 3 exists to rule out (review finding).
+			return nil, &InvalidError{Msg: fmt.Sprintf(
+				"on_unowned=skip cannot be combined with on_zero_match=declare on %s: a declared rule exists to own files that do not exist yet, which are unowned by definition (R-40)", op.Raw)}
 		}
 		set := map[string]bool{}
 		if op.Kind == ops.RenameOwner {
@@ -266,15 +278,6 @@ func Build(content []byte, tree []string, opList []ops.Op, opts Options) (*Plan,
 					if op.Kind == ops.RemoveOwner {
 						return nil, &InvalidError{Msg: fmt.Sprintf(
 							"on_zero_match=declare is meaningless on %s: there is no rule to remove an owner from (R-21)", op.Raw)}
-					}
-					if op.OnUnowned == ops.UnownedSkip {
-						// The R-30-shaped contradiction, restated for a library
-						// caller: a declared rule exists to own files that do
-						// not exist yet, which are unowned by definition, so
-						// declare and on_unowned=skip state opposite intents
-						// about the same paths (R-40).
-						return nil, &InvalidError{Msg: fmt.Sprintf(
-							"on_unowned=skip cannot be combined with on_zero_match=declare on %s: a declared rule exists to own files that do not exist yet, which are unowned by definition (R-40)", op.Raw)}
 					}
 					declared[i] = true
 				case ops.ZeroMatchRequire, "":

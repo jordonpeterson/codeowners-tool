@@ -127,6 +127,30 @@ func TestR40_CheckCatchesBadOnUnowned(t *testing.T) {
 	}
 }
 
+// SPEC R-40 (by R-32's rule): the left-open facts render in EVERY format,
+// not just JSON. The text output names each declined path under its op, and
+// the PR summary — the artifact the reviewer actually reads — carries a
+// "Left open" section, exactly as the carve-out facts do (review finding:
+// the disclosure reached only --format json).
+func TestR40_LeftOpenRendersInTextAndSummary(t *testing.T) {
+	pol := syncWritePolicy(t, `{"version":1,"ops":[{"id":"all","op":"add_owner(*, @org/platform)","on_unowned":"skip"}]}`)
+	repo := uoRepo(t)
+	sumPath := filepath.Join(t.TempDir(), "summary.md")
+	code, out, errOut := runCLI(t, "sync", "--repo", repo, "--policy", pol, "--summary-out", sumPath)
+	if code != cli.ExitOK {
+		t.Fatalf("sync: want exit 0, got %d\nstderr:\n%s", code, errOut)
+	}
+	if !strings.Contains(out, "left open: .github/workflows/ci.yml") ||
+		!strings.Contains(out, "left open: src/main.go") {
+		t.Errorf("text output must name each left-open path, got:\n%s", out)
+	}
+	sum := syncReadFile(t, sumPath)
+	if !strings.Contains(sum, "## Left open (`on_unowned: skip`)") ||
+		!strings.Contains(sum, "- `all`: `src/main.go`") {
+		t.Errorf("summary must carry the Left open section, got:\n%s", sum)
+	}
+}
+
 // SPEC R-40/R-35b: `check` echoes the RESOLVED on_unowned beside the other
 // per-op settings, so the reviewer sees the value in force at each op without
 // folding the defaults block in their head — and a policy that never mentions

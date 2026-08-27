@@ -122,7 +122,13 @@ func schemaWantKeys(t *testing.T, what string, got, want []string) {
 // schemaFullOpResult is an OpResult with every field populated, so no
 // omitempty tag can hide a field from the key enumeration.
 func schemaFullOpResult() plan.OpResult {
-	return plan.OpResult{ID: "tf", Op: "add_owner(**/*.tf, @org/infra)", Status: "skipped", Proven: "structural", Reason: "scope matched zero tracked files"}
+	// Every slice populated too: the R-32 fields rode in unpinned, and R-40's
+	// left_open must not repeat that (review finding).
+	return plan.OpResult{ID: "tf", Op: "add_owner(**/*.tf, @org/infra)", Status: "skipped", Proven: "structural", Reason: "scope matched zero tracked files",
+		Excepted:        []plan.ExceptedPath{{Path: "x/gen/g.go", Owners: []string{"@a"}}},
+		ExceptUnmatched: []string{"/x/ghost/"},
+		LeftOpen:        []string{"x/open.md"},
+	}
 }
 
 func schemaFullChange() plan.Change {
@@ -399,9 +405,13 @@ func TestR24_PerOpResultsRenderUnderOps(t *testing.T) {
 	}
 	schemaWantKeys(t, "sync record ops[0]", schemaTopLevelKeys(t, schemaFullOpResult()), []string{
 		"id", "op", "status", "proven", "reason",
+		"excepted", "except_unmatched", "left_open",
 	})
 	got := schemaFieldKinds(t, schemaFullOpResult())
-	want := map[string]string{"id": "string", "op": "string", "status": "string", "proven": "string", "reason": "string"}
+	want := map[string]string{
+		"id": "string", "op": "string", "status": "string", "proven": "string", "reason": "string",
+		"excepted": "array<object>", "except_unmatched": "array<string>", "left_open": "array<string>",
+	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("op result field types changed.\n got: %v\nwant: %v", got, want)
 	}

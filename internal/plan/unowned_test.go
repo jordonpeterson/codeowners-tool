@@ -343,6 +343,11 @@ func TestR40_BuildRefusesIllegalOnUnowned(t *testing.T) {
 		{"on rename_owner", uoOp{spec: "rename_owner(@a, @b)", unowned: ops.UnownedSkip}, []string{"on_unowned", "add_owner"}},
 		{"unknown value", uoOp{spec: "add_owner(/x/, @p)", unowned: "SKIP"}, []string{"on_unowned", "assign", "skip"}},
 		{"skip with declare", uoOp{spec: "add_owner(/z/, @p)", unowned: ops.UnownedSkip, zero: ops.ZeroMatchDeclare}, []string{"on_unowned", "declare"}},
+		// The contradiction refuses BEFORE the tree decides anything: an op
+		// whose scope matches tracked files must get the same exit 3 as one
+		// whose scope matches nothing, or the "identically on every repo"
+		// contract of exit 3 breaks per repo (review finding).
+		{"skip with declare, scope matches", uoOp{spec: "add_owner(/x/, @p)", unowned: ops.UnownedSkip, zero: ops.ZeroMatchDeclare}, []string{"on_unowned", "declare"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

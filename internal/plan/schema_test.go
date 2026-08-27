@@ -151,7 +151,14 @@ func fullRow() plan.Row {
 }
 
 func fullOpResult() plan.OpResult {
-	return plan.OpResult{ID: "op-1", Op: "add_owner(/x/, @b)", Status: "applied", Proven: "tree", Reason: "because"}
+	// Every slice populated too: the R-32 fields rode in unpinned (the exact
+	// omitempty-hides-a-field failure this helper's comment warns about), and
+	// R-40's left_open must not repeat that (review finding).
+	return plan.OpResult{ID: "op-1", Op: "add_owner(/x/, @b)", Status: "applied", Proven: "tree", Reason: "because",
+		Excepted:        []plan.ExceptedPath{{Path: "x/gen/g.go", Owners: []string{"@a"}}},
+		ExceptUnmatched: []string{"/x/ghost/"},
+		LeftOpen:        []string{"x/open.md"},
+	}
 }
 
 func fullPlan() plan.Plan {
@@ -221,6 +228,7 @@ func TestR16_RowKeys(t *testing.T) {
 func TestR16_OpResultKeys(t *testing.T) {
 	wantKeys(t, "plan.OpResult", topLevelKeys(t, fullOpResult()), []string{
 		"id", "op", "status", "proven", "reason",
+		"excepted", "except_unmatched", "left_open",
 	})
 }
 
@@ -264,11 +272,14 @@ func TestR16_FieldTypes(t *testing.T) {
 			"owners_after":  "array<string>",
 		}},
 		{"plan.OpResult", fullOpResult(), map[string]string{
-			"id":     "string",
-			"op":     "string",
-			"status": "string",
-			"proven": "string",
-			"reason": "string",
+			"id":               "string",
+			"op":               "string",
+			"status":           "string",
+			"proven":           "string",
+			"reason":           "string",
+			"excepted":         "array<object>",
+			"except_unmatched": "array<string>",
+			"left_open":        "array<string>",
 		}},
 	}
 	for _, c := range cases {

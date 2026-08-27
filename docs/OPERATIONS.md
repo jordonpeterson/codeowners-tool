@@ -120,7 +120,10 @@ zero-owner rule (S-9) count as open. `add_owner` only, policy form only, and nev
 The scope is decided against the repo's state before the batch, so a sibling grant in the
 same run does not feed paths into a skipping op. If the restriction empties the effective
 scope the op reports `skipped`, with a reason distinct from R-21's; the paths left open
-are listed under `left_open` in the op's result either way. Note the convergence claim
+are listed under `left_open` in the op's result either way. A repo whose owned in-scope
+paths are won by a rule broader than the scope, with open paths under that same rule and
+no derivable narrowing, refuses (exit 2) rather than grants — the fail-closed lane, per
+repo. Note the convergence claim
 this changes: the fleet converges to "co-owns what was already owned", not "owns the
 scope everywhere" — the record, not the policy, says which paths that was per repo.
 

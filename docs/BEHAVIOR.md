@@ -3106,6 +3106,14 @@ folding the defaults block in their head — and a policy that never mentions
 the field keeps its pre-R-40 output byte for byte (the echo states only
 settings somebody asked about).
 
+### `TestR40_LeftOpenRendersInTextAndSummary`
+
+SPEC R-40 (by R-32's rule): the left-open facts render in EVERY format,
+not just JSON. The text output names each declined path under its op, and
+the PR summary — the artifact the reviewer actually reads — carries a
+"Left open" section, exactly as the carve-out facts do (review finding:
+the disclosure reached only --format json).
+
 ### `TestR40_NightlyRerunConverges`
 
 SPEC R-40/R-19: nightly convergence. Run 1 applies; runs 2 and 3 report
@@ -8598,4 +8606,4 @@ twice and one tracked file vanished from the gate.
 
 ---
 
-815 documented test cases across 13 packages.
+816 documented test cases across 13 packages.

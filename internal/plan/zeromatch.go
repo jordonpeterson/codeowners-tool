@@ -628,9 +628,14 @@ func opResultFor(op ops.Op, skipped, openSkipped, declared, structural, changed 
 		// R-40's skip is the OTHER skip and must not share R-21's sentence:
 		// this scope exists in the repo, it just owns nothing — "which repos
 		// lack Terraform" and "which repos own nothing under /.github/" are
-		// different questions, answered by grouping on the reason.
+		// different questions, answered by grouping on the reason. The
+		// sentence states the OP's decision, not the batch outcome: the
+		// restriction is decided against the before-batch state, so a sibling
+		// op in the same run may still grant a path listed under left_open,
+		// and "open paths stay open" here would contradict the ownership rows
+		// two fields later (review finding).
 		r.Status = "skipped"
-		r.Reason = fmt.Sprintf("every tracked file in scope %q is currently unowned and on_unowned=skip — the grant applies nowhere here, and open paths stay open (R-40)", op.Scope)
+		r.Reason = fmt.Sprintf("every tracked file in scope %q had no owner before this run and on_unowned=skip — this op grants nowhere here; the paths it declined are listed under left_open (R-40)", op.Scope)
 		return r
 	}
 	r.Status = "unchanged"

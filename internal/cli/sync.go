@@ -1627,6 +1627,13 @@ func renderRecordText(w io.Writer, rec SyncRecord) {
 		for _, pat := range o.ExceptUnmatched {
 			fmt.Fprintf(w, "    except %s matched no tracked file; the grant carries no carve for it (on_except_zero_match=allow)\n", pat)
 		}
+		// R-40, by R-32's rule: the left-open facts render in every format,
+		// not just JSON — the operator reading text output must see which
+		// paths a skip-unowned grant declined without re-running under
+		// --format json (review finding).
+		for _, p := range o.LeftOpen {
+			fmt.Fprintf(w, "    left open: %s had no owner, and this op declined to grant it (on_unowned=skip)\n", p)
+		}
 	}
 	if rec.Created {
 		fmt.Fprintln(w, "  created a new CODEOWNERS file")
@@ -1742,6 +1749,24 @@ func renderSummary(rec SyncRecord, r *syncRun) string {
 	if len(carve) > 0 {
 		b.WriteString("\n## Carve-outs (`except`)\n\n")
 		b.WriteString(strings.Join(carve, "\n") + "\n")
+	}
+
+	// R-40, by the same rule as R-32 above: the PR reviewer is the audience
+	// the skip-unowned policy answers to, so the paths a grant deliberately
+	// declined have to be in the PR body, not only in results.jsonl.
+	var open []string
+	for i, o := range rec.Ops {
+		label := policy.OpLabel(o.ID, i)
+		for _, p := range o.LeftOpen {
+			open = append(open, fmt.Sprintf("- `%s`: `%s`", label, p))
+		}
+	}
+	if len(open) > 0 {
+		b.WriteString("\n## Left open (`on_unowned: skip`)\n\n")
+		b.WriteString("These paths had no owner when the run started, and the op declined to grant\n" +
+			"them (R-40) — any developer's review satisfies GitHub for them, unless a sibling\n" +
+			"op in this same run granted one (the ownership rows say which).\n\n")
+		b.WriteString(strings.Join(open, "\n") + "\n")
 	}
 
 	var structural []string
