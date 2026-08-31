@@ -1,7 +1,11 @@
 # codeowners-tool
 
 Make safe, provable changes to GitHub CODEOWNERS files — in one repo, or across a
-hundred.
+hundred. Designed for rolling out programmatic CODEOWNERS changes across 100+ repositories, including regulated environments.
+This enables:
+- platform teams to control platform-owned files
+- AI agents to self-approve specific files when GitHub's required CODEOWNERS review setting is enabled
+Behavior is covered by an extensive edge-case test suite.
 
 **The problem.** CODEOWNERS is written in *lines*, but what anyone cares about is *who
 owns which file*. The two are connected by rules that surprise people: the **last**
