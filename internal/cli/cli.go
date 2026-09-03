@@ -722,9 +722,7 @@ func cmdPlan(args []string, stdout, stderr io.Writer) int {
 		var reasons multiReasons
 		switch {
 		case errors.Is(verr, errNothingToVerify):
-			if len(unverifiable) == 0 {
-				fmt.Fprintln(stderr, nothingToVerifyNote)
-			}
+			// Notes only; the run goes ahead.
 		case errors.As(verr, &inconclusive):
 			for _, r := range inconclusive.Reasons() {
 				fmt.Fprintln(stderr, "error:", r)
@@ -740,9 +738,7 @@ func cmdPlan(args []string, stdout, stderr io.Writer) int {
 		case verr != nil:
 			return errExit(&plan.InvalidError{Msg: verr.Error()}, stderr)
 		}
-		if len(unverifiable) > 0 {
-			fmt.Fprintln(stderr, "note:", unverifiableNote(unverifiable))
-		}
+		verifyNotes(stderr, unverifiable, verr)
 	} else if isFlagSet(fs, "token") || isFlagSet(fs, "api-url") {
 		fmt.Fprintln(stderr, idleCredentialNote)
 	}

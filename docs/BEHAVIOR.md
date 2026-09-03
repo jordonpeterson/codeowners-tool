@@ -3273,6 +3273,15 @@ status code reaches it.) Pinning only the rate-limited 403 — the one branch
 with a message of its own — leaves the others free to return "does not
 exist" and halt a fleet over a policy that was correct.
 
+### `TestR41_EveryVerbDisclosesUnverifiableOwnersTheSameWay`
+
+SPEC R-41: the three verbs disclose the same thing for the same policy.
+`check` is the gate a fleet runs before `sync`, so a note one prints and
+the other does not is the drift that already happened once: `check` kept
+saying "nothing to verify" beside "written without verification" after
+`sync` and `plan` had stopped, so the gate contradicted the verb that
+writes, in the same run, about the same policy.
+
 ### `TestR41_ExplicitTokenBeatsTheEnvironment`
 
 SPEC R-41: an explicit --token wins over the environment. One line of code
@@ -8974,4 +8983,4 @@ twice and one tracked file vanished from the gate.
 
 ---
 
-856 documented test cases across 13 packages.
+857 documented test cases across 13 packages.

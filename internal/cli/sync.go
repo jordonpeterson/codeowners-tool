@@ -384,20 +384,11 @@ func cmdSync(args []string, stdout, stderr io.Writer) int {
 		// every clone in the wave, so a fleet halts at repo 0 rather than
 		// recording the same refusal a hundred times.
 		unverifiable, err := verifyOwnersFor(*token, *apiURL, opList)
-		switch {
-		case errors.Is(err, errNothingToVerify):
-			// Only when there is genuinely nothing to say. With email owners
-			// present the disclosure below is the accurate one, and printing
-			// both said "nothing to verify" and "written without
-			// verification" in consecutive lines.
-			if len(unverifiable) == 0 {
-				fmt.Fprintln(stderr, nothingToVerifyNote)
-			}
-		case err != nil:
+		if err != nil && !errors.Is(err, errNothingToVerify) {
 			return exit3sGuided(err, verifyGuidance(err))
 		}
+		verifyNotes(stderr, unverifiable, err)
 		if len(unverifiable) > 0 {
-			fmt.Fprintln(stderr, "note:", unverifiableNote(unverifiable))
 			// Also into the record and the PR body: a results.jsonl from a
 			// wave that wrote owners nobody could check must not be
 			// byte-identical to one from a wave that verified every owner.
@@ -1924,15 +1915,10 @@ func cmdCheck(args []string, stdout, stderr io.Writer) int {
 	}
 	if *verifyOwnersFlag || (pol != nil && pol.VerifyOwners) {
 		unverifiable, err := verifyOwnersFor(*token, *apiURL, opList)
-		switch {
-		case errors.Is(err, errNothingToVerify):
-			fmt.Fprintln(stderr, nothingToVerifyNote)
-		case err != nil:
+		if err != nil && !errors.Is(err, errNothingToVerify) {
 			return exit3guided(stderr, err, verifyGuidance(err))
 		}
-		if len(unverifiable) > 0 {
-			fmt.Fprintln(stderr, "note:", unverifiableNote(unverifiable))
-		}
+		verifyNotes(stderr, unverifiable, err)
 	} else if passed["token"] || passed["api-url"] {
 		fmt.Fprintln(stderr, idleCredentialNote)
 	}

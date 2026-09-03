@@ -3,6 +3,7 @@ package cli
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 
@@ -239,6 +240,25 @@ func verifyGuidance(err error) string {
 func unverifiableNote(owners []string) string {
 	return fmt.Sprintf("%s written without verification — an owner the GitHub API cannot vouch for (an email address, or an account whose type it would not report; R-13); confirm by hand",
 		strings.Join(owners, ", "))
+}
+
+// verifyNotes writes R-41's disclosures for a run that is going ahead.
+//
+// One function for all three verbs because the alternative already drifted:
+// `check` kept printing "nothing to verify" beside "written without
+// verification" after `sync` and `plan` learned not to, so the verb a fleet
+// runs as its gate contradicted the verb that writes (found in review). Three
+// hand-rolled copies of a two-branch rendering is three chances to disagree.
+func verifyNotes(stderr io.Writer, unverifiable []string, err error) {
+	// "Nothing to verify" only when there is genuinely nothing to say: with
+	// email owners present the disclosure below is the accurate one, and both
+	// lines together read as a contradiction.
+	if errors.Is(err, errNothingToVerify) && len(unverifiable) == 0 {
+		fmt.Fprintln(stderr, nothingToVerifyNote)
+	}
+	if len(unverifiable) > 0 {
+		fmt.Fprintln(stderr, "note:", unverifiableNote(unverifiable))
+	}
 }
 
 // verifyOwnersFor is the CLI-facing half of R-41: split the owners into the

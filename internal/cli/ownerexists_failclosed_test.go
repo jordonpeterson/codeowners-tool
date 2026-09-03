@@ -645,3 +645,41 @@ func TestR41_ATransportFailureRefusesTheWrite(t *testing.T) {
 		t.Errorf("CODEOWNERS moved:\n%s", got)
 	}
 }
+
+// SPEC R-41: the three verbs disclose the same thing for the same policy.
+// `check` is the gate a fleet runs before `sync`, so a note one prints and
+// the other does not is the drift that already happened once: `check` kept
+// saying "nothing to verify" beside "written without verification" after
+// `sync` and `plan` had stopped, so the gate contradicted the verb that
+// writes, in the same run, about the same policy.
+func TestR41_EveryVerbDisclosesUnverifiableOwnersTheSameWay(t *testing.T) {
+	repo := oeRepo(t)
+	api, _ := oeAPI(t, "org/api-team", "org/everyone")
+	pol := oePolicy(t, `{"version":1,"ops":["add_owner(/services/api/, dev@example.com)"]}`)
+	creds := []string{"--verify-owners", "--token", "t", "--api-url", api}
+
+	for _, tc := range []struct {
+		verb string
+		args []string
+	}{
+		{"sync", append([]string{"sync", "--repo", repo, "--policy", pol, "--dry-run"}, creds...)},
+		{"check", append([]string{"check", "--policy", pol}, creds...)},
+		{"plan", append([]string{"plan", "--repo", repo, "--out", filepath.Join(t.TempDir(), "p.json"),
+			"--op", "add_owner(/services/api/, dev@example.com)"}, creds...)},
+	} {
+		t.Run(tc.verb, func(t *testing.T) {
+			code, _, errb := runCLI(t, tc.args...)
+			if code != 0 {
+				t.Fatalf("exit = %d, want 0; stderr:\n%s", code, errb)
+			}
+			if !strings.Contains(errb, "dev@example.com") || !strings.Contains(errb, "without verification") {
+				t.Errorf("%s did not disclose the unverifiable owner:\n%s", tc.verb, errb)
+			}
+			// The contradiction: this run HAD something to disclose, so it
+			// did not have "nothing to verify".
+			if strings.Contains(errb, "nothing to verify") {
+				t.Errorf("%s said there was nothing to verify and then disclosed an owner it did not verify:\n%s", tc.verb, errb)
+			}
+		})
+	}
+}
