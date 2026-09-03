@@ -15,6 +15,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -25,6 +26,12 @@ import (
 	"sync"
 	"time"
 )
+
+// ErrUnreadableAccountType reports that an account exists but the API did not
+// say whether it is a user or an organization. Permanent rather than
+// transient: unlike every other inconclusive answer, re-running asks the same
+// server the same question and gets the same silence.
+var ErrUnreadableAccountType = errors.New("the API did not report an account type")
 
 // Inconclusive is R-12's error: the lookup could not be answered
 // definitively; the caller must report `unknown`, exit 5, and propose
@@ -148,23 +155,126 @@ func New(baseURL, token string, cache Cache) *Client {
 
 func (c *Client) key(k string) string { return c.scope + ":" + k }
 
-// redactURL strips userinfo before a base URL reaches a message.
+// rawUserinfo returns the userinfo of a URL-shaped string — everything
+// between "://" and the "@" that ends the authority — or "" if there is none.
 //
-// `--api-url https://svc:hunter2@ghes.example/api/v3` is a legal thing to type,
-// and the "base URL looks wrong" path is the single most likely error a GHES
-// operator hits — so the credential landed in stderr, and from there into a CI
-// log (CWE-532). Go's own transport redacts userinfo in its error strings; the
-// tool was leaking what its runtime deliberately hides. Unparseable input is
-// returned as-is: it is not a URL, so it has no userinfo to expose, and
-// dropping the string entirely would cost the operator the very detail the
-// message exists to give them.
-func redactURL(raw string) string {
-	u, err := url.Parse(raw)
-	if err != nil || u.User == nil {
-		return raw
+// Deliberately its own scanner rather than url.Parse: the strings that MUST be
+// redacted are exactly the ones url.Parse rejects, and a space inside the
+// userinfo is the commonest way to produce one.
+//
+// Two details are load-bearing, both from review findings against earlier
+// versions. The authority ends at the first "/", "?" or "#", so a query
+// holding an "@" (`https://host?x=a@b`) is not mistaken for a credential. And
+// within it the LAST "@" wins, as url.Parse does, so a password containing
+// one (`https://svc:p@ssw0rd@host`) is redacted whole rather than up to its
+// first byte.
+//
+// No colon is required. `https://<PAT>@host` is the canonical way a token
+// reaches a URL and has no colon in it at all.
+func rawUserinfo(raw string) string {
+	rest := raw
+	// The scheme, when there is one. When there is NOT — `--api-url
+	// svc:hunter2@ghes.example/api/v3`, the documented likely GHES mistake —
+	// url.Parse reads "svc" as the scheme and the credential as an opaque
+	// body, so it neither errors nor exposes a User for anything to redact,
+	// and net/http's own masking never engages either. A scanner that
+	// REQUIRED "://" therefore found nothing and the whole credential was
+	// printed (found in review).
+	if i := strings.Index(rest, "://"); i >= 0 {
+		rest = rest[i+3:]
 	}
-	u.User = url.User("REDACTED")
+	if end := strings.IndexAny(rest, "/?#"); end >= 0 {
+		rest = rest[:end]
+	}
+	at := strings.LastIndexByte(rest, '@')
+	if at < 0 {
+		return ""
+	}
+	return rest[:at]
+}
+
+// credentialQuery names the query parameters that have historically carried a
+// token in a GitHub base URL. Their VALUES are redacted; the parameter name
+// stays, because "your URL has a token in it" is the thing the operator needs
+// to read.
+var credentialQuery = []string{"access_token", "token", "private_token"}
+
+// redactURL renders a base URL with every credential in it removed. It is the
+// ONLY way a base URL is allowed to reach a message.
+//
+// `--api-url https://svc:hunter2@ghes.example/api/v3` is a legal thing to
+// type, and "the base URL looks wrong" is the single most likely error a GHES
+// operator hits — so the credential landed in stderr and from there into a CI
+// log (CWE-532).
+//
+// Unparseable input is redacted too, which is the case that matters most: an
+// --api-url with a space in it is rejected FOR the space and still carries the
+// password into the error that would render it.
+func redactURL(raw string) string {
+	out := raw
+	// Userinfo textually rather than through url.URL, and for both parseable
+	// and unparseable input: the scanner covers the shapes url.Parse rejects
+	// AND the scheme-less shape it accepts without ever populating User, and
+	// one code path for all of them is one place to be wrong.
+	if info := rawUserinfo(out); info != "" {
+		out = strings.Replace(out, info+"@", "REDACTED@", 1)
+	}
+	u, err := url.Parse(out)
+	if err != nil {
+		return out
+	}
+	q := u.Query()
+	var found bool
+	for _, k := range credentialQuery {
+		if q.Has(k) {
+			q.Set(k, "REDACTED")
+			found = true
+		}
+	}
+	if !found {
+		return out
+	}
+	u.RawQuery = q.Encode()
 	return u.String()
+}
+
+// urlError renders a *url.Error — what both url.Parse and http.Client.Do
+// return — WITHOUT its URL, substituting our own redacted one.
+//
+// This is the third attempt at this leak and the first that is not a game of
+// whack-a-mole. The first two sanitised the message net/url had already
+// built, and lost the same way twice: url.Error renders its URL with %q, so a
+// credential holding a tab or a quote no longer matches the raw secret being
+// substituted; and a base URL with no scheme at all parses as a path, so
+// net/http's own password masking never engages and nothing was there to
+// match. Both were found by review, both after the previous fix was called
+// complete.
+//
+// The fix is to stop sanitising someone else's string. err.Err is the cause
+// ("invalid control character in URL", "connect: connection refused") and
+// carries no URL of its own, so a message built from it plus redactURL cannot
+// contain a credential whatever the operator typed.
+func (c *Client) urlError(prefix string, err error) *Inconclusive {
+	var ue *url.Error
+	if errors.As(err, &ue) {
+		return &Inconclusive{Reason: c.redact(fmt.Sprintf("%s%s %s: %v", prefix, ue.Op, redactURL(c.BaseURL), ue.Err))}
+	}
+	return &Inconclusive{Reason: c.redact(prefix + err.Error())}
+}
+
+// redact is the backstop: the --token value, wherever it ended up.
+//
+// Only the token, and only when it is long enough to be a real credential —
+// `--token t` in a test would otherwise redact every "t" in the sentence.
+// Userinfo is deliberately NOT substituted globally here: doing so turned
+// `--api-url https://e@ghes.example/...` into "nREDACTEDtwork: GREDACTEDt",
+// and made the failing HOST unreadable for a username that matched it (found
+// in review). Userinfo is removed where it belongs, in redactURL.
+func (c *Client) redact(s string) string {
+	if len(c.Token) >= 8 {
+		s = strings.ReplaceAll(s, c.Token, "REDACTED")
+	}
+	return s
 }
 
 // pathSeg encodes one value as exactly one URL path segment.
@@ -186,7 +296,14 @@ func pathSeg(s string) string {
 func (c *Client) get(path, accept string) (int, []byte, error) {
 	req, err := http.NewRequest("GET", c.BaseURL+path, nil)
 	if err != nil {
-		return 0, nil, &Inconclusive{Reason: err.Error()}
+		// url.Parse's error quotes the WHOLE input, userinfo included, and
+		// this is the one branch that renders it raw: an --api-url the parser
+		// rejects never reaches the transport, whose own error strings mask
+		// the password for us. `--api-url "ht tp://svc:hunter2@ghes/api/v3"`
+		// put the credential in stderr and from there into a CI log
+		// (CWE-532), which is exactly what redactURL exists to stop
+		// everywhere else.
+		return 0, nil, c.urlError("the API base URL could not be used: ", err)
 	}
 	if c.Token != "" {
 		req.Header.Set("Authorization", "Bearer "+c.Token)
@@ -196,7 +313,7 @@ func (c *Client) get(path, accept string) (int, []byte, error) {
 	}
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
-		return 0, nil, &Inconclusive{Reason: "network: " + err.Error()}
+		return 0, nil, c.urlError("network: ", err)
 	}
 	defer resp.Body.Close()
 	body, rerr := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
@@ -213,7 +330,10 @@ func (c *Client) get(path, accept string) (int, []byte, error) {
 		// "requester cannot see this") and never a definitive negative.
 		reason := fmt.Sprintf("HTTP %d redirect on %s — the token cannot answer this definitively (e.g. concealed org membership)", resp.StatusCode, path)
 		if resp.StatusCode == 301 {
-			reason = fmt.Sprintf("HTTP 301 on %s — the resource may have been renamed (Location: %s); update the reference and re-run", path, resp.Header.Get("Location"))
+			// The Location header is server-controlled and a proxy may
+			// reflect the request URL — credential included — back into it.
+			reason = fmt.Sprintf("HTTP 301 on %s — the resource may have been renamed (Location: %s); update the reference and re-run",
+				path, c.redact(redactURL(resp.Header.Get("Location"))))
 		}
 		return resp.StatusCode, nil, &Inconclusive{Reason: reason}
 	case resp.StatusCode == 403 && resp.Header.Get("X-RateLimit-Remaining") == "0",
@@ -307,7 +427,7 @@ func (c *Client) ProbeAPI() error {
 // GitHub API".
 func (c *Client) UserExists(login string) (bool, error) {
 	return c.cachedBool("user:"+login, func() (bool, error) {
-		status, _, err := c.get("/users/"+pathSeg(login), "")
+		status, body, err := c.get("/users/"+pathSeg(login), "")
 		if err != nil {
 			return false, err
 		}
@@ -317,8 +437,78 @@ func (c *Client) UserExists(login string) (bool, error) {
 			}
 			return false, nil
 		}
+		// The same response answers AccountType, and R-41 asks both questions
+		// about every bare handle it writes. Filing the answer here makes
+		// that one request instead of two identical ones; AccountType still
+		// stands on its own for any caller that skips this.
+		var out struct {
+			Type string `json:"type"`
+		}
+		if json.Unmarshal(body, &out) == nil && out.Type != "" {
+			c.cache.Set(c.key("account-type:"+login), []byte(out.Type))
+		}
 		return true, nil
 	})
+}
+
+// AccountType returns GitHub's own word for what a bare @handle names —
+// "User", "Organization", or whatever else a future API or a GHES build
+// reports. Callers must establish that the account exists first.
+//
+// It exists for a gap only a caller that PROVES something has to close.
+// `@acme` is a syntactically valid owner token and `GET /users/acme` answers
+// 200 for an organization, so "this account exists" is true and useless:
+// GitHub's CODEOWNERS resolver accepts a user, an `@org/team` or an email
+// address and nothing else, so an org handle on a rule is silently nobody —
+// the same dead line R-41 exists to refuse, reached through the check itself.
+//
+// The TYPE rather than a boolean, so the caller's message can name what it
+// found. "@acme is an organization, you probably meant @acme/team" and "@x is
+// a Bot" send an operator to different edits, and a bool collapses them into
+// whichever sentence was written first.
+//
+// A response this cannot classify is inconclusive, never a negative (R-12) —
+// except a missing `type` field, which is permanent rather than transient and
+// carries ErrUnreadableAccountType so the caller can disclose instead of
+// refusing forever.
+func (c *Client) AccountType(login string) (string, error) {
+	if v, ok := c.cache.Get(c.key("account-type:" + login)); ok {
+		return string(v), nil
+	}
+	status, body, err := c.get("/users/"+pathSeg(login), "")
+	if err != nil {
+		return "", err
+	}
+	if status == 404 {
+		// NOT rendered as a type. Callers reach this only after proving the
+		// account exists, so a 404 now means the precondition was skipped or
+		// the account vanished between two requests — and any non-error
+		// answer here is the write-it direction, which is the one verdict a
+		// bare 404 must never buy in this package (R-12).
+		return "", &Inconclusive{Reason: fmt.Sprintf(
+			"@%s was not found when its account type was read, though it existed a moment earlier", login)}
+	}
+	var out struct {
+		Type string `json:"type"`
+	}
+	if json.Unmarshal(body, &out) != nil {
+		// A body that is not JSON is the TRANSIENT class — a captive portal,
+		// a gateway error page, a proxy, or a response past the 4 MiB read
+		// limit — so it stays inconclusive and fails closed. Folding it in
+		// with the sentinel below made a portal that 200s HTML for every
+		// endpoint write every owner in the policy at exit 0, the team owners
+		// with no disclosure at all (found in review).
+		return "", &Inconclusive{Reason: "unreadable response when reading the account type for @" + login}
+	}
+	if out.Type == "" {
+		// The one answer re-running cannot settle: a server that omits the
+		// field omits it forever. A caller that failed closed here would
+		// refuse a correct policy permanently, so it gets its own sentinel to
+		// recognise — and discloses instead.
+		return "", fmt.Errorf("%w for @%s", ErrUnreadableAccountType, login)
+	}
+	c.cache.Set(c.key("account-type:"+login), []byte(out.Type))
+	return out.Type, nil
 }
 
 // TeamExists: A-1 for @org/team owners. Callers must ProbeOrg(org) first.

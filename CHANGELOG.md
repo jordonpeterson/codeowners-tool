@@ -11,6 +11,55 @@ between classes is a major release and is called out explicitly either way.
 
 ## [Unreleased]
 
+### Added
+
+- **`sync`, `check` and `plan` can prove an owner exists before writing it (R-41).** A
+  wave whose policy read `add_owner(/services/api/, [@org/api-team,
+  @org/plaform])` applied cleanly, reported `proven: tree`, exited 0 and wrote
+  both owners into a hundred repositories. GitHub resolves an owner it does not
+  recognise to nobody and reports no error, so the co-ownership the wave existed
+  to establish was never in force — the "applied, dead on arrival" outcome the
+  fleet verbs are meant to make impossible. Nothing in the write path had ever
+  asked GitHub whether an owner exists; `audit` asks (A-1), after the fact, in a
+  run a clean exit 0 gives nobody a reason to make.
+
+  `--verify-owners`, or `"verify_owners": true` in the policy, now asks first
+  and refuses the whole run (exit 3, nothing written) if any owner the ops put
+  into force does not exist. Only owners going INTO force are checked:
+  `remove_owner`'s are not, and `rename_owner` checks its new name only, so the
+  ops that repair this damage are not refused by it. Email owners stay
+  unverifiable rather than dead (R-13), written with a note. An undecidable
+  lookup — rate limit, 5xx, or a team 404 seen by a token that is not an org
+  owner, where a secret team is indistinguishable from a deleted one — writes
+  nothing either, and says so as something to re-run rather than a policy to fix
+  (R-12).
+
+  A bare **organization** handle is refused too: `@acme` is a valid owner token
+  and `GET /users/acme` answers 200, but CODEOWNERS resolves only a user, an
+  `@org/team` or an email — so it is the same dead line, reached through the
+  check meant to catch it. Any other account type is refused and named the same
+  way; only a `User` is written.
+
+  `plan --verify-owners` runs the same check on the reviewable half of the
+  pipeline, where the precise taxonomy applies: exit 3 for an owner that does
+  not exist, exit 5 for a lookup that could not be answered. `apply` executes a
+  plan a human already approved and checks nothing.
+
+  **No exit code moves for an existing invocation:** the check is off unless
+  asked for, and a `sync` without it makes no API call at all. `--verify-owners`
+  may turn a policy's setting on for one run, never off.
+
+### Fixed
+
+- **A credential in an unparseable `--api-url` no longer reaches stderr.**
+  `redactURL` returned input `url.Parse` rejected unchanged, on the reasoning
+  that such a string "is not a URL, so it has no userinfo to expose" — false for
+  `--api-url "ht tp://svc:hunter2@ghes.example/api/v3"`, which is rejected for
+  the space and still carries the password into the parse error that renders it
+  (CWE-532). Userinfo is now stripped textually in that case too. Reachable from
+  `audit` and `lint` before this change, and from `sync`, `check` and `plan` as
+  of R-41.
+
 ## [1.0.0] - 2026-08-27
 
 Everything below accumulated across the `0.0` line; publishing it as `1.0.0` is

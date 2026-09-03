@@ -38,14 +38,13 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
-	"errors"
 	"fmt"
 	"sort"
 	"strings"
 
 	"github.com/jordonpeterson/codeowners-tool/internal/file"
-	"github.com/jordonpeterson/codeowners-tool/internal/ghapi"
 	"github.com/jordonpeterson/codeowners-tool/internal/ops"
+	"github.com/jordonpeterson/codeowners-tool/internal/ownerid"
 	"github.com/jordonpeterson/codeowners-tool/internal/pattern"
 	"github.com/jordonpeterson/codeowners-tool/internal/plan"
 	"github.com/jordonpeterson/codeowners-tool/internal/resolve"
@@ -59,19 +58,11 @@ import (
 // not EXIST (A-1), never owners that merely lack write access (A-3) or org
 // membership (A-2). Those are findings for a human, because the fix may well
 // be to grant the access rather than to drop the owner.
-type Verifier interface {
-	// ProbeOrg proves the token can enumerate the org. Until it succeeds, an
-	// org-scoped 404 does not mean "gone" (R-12).
-	ProbeOrg(org string) error
-	// TeamExists reports whether @org/slug exists. Call ProbeOrg first.
-	TeamExists(org, slug string) (bool, error)
-	// ViewerIsOrgAdmin reports whether the token is an OWNER of org. Only an
-	// owner sees secret teams, so only an owner's team-404 means "deleted"
-	// rather than "invisible to me" — and lint deletes on that answer.
-	ViewerIsOrgAdmin(org string) (bool, error)
-	// UserExists reports whether @login exists.
-	UserExists(login string) (bool, error)
-}
+//
+// An alias, not a second declaration: `sync` asks the identical question
+// under R-41 and acts on it in the opposite direction, so the interface and
+// the fail-closed reasoning behind it live once, in internal/ownerid.
+type Verifier = ownerid.Verifier
 
 // Options tunes a lint run.
 type Options struct {
@@ -903,59 +894,12 @@ func Build(content []byte, tree []string, v Verifier, opts Options) (*Result, er
 
 // ownerIsGone answers stage 2's question for one owner: does it definitively
 // not exist? An error means the question could not be answered (R-12).
-// LOOKUPS ARE CASE-FOLDED, identity is not.
 //
-// GitHub treats a login and an org/team handle case-insensitively, and team
-// slugs are lowercase by construction — so `@Org/Team` and `@org/team` are one
-// owner. Asking the API about the mixed-case spelling risks a 404 that means
-// nothing more than "you typed it differently", and under lint a 404 DELETES.
-// Folding the lookup is strictly safer: if the API is case-insensitive it
-// changes nothing, and if it is not, it prevents a live team being stripped
-// because somebody capitalised it. The file's own bytes are never rewritten
-// from this — lint corrects ownership, not spelling.
+// The lookup discipline — case-folded lookups, and a team 404 that only an
+// org owner's token may read as "deleted" — is ownerid's, shared with the
+// R-41 check `sync` runs before it writes.
 func ownerIsGone(v Verifier, owner string) (gone bool, reason string, err error) {
-	owner = strings.ToLower(owner)
-	if org, slug, isTeam := splitTeam(owner); isTeam {
-		// A team 404 is only meaningful once the token has proven it can
-		// enumerate the org — otherwise "invisible to these scopes" and
-		// "deleted" are the same response.
-		if err := v.ProbeOrg(org); err != nil {
-			return false, "", err
-		}
-		exists, err := v.TeamExists(org, slug)
-		if err != nil {
-			return false, "", err
-		}
-		if exists {
-			return false, "", nil
-		}
-		// A 404, which is where reporting and DELETING part company. GitHub
-		// returns exactly this for a team that was removed and for a SECRET
-		// team the caller cannot see, and ProbeOrg does not separate them: it
-		// proves the token can call the endpoint, not that it can see every
-		// team behind it. Only an org owner sees secret teams, so only an org
-		// owner's 404 is definitive. Anything else is inconclusive — which is
-		// R-12 doing its job, and costs nothing on the common path, because
-		// this is only ever reached when a team already looks gone.
-		admin, err := v.ViewerIsOrgAdmin(org)
-		if err != nil {
-			return false, "", err
-		}
-		if !admin {
-			return false, "", &ghapi.Inconclusive{Reason: fmt.Sprintf(
-				"%s was not found in %s, but this token is not an owner of that org, and a secret team returns the same 404 as a deleted one — re-run with an org-owner token to have this decided, or remove the owner by hand",
-				owner, org)}
-		}
-		return true, fmt.Sprintf("team %s does not exist (deleted or renamed); review requests to it silently do nothing", owner), nil
-	}
-	exists, err := v.UserExists(strings.TrimPrefix(owner, "@"))
-	if err != nil {
-		return false, "", err
-	}
-	if exists {
-		return false, "", nil
-	}
-	return true, fmt.Sprintf("user %s does not exist (deleted or renamed); review requests to it silently do nothing", owner), nil
+	return ownerid.IsGone(v, owner)
 }
 
 // distinctOwners lists every owner named by a valid rule, in file order.
@@ -1059,21 +1003,9 @@ func appendUnique(list []string, s string) []string {
 	return append(list, s)
 }
 
-func splitTeam(owner string) (org, slug string, ok bool) {
-	if !strings.HasPrefix(owner, "@") || !strings.Contains(owner, "/") {
-		return "", "", false
-	}
-	parts := strings.SplitN(strings.TrimPrefix(owner, "@"), "/", 2)
-	return parts[0], parts[1], true
-}
+func splitTeam(owner string) (org, slug string, ok bool) { return ownerid.SplitTeam(owner) }
 
-func errReason(err error) string {
-	var inc *ghapi.Inconclusive
-	if errors.As(err, &inc) {
-		return inc.Reason
-	}
-	return err.Error()
-}
+func errReason(err error) string { return ownerid.Reason(err) }
 
 func fmtOwners(o []string) string {
 	if o == nil {

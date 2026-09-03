@@ -267,10 +267,13 @@ func usage(w io.Writer) {
   sync     (--op 'OP' ... | --policy FILE) [--on-empty error|inherit|unowned]
            [--repo DIR] [--branch REF] [--file PATH] [--create] [--dry-run]
            [--max-paths-changed N] [--format text|json] [--out FILE] [--summary-out FILE]
+           [--verify-owners [--token T | $GITHUB_TOKEN] [--api-url URL]]
   check    (--op 'OP' ... | --policy FILE) [--format text|json]
+           [--verify-owners [--token T | $GITHUB_TOKEN] [--api-url URL]]
   plan     --op 'add_owner(/services/api, @org/team-1)' [--op ...] [--on-empty error|inherit|unowned]
            [--repo DIR] [--branch REF] [--file PATH] [--out plan.json]
            [--max-size BYTES] [--warn-size BYTES]
+           [--verify-owners [--token T | $GITHUB_TOKEN] [--api-url URL]]
   apply    --plan plan.json [--repo DIR]
   audit    [--checks a1,a3,a6] [--fail-on any|warning|error|never] [--format json|text]
            [--github-repo owner/name] [--token T | $GITHUB_TOKEN] [--api-url URL]
@@ -682,6 +685,14 @@ func cmdPlan(args []string, stdout, stderr io.Writer) int {
 	out := fs.String("out", "", "write plan JSON here (default stdout); trusted operator path — overwritten, and not contained to --repo")
 	maxSize := fs.Int("max-size", 3_000_000, "hard size cap in bytes (S-4)")
 	warnSize := fs.Int("warn-size", 2_500_000, "warn threshold in bytes (R-9)")
+	// R-41 on the reviewable half of the pipeline. `plan` is where intent is
+	// stated, so it is where an owner that does not exist has to be caught:
+	// `apply` executes a plan a human has already approved, and a check there
+	// would refuse an artifact that was signed off rather than one that was
+	// being written.
+	verifyOwnersFlag := fs.Bool("verify-owners", false, "check with GitHub that every owner this plan would write exists, and refuse to plan if one does not (R-41); needs --token")
+	token := fs.String("token", "", "GitHub token for --verify-owners (default $GITHUB_TOKEN)")
+	apiURL := fs.String("api-url", "", "GitHub API base URL for --verify-owners (GHES needs /api/v3)")
 	if err := fs.Parse(args); err != nil {
 		return flagParseCode(err)
 	}
@@ -700,6 +711,36 @@ func cmdPlan(args []string, stdout, stderr io.Writer) int {
 	parsed, err := ops.ParseAll(opSpecs)
 	if err != nil {
 		return errExit(&plan.InvalidError{Msg: err.Error()}, stderr)
+	}
+	if *verifyOwnersFlag {
+		// Before the repository is opened, as in sync: the answer depends on
+		// the ops and on GitHub, not on this clone. A dead owner is invalid
+		// INPUT (exit 3); a lookup that could not be answered is exactly what
+		// plan's exit 5 is for (R-12), and neither writes a plan file.
+		unverifiable, verr := verifyOwnersFor(*token, *apiURL, parsed)
+		var inconclusive *inconclusiveOwnersError
+		var reasons multiReasons
+		switch {
+		case errors.Is(verr, errNothingToVerify):
+			// Notes only; the run goes ahead.
+		case errors.As(verr, &inconclusive):
+			for _, r := range inconclusive.Reasons() {
+				fmt.Fprintln(stderr, "error:", r)
+			}
+			fmt.Fprintln(stderr, inconclusiveGuidance)
+			return ExitInconclusive
+		case errors.As(verr, &reasons):
+			for _, r := range reasons.Reasons() {
+				fmt.Fprintln(stderr, "error:", r)
+			}
+			fmt.Fprintln(stderr, verifyGuidance(verr))
+			return ExitInvalid
+		case verr != nil:
+			return errExit(&plan.InvalidError{Msg: verr.Error()}, stderr)
+		}
+		verifyNotes(stderr, unverifiable, verr, false)
+	} else if isFlagSet(fs, "token") || isFlagSet(fs, "api-url") {
+		fmt.Fprintln(stderr, idleCredentialNote)
 	}
 	// The same repo-root guard `sync` enforces (checkRepoRoot), for the verb
 	// that produces the ARTIFACT: pointed below the root, discovery resolves

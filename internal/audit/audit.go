@@ -10,7 +10,6 @@
 package audit
 
 import (
-	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -18,6 +17,7 @@ import (
 	"github.com/jordonpeterson/codeowners-tool/internal/file"
 	"github.com/jordonpeterson/codeowners-tool/internal/ghapi"
 	"github.com/jordonpeterson/codeowners-tool/internal/ops"
+	"github.com/jordonpeterson/codeowners-tool/internal/ownerid"
 	"github.com/jordonpeterson/codeowners-tool/internal/pattern"
 	"github.com/jordonpeterson/codeowners-tool/internal/plan"
 	"github.com/jordonpeterson/codeowners-tool/internal/resolve"
@@ -558,18 +558,6 @@ func normalizationCorrected(r *file.Rule, tree []string) (suggestion, collides s
 	return suggestion, collides, collides != ""
 }
 
-func splitTeam(owner string) (org, slug string, ok bool) {
-	if !strings.HasPrefix(owner, "@") || !strings.Contains(owner, "/") {
-		return "", "", false
-	}
-	parts := strings.SplitN(strings.TrimPrefix(owner, "@"), "/", 2)
-	return parts[0], parts[1], true
-}
+func splitTeam(owner string) (org, slug string, ok bool) { return ownerid.SplitTeam(owner) }
 
-func errReason(err error) string {
-	var inc *ghapi.Inconclusive
-	if errors.As(err, &inc) {
-		return inc.Reason
-	}
-	return err.Error()
-}
+func errReason(err error) string { return ownerid.Reason(err) }
