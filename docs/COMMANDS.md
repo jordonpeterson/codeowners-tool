@@ -128,8 +128,13 @@ artifact. A pipeline that must guarantee the check should run `check --policy p.
 
 An owner that *exists* is still not necessarily one GitHub will route a review to. A bare
 organization handle (`@acme` rather than `@acme/team`) is refused — CODEOWNERS resolves
-only a user, an `@org/team` or an email — but write access is not checked here; that is
-`audit`'s A-3, which needs the repository the token is standing in.
+only a user, an `@org/team` or an email — as is any other account that is not a user, each
+named for what it is. Write access is not checked here; that is `audit`'s A-3, which needs
+the repository the token is standing in.
+
+One case is written rather than refused: an account that exists whose *type* the API will
+not report. Re-running asks the same server the same question, so refusing would be
+permanent rather than fail-closed. It is written and disclosed, like an email owner.
 
 `audit` and `lint` do not yet make the organization-handle judgement: A-1 asks only whether
 the account exists, so `audit` will report an `@acme` already in a file as live and `lint`

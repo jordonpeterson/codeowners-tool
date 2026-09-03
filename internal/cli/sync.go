@@ -387,11 +387,13 @@ func cmdSync(args []string, stdout, stderr io.Writer) int {
 		if err != nil && !errors.Is(err, errNothingToVerify) {
 			return exit3sGuided(err, verifyGuidance(err))
 		}
-		verifyNotes(stderr, unverifiable, err)
+		verifyNotes(stderr, unverifiable, err, true)
 		if len(unverifiable) > 0 {
-			// Also into the record and the PR body: a results.jsonl from a
-			// wave that wrote owners nobody could check must not be
-			// byte-identical to one from a wave that verified every owner.
+			// Into the record and the PR body, and from there onto stderr:
+			// a results.jsonl from a wave that wrote owners nobody could
+			// check must not be byte-identical to one from a wave that
+			// verified every owner. A run that refuses before it opens the
+			// repository never renders it, which is right — it wrote nothing.
 			preWarnings = append(preWarnings, unverifiableNote(unverifiable))
 		}
 	} else if passed["token"] || passed["api-url"] {
@@ -1918,7 +1920,7 @@ func cmdCheck(args []string, stdout, stderr io.Writer) int {
 		if err != nil && !errors.Is(err, errNothingToVerify) {
 			return exit3guided(stderr, err, verifyGuidance(err))
 		}
-		verifyNotes(stderr, unverifiable, err)
+		verifyNotes(stderr, unverifiable, err, false)
 	} else if passed["token"] || passed["api-url"] {
 		fmt.Fprintln(stderr, idleCredentialNote)
 	}

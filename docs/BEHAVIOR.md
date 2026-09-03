@@ -3185,6 +3185,16 @@ exists. The owned file gains the co-owner; the open paths stay open — the
 record says which, under `left_open` — and a repo that owned nothing in
 scope reports `skipped` at exit 0 with the file untouched.
 
+### `TestR41_ABareOrganizationHandleIsNotAnOwner`
+
+SPEC R-41: a bare ORGANIZATION handle is refused, not waved through. This
+is the hole a check that stops at "does the account exist" leaves open:
+`@acme` is a syntactically valid owner token, `GET /users/acme` answers 200
+for an organization, and GitHub's CODEOWNERS resolver takes a user, an
+`@org/team` or an email address and nothing else — so the rule is written
+and owns nobody. It is the reported bug exactly, arriving through the check
+built to catch it, which is why it is asserted on the file bytes.
+
 ### `TestR41_APolicyThatIntroducesNobodyNeedsNoToken`
 
 SPEC R-41/R-13: a run that introduces NOBODY needs no credential. A wave
@@ -3206,6 +3216,58 @@ SPEC R-41/R-12: a connection that dies mid-request refuses the write. It is
 the fifth branch of ghapi's classifier and the one no status-code table can
 reach — and the branch that leaked a token-as-username until the redaction
 moved to the client's own way out.
+
+### `TestR41_AUserAccountIsStillAnOwner`
+
+SPEC R-41 (pin): a real USER account is still written. The organization
+check above is a refusal on the strength of one JSON field, so the case it
+must not catch is pinned beside it — a build that read every account as an
+organization would pass the test above and refuse every user owner in every
+policy.
+
+### `TestR41_AUserOwnerCostsOneLookupWhateverItsCase`
+
+SPEC R-41/R-38a: a user owner costs ONE request, and a mixed-case spelling
+asks about the same account as the lowercase one. R-41 asks two questions
+about every bare handle it writes — does it exist, and is it an
+organization — and both are answered by one response; two lookups per owner
+would spend a 40-op baseline's rate limit twice over, and a lookup that did
+not fold could return a 404 meaning nothing but a capital letter.
+
+### `TestR41_AnUnreadableAccountTypeIsWrittenAndDisclosed`
+
+SPEC R-41/R-13: an account whose TYPE the API will not report is written
+and DISCLOSED, not refused. The account is proven to exist; only "user or
+organization" is unanswered, and that answer never arrives — re-running
+asks the same server the same question, so a fail-closed refusal here is
+permanent, and a policy carrying `verify_owners` would have no way to
+proceed at all. One GHES build that trims a field would deadlock every wave
+against it. This is R-13's treatment of a permanently unverifiable owner,
+applied to the narrower claim: existence proven, kind not.
+
+### `TestR41_AnUnreadableBodyFailsClosed`
+
+SPEC R-41/R-12: a body that is not JSON is TRANSIENT and fails closed. A
+captive portal, a gateway error page or a proxy answers 200 with HTML to
+every endpoint, so ProbeAPI, ProbeOrg and TeamExists all "succeed" and the
+only thing standing between the wave and a file full of unresolvable owners
+is this branch. Folding it in with the missing-field sentinel — which is
+permanent, and correctly disclosed rather than refused — wrote every owner
+in the policy at exit 0, the team owners with no disclosure at all.
+
+### `TestR41_AnUnrecognisedAccountTypeIsRefusedAndNamed`
+
+SPEC R-41: an account type this tool does not recognise is reported, and
+NAMED. "User" is the only account CODEOWNERS resolves, so a Bot is as dead
+a line as an organization — but the two send the operator to different
+edits, so the message says which it found rather than guessing.
+
+### `TestR41_CheckAndSyncAgreeOnSwitchingTheCheckOff`
+
+SPEC R-41/R-20: `check` and `sync` answer the same command line the same
+way. `check` is the gate a fleet runs first, so a flag combination it
+accepts and `sync` refuses turns a green gate into a rollout that halts at
+repo 0 — the failure the shared verification path exists to prevent.
 
 ### `TestR41_CheckIsOfflineByDefault`
 
@@ -3357,6 +3419,13 @@ SPEC R-41: the note is for the fleet that asked for a record, not for every
 run. A plain text run with no --out has nothing to disclose, and printing
 the note anyway would train operators to skip it.
 
+### `TestR41_NothingToVerifyIsDisclosed`
+
+SPEC R-41: "there was nothing to verify" is said out loud. An operator who
+asked for verification, got exit 0 and had no request made cannot otherwise
+tell that outcome from a wave whose every owner was checked — which is the
+silent-success shape R-41 exists to remove, reproduced inside R-41.
+
 ### `TestR41_OfflineByDefaultMakesNoAPICalls`
 
 SPEC R-41: verification is opt-in and the default run touches no network at
@@ -3409,6 +3478,15 @@ before TeamExists is ever consulted. Acting on the team lookup first is the
 bug the probe exists to prevent, and under R-41 it would halt a
 hundred-repo wave over a scope the token never had.
 
+### `TestR41_RedactionDoesNotEatTheRestOfTheMessage`
+
+SPEC R-41: redaction removes the credential and NOTHING ELSE. A substitution
+applied to the whole message rather than to the URL turned
+`--api-url https://e@ghes.example/...` into "nREDACTEDtwork: GREDACTEDt",
+and made the failing HOST unreadable whenever a username matched part of it
+— so the operator lost the one detail the message exists to give them
+(found in review). The host has to survive.
+
 ### `TestR41_RefusalSaysNoRecordWasWritten`
 
 SPEC R-41/R-24: a refusal decided before the repository is opened writes no
@@ -3457,6 +3535,13 @@ SPEC R-41/R-12: a team 404 seen by a token that is not an org owner means
 response. Refusing is right either way; calling it "does not exist" is not,
 because the operator's fix is a different one — re-run with an org-owner
 token, not delete the team from the policy.
+
+### `TestR41_TheUnverifiableDisclosureIsPrintedOnce`
+
+SPEC R-41: the disclosure is printed ONCE. It goes to stderr as a note and
+into the run's warnings, and stderr re-renders every warning — so the same
+sentence appeared twice under two labels, "note:" and "warning:", in every
+run that had an owner to disclose.
 
 ### `TestR41_UnverifiableOwnersReachTheRecordsWarnings`
 
@@ -8983,4 +9068,4 @@ twice and one tracked file vanished from the gate.
 
 ---
 
-857 documented test cases across 13 packages.
+867 documented test cases across 13 packages.

@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -602,6 +603,22 @@ func TestR41_NoCredentialShapeSurvivesIntoTheOutput(t *testing.T) {
 		"ht tp://svc:" + secret + "@ghes.example/api/v3",
 		// The PAT-as-username form: parses, and net/http masks passwords only.
 		"https://ghp-" + secret + "pat@127.0.0.1:9/api/v3",
+		// No scheme at all — the documented likely GHES mistake. It parses as
+		// a PATH, so net/http's own masking never engages and there is no
+		// "://" for a scanner to find.
+		"svc:" + secret + "@ghes.example/api/v3",
+		// An "@" inside the password. url.Parse splits on the LAST one; a
+		// scanner that took the first redacted "svc:p" and printed the rest.
+		"https://svc:p@" + secret + "@ghes.exa mple/api/v3",
+		// A control character INSIDE the userinfo. url.Error renders its URL
+		// with %q, so the secret reaches the log in escaped form and a
+		// substitution keyed on the raw bytes never matches it.
+		"https://svc:hun\t" + secret + "@ghes.example/api/v3",
+		"https://svc:hun\"" + secret + "@ghes.exa mple/api/v3",
+		// A credential in the query string rather than the authority. Points
+		// at a dead local port: this shape PARSES, so it reaches the
+		// transport, and a test must never make a real outbound connection.
+		"http://127.0.0.1:9/api/v3?access_token=" + secret + "pat",
 	} {
 		t.Run(apiURL, func(t *testing.T) {
 			repo := oeRepo(t)
@@ -610,13 +627,51 @@ func TestR41_NoCredentialShapeSurvivesIntoTheOutput(t *testing.T) {
 			if code == 0 {
 				t.Fatalf("exit 0 against an unusable API URL:\n%s", errb)
 			}
+			// Both the raw secret and its %q-escaped rendering: a leak that
+			// only reaches the log as `hun\thunter2` is still a leak, and
+			// asserting the raw form alone is what let that shape through.
+			quoted := strings.Trim(strconv.Quote(secret), `"`)
 			for _, s := range []string{out, errb} {
-				if strings.Contains(s, secret) {
-					t.Errorf("the credential reached the output:\n%s", s)
+				for _, form := range []string{secret, quoted} {
+					if strings.Contains(s, form) {
+						t.Errorf("the credential reached the output as %q:\n%s", form, s)
+					}
 				}
 			}
 			if got := oeContent(t, repo); got != oeBefore {
 				t.Errorf("CODEOWNERS moved:\n%s", got)
+			}
+		})
+	}
+}
+
+// SPEC R-41: redaction removes the credential and NOTHING ELSE. A substitution
+// applied to the whole message rather than to the URL turned
+// `--api-url https://e@ghes.example/...` into "nREDACTEDtwork: GREDACTEDt",
+// and made the failing HOST unreadable whenever a username matched part of it
+// — so the operator lost the one detail the message exists to give them
+// (found in review). The host has to survive.
+func TestR41_RedactionDoesNotEatTheRestOfTheMessage(t *testing.T) {
+	for _, tc := range []struct{ apiURL, mustKeep string }{
+		{"https://e@127.0.0.1:9/api/v3", "127.0.0.1"},
+		{"https://ci@127.0.0.1:9/api/v3", "127.0.0.1"},
+		// An "@" in the query is not a credential, and the authority is not
+		// the query: a scanner that stopped at the first "@" claimed "b" as
+		// the host.
+		{"http://127.0.0.1:9/api/v3?x=a@b", "127.0.0.1"},
+	} {
+		t.Run(tc.apiURL, func(t *testing.T) {
+			repo := oeRepo(t)
+			code, _, errb := runCLI(t, "sync", "--repo", repo, "--policy", oeGhost(t),
+				"--verify-owners", "--token", "t", "--api-url", tc.apiURL)
+			if code == 0 {
+				t.Fatalf("exit 0; stderr:\n%s", errb)
+			}
+			if !strings.Contains(errb, tc.mustKeep) {
+				t.Errorf("redaction ate %q, which is not a credential:\n%s", tc.mustKeep, errb)
+			}
+			if strings.Contains(errb, "REDACTEDt") || strings.Contains(errb, "nREDACTED") {
+				t.Errorf("redaction ran over the prose:\n%s", errb)
 			}
 		})
 	}
@@ -681,5 +736,274 @@ func TestR41_EveryVerbDisclosesUnverifiableOwnersTheSameWay(t *testing.T) {
 				t.Errorf("%s said there was nothing to verify and then disclosed an owner it did not verify:\n%s", tc.verb, errb)
 			}
 		})
+	}
+}
+
+// SPEC R-41: a bare ORGANIZATION handle is refused, not waved through. This
+// is the hole a check that stops at "does the account exist" leaves open:
+// `@acme` is a syntactically valid owner token, `GET /users/acme` answers 200
+// for an organization, and GitHub's CODEOWNERS resolver takes a user, an
+// `@org/team` or an email address and nothing else — so the rule is written
+// and owns nobody. It is the reported bug exactly, arriving through the check
+// built to catch it, which is why it is asserted on the file bytes.
+func TestR41_ABareOrganizationHandleIsNotAnOwner(t *testing.T) {
+	repo := oeRepo(t)
+	api, _ := oeAPIWithOverride(t, func(w http.ResponseWriter, r *http.Request) bool {
+		if r.URL.Path == "/users/acme" {
+			oeReply(w, http.StatusOK, `{"login":"acme","type":"Organization"}`)
+			return true
+		}
+		return false
+	}, "org/api-team", "org/everyone")
+	pol := oePolicy(t, `{"version":1,"ops":["add_owner(/services/api/, @acme)"]}`)
+
+	code, _, errb := runCLI(t, "sync", "--repo", repo, "--policy", pol,
+		"--verify-owners", "--token", "t", "--api-url", api)
+
+	if code != 3 {
+		t.Errorf("exit = %d, want 3; stderr:\n%s", code, errb)
+	}
+	if !strings.Contains(errb, "organization") {
+		t.Errorf("stderr does not say the handle names an organization:\n%s", errb)
+	}
+	if got := oeContent(t, repo); got != oeBefore {
+		t.Errorf("an organization handle was written as an owner:\n%s", got)
+	}
+}
+
+// SPEC R-41 (pin): a real USER account is still written. The organization
+// check above is a refusal on the strength of one JSON field, so the case it
+// must not catch is pinned beside it — a build that read every account as an
+// organization would pass the test above and refuse every user owner in every
+// policy.
+func TestR41_AUserAccountIsStillAnOwner(t *testing.T) {
+	repo := oeRepo(t)
+	api, _ := oeAPIWithOverride(t, func(w http.ResponseWriter, r *http.Request) bool {
+		if r.URL.Path == "/users/some-dev" {
+			oeReply(w, http.StatusOK, `{"login":"some-dev","type":"User"}`)
+			return true
+		}
+		return false
+	}, "org/api-team", "org/everyone")
+	pol := oePolicy(t, `{"version":1,"ops":["add_owner(/services/api/, @some-dev)"]}`)
+
+	code, _, errb := runCLI(t, "sync", "--repo", repo, "--policy", pol,
+		"--verify-owners", "--token", "t", "--api-url", api)
+
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr:\n%s", code, errb)
+	}
+	want := "* @org/everyone\n/services/api/ @org/api-team @some-dev\n"
+	if got := oeContent(t, repo); got != want {
+		t.Errorf("CODEOWNERS:\ngot:\n%s\nwant:\n%s", got, want)
+	}
+}
+
+// SPEC R-41/R-13: an account whose TYPE the API will not report is written
+// and DISCLOSED, not refused. The account is proven to exist; only "user or
+// organization" is unanswered, and that answer never arrives — re-running
+// asks the same server the same question, so a fail-closed refusal here is
+// permanent, and a policy carrying `verify_owners` would have no way to
+// proceed at all. One GHES build that trims a field would deadlock every wave
+// against it. This is R-13's treatment of a permanently unverifiable owner,
+// applied to the narrower claim: existence proven, kind not.
+func TestR41_AnUnreadableAccountTypeIsWrittenAndDisclosed(t *testing.T) {
+	repo := oeRepo(t)
+	api, _ := oeAPIWithOverride(t, func(w http.ResponseWriter, r *http.Request) bool {
+		if r.URL.Path == "/users/some-dev" {
+			oeReply(w, http.StatusOK, `{"login":"some-dev"}`)
+			return true
+		}
+		return false
+	}, "org/api-team", "org/everyone")
+	pol := oePolicy(t, `{"version":1,"ops":["add_owner(/services/api/, @some-dev)"]}`)
+
+	code, _, errb := runCLI(t, "sync", "--repo", repo, "--policy", pol,
+		"--verify-owners", "--token", "t", "--api-url", api)
+
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr:\n%s", code, errb)
+	}
+	if !strings.Contains(errb, "@some-dev") || !strings.Contains(errb, "without verification") {
+		t.Errorf("an owner written unverified was not disclosed:\n%s", errb)
+	}
+	if strings.Contains(errb, "organization") {
+		t.Errorf("an unreadable response was reported as an organization:\n%s", errb)
+	}
+	want := "* @org/everyone\n/services/api/ @org/api-team @some-dev\n"
+	if got := oeContent(t, repo); got != want {
+		t.Errorf("CODEOWNERS:\ngot:\n%s\nwant:\n%s", got, want)
+	}
+}
+
+// SPEC R-41/R-20: `check` and `sync` answer the same command line the same
+// way. `check` is the gate a fleet runs first, so a flag combination it
+// accepts and `sync` refuses turns a green gate into a rollout that halts at
+// repo 0 — the failure the shared verification path exists to prevent.
+func TestR41_CheckAndSyncAgreeOnSwitchingTheCheckOff(t *testing.T) {
+	repo := oeRepo(t)
+	api, _ := oeAPI(t, "org/api-team", "org/everyone", "org/platform")
+	pol := oePolicy(t, `{"version":1,"verify_owners":true,
+	  "ops":["add_owner(/services/api/, @org/platform)"]}`)
+
+	checkCode, _, checkErr := runCLI(t, "check", "--policy", pol,
+		"--verify-owners=false", "--token", "t", "--api-url", api)
+	syncCode, _, syncErr := runCLI(t, "sync", "--repo", repo, "--policy", pol,
+		"--verify-owners=false", "--token", "t", "--api-url", api)
+
+	if checkCode != syncCode {
+		t.Errorf("check exited %d and sync exited %d for the same flags\ncheck:\n%s\nsync:\n%s",
+			checkCode, syncCode, checkErr, syncErr)
+	}
+	if checkCode != 3 {
+		t.Errorf("check exit = %d, want 3; stderr:\n%s", checkCode, checkErr)
+	}
+}
+
+// SPEC R-41/R-38a: a user owner costs ONE request, and a mixed-case spelling
+// asks about the same account as the lowercase one. R-41 asks two questions
+// about every bare handle it writes — does it exist, and is it an
+// organization — and both are answered by one response; two lookups per owner
+// would spend a 40-op baseline's rate limit twice over, and a lookup that did
+// not fold could return a 404 meaning nothing but a capital letter.
+func TestR41_AUserOwnerCostsOneLookupWhateverItsCase(t *testing.T) {
+	repo := oeRepo(t)
+	api, calls := oeAPIWithOverride(t, func(w http.ResponseWriter, r *http.Request) bool {
+		if r.URL.Path == "/users/some-dev" {
+			oeReply(w, http.StatusOK, `{"login":"some-dev","type":"User"}`)
+			return true
+		}
+		return false
+	}, "org/api-team", "org/everyone")
+	pol := oePolicy(t, `{"version":1,
+	  "ops":["add_owner(/services/api/, @Some-Dev)","add_owner(/top.md, @some-dev)"]}`)
+
+	code, _, errb := runCLI(t, "sync", "--repo", repo, "--policy", pol,
+		"--verify-owners", "--token", "t", "--api-url", api)
+
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr:\n%s", code, errb)
+	}
+	n := 0
+	for _, c := range calls.all() {
+		if strings.HasPrefix(c, "/users/") {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Errorf("user lookups = %d, want 1: %v", n, calls.all())
+	}
+	// R-38b: folding governs matching, never output.
+	want := "* @org/everyone\n/top.md @org/everyone @some-dev\n/services/api/ @org/api-team @Some-Dev\n"
+	if got := oeContent(t, repo); got != want {
+		t.Errorf("CODEOWNERS:\ngot:\n%s\nwant:\n%s", got, want)
+	}
+}
+
+// SPEC R-41/R-12: a body that is not JSON is TRANSIENT and fails closed. A
+// captive portal, a gateway error page or a proxy answers 200 with HTML to
+// every endpoint, so ProbeAPI, ProbeOrg and TeamExists all "succeed" and the
+// only thing standing between the wave and a file full of unresolvable owners
+// is this branch. Folding it in with the missing-field sentinel — which is
+// permanent, and correctly disclosed rather than refused — wrote every owner
+// in the policy at exit 0, the team owners with no disclosure at all.
+func TestR41_AnUnreadableBodyFailsClosed(t *testing.T) {
+	repo := oeRepo(t)
+	portal := func(w http.ResponseWriter, r *http.Request) bool {
+		w.Header().Set("Content-Type", "text/html")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("<html>captive portal</html>"))
+		return true
+	}
+	api, _ := oeAPIWithOverride(t, portal)
+	pol := oePolicy(t, `{"version":1,
+	  "ops":["add_owner(/services/api/, [@some-dev, @org/ghost-team])"]}`)
+
+	code, _, errb := runCLI(t, "sync", "--repo", repo, "--policy", pol,
+		"--verify-owners", "--token", "t", "--api-url", api)
+
+	if code != 3 {
+		t.Errorf("exit = %d, want 3; stderr:\n%s", code, errb)
+	}
+	if got := oeContent(t, repo); got != oeBefore {
+		t.Errorf("a portal that answers 200 to everything got owners written:\n%s", got)
+	}
+}
+
+// SPEC R-41: an account type this tool does not recognise is reported, and
+// NAMED. "User" is the only account CODEOWNERS resolves, so a Bot is as dead
+// a line as an organization — but the two send the operator to different
+// edits, so the message says which it found rather than guessing.
+func TestR41_AnUnrecognisedAccountTypeIsRefusedAndNamed(t *testing.T) {
+	repo := oeRepo(t)
+	api, _ := oeAPIWithOverride(t, func(w http.ResponseWriter, r *http.Request) bool {
+		if r.URL.Path == "/users/some-bot" {
+			oeReply(w, http.StatusOK, `{"login":"some-bot","type":"Bot"}`)
+			return true
+		}
+		return false
+	}, "org/api-team", "org/everyone")
+	pol := oePolicy(t, `{"version":1,"ops":["add_owner(/services/api/, @some-bot)"]}`)
+
+	code, _, errb := runCLI(t, "sync", "--repo", repo, "--policy", pol,
+		"--verify-owners", "--token", "t", "--api-url", api)
+
+	if code != 3 {
+		t.Errorf("exit = %d, want 3; stderr:\n%s", code, errb)
+	}
+	if !strings.Contains(errb, "Bot") {
+		t.Errorf("stderr does not name the type it found:\n%s", errb)
+	}
+	if strings.Contains(errb, "organization") {
+		t.Errorf("a Bot was reported as an organization:\n%s", errb)
+	}
+	if got := oeContent(t, repo); got != oeBefore {
+		t.Errorf("CODEOWNERS moved:\n%s", got)
+	}
+}
+
+// SPEC R-41: the disclosure is printed ONCE. It goes to stderr as a note and
+// into the run's warnings, and stderr re-renders every warning — so the same
+// sentence appeared twice under two labels, "note:" and "warning:", in every
+// run that had an owner to disclose.
+func TestR41_TheUnverifiableDisclosureIsPrintedOnce(t *testing.T) {
+	repo := oeRepo(t)
+	api, _ := oeAPI(t, "org/api-team", "org/everyone")
+	pol := oePolicy(t, `{"version":1,"ops":["add_owner(/services/api/, dev@example.com)"]}`)
+
+	code, _, errb := runCLI(t, "sync", "--repo", repo, "--policy", pol,
+		"--verify-owners", "--token", "t", "--api-url", api)
+
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr:\n%s", code, errb)
+	}
+	if n := strings.Count(errb, "without verification"); n != 1 {
+		t.Errorf("the disclosure printed %d times, want 1:\n%s", n, errb)
+	}
+}
+
+// SPEC R-41: "there was nothing to verify" is said out loud. An operator who
+// asked for verification, got exit 0 and had no request made cannot otherwise
+// tell that outcome from a wave whose every owner was checked — which is the
+// silent-success shape R-41 exists to remove, reproduced inside R-41.
+func TestR41_NothingToVerifyIsDisclosed(t *testing.T) {
+	repo := initRepo(t, map[string]string{
+		"CODEOWNERS":        "* @org/everyone\n/services/api/ @org/api-team @org/ghost\n",
+		"services/api/a.go": "package api\n",
+	})
+	api, calls := oeAPI(t)
+	pol := oePolicy(t, `{"version":1,"verify_owners":true,"on_empty":"error",
+	  "ops":["remove_owner(/services/api/, @org/ghost)"]}`)
+
+	code, _, errb := runCLI(t, "sync", "--repo", repo, "--policy", pol, "--token", "t", "--api-url", api)
+
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr:\n%s", code, errb)
+	}
+	if len(calls.all()) != 0 {
+		t.Errorf("requests were made with nothing to ask about: %v", calls.all())
+	}
+	if !strings.Contains(errb, "nothing to verify") {
+		t.Errorf("a verification that checked nothing said nothing:\n%s", errb)
 	}
 }

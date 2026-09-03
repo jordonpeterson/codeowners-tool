@@ -124,7 +124,7 @@ const inconclusiveGuidance = "nothing was written and no repository was opened �
 // owns nobody.
 type verifier interface {
 	ownerid.Verifier
-	AccountIsOrganization(login string) (bool, error)
+	AccountType(login string) (string, error)
 }
 
 func verifyOwners(v verifier, owners []string) (kindUnknown []string, err error) {
@@ -152,11 +152,11 @@ func verifyOwners(v verifier, owners []string) (kindUnknown []string, err error)
 				// about the spelling the operator typed would both miss the
 				// cache the existence check just filled and risk a 404 that
 				// means nothing more than a capital letter.
-				isOrg, orgErr := v.AccountIsOrganization(strings.ToLower(strings.TrimPrefix(o, "@")))
+				kind, kindErr := v.AccountType(strings.ToLower(strings.TrimPrefix(o, "@")))
 				switch {
-				case orgErr != nil && !errors.Is(orgErr, ghapi.ErrUnreadableAccountType):
-					lookupErr = orgErr
-				case orgErr != nil:
+				case kindErr != nil && !errors.Is(kindErr, ghapi.ErrUnreadableAccountType):
+					lookupErr = kindErr
+				case kindErr != nil:
 					// The account EXISTS — that much is proven — and the
 					// server did not say what kind it is. Refusing would be
 					// permanent, not fail-closed: re-running asks the same
@@ -168,9 +168,17 @@ func verifyOwners(v verifier, owners []string) (kindUnknown []string, err error)
 					// treatment of a permanently unverifiable owner applies —
 					// written, and said out loud.
 					kindUnknown = append(kindUnknown, o)
-				case isOrg:
+				case kind == "Organization":
 					gone = true
 					reason = fmt.Sprintf("%s names an organization, not a user or a team; CODEOWNERS resolves an owner only as a user, an @org/team or an email address, so this one is nobody — you probably meant %s/<team>", o, o)
+				case kind != "User":
+					// Not silently written just because this tool has not
+					// heard of the type. "User" is the only account
+					// CODEOWNERS resolves, so anything else is reported —
+					// named, since a Bot and an organization send the
+					// operator to different edits.
+					gone = true
+					reason = fmt.Sprintf("%s is a %s account, and CODEOWNERS resolves an owner only as a user, an @org/team or an email address, so this one is nobody", o, kind)
 				}
 			}
 		}
@@ -249,14 +257,19 @@ func unverifiableNote(owners []string) string {
 // verification" after `sync` and `plan` learned not to, so the verb a fleet
 // runs as its gate contradicted the verb that writes (found in review). Three
 // hand-rolled copies of a two-branch rendering is three chances to disagree.
-func verifyNotes(stderr io.Writer, unverifiable []string, err error) {
+// viaWarnings says the caller has a warnings sink of its own that will render
+// the unverifiable disclosure — `sync`, whose rec.Warnings reaches stderr, the
+// JSON record and the PR body. Printing it here as well put the same sentence
+// on stderr twice under two labels, "note:" and "warning:" (found in review).
+// `check` and `plan` have no such sink and pass false.
+func verifyNotes(stderr io.Writer, unverifiable []string, err error, viaWarnings bool) {
 	// "Nothing to verify" only when there is genuinely nothing to say: with
 	// email owners present the disclosure below is the accurate one, and both
 	// lines together read as a contradiction.
 	if errors.Is(err, errNothingToVerify) && len(unverifiable) == 0 {
 		fmt.Fprintln(stderr, nothingToVerifyNote)
 	}
-	if len(unverifiable) > 0 {
+	if len(unverifiable) > 0 && !viaWarnings {
 		fmt.Fprintln(stderr, "note:", unverifiableNote(unverifiable))
 	}
 }

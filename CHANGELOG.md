@@ -37,7 +37,8 @@ between classes is a major release and is called out explicitly either way.
   A bare **organization** handle is refused too: `@acme` is a valid owner token
   and `GET /users/acme` answers 200, but CODEOWNERS resolves only a user, an
   `@org/team` or an email — so it is the same dead line, reached through the
-  check meant to catch it.
+  check meant to catch it. Any other account type is refused and named the same
+  way; only a `User` is written.
 
   `plan --verify-owners` runs the same check on the reviewable half of the
   pipeline, where the precise taxonomy applies: exit 3 for an owner that does

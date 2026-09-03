@@ -738,7 +738,7 @@ func cmdPlan(args []string, stdout, stderr io.Writer) int {
 		case verr != nil:
 			return errExit(&plan.InvalidError{Msg: verr.Error()}, stderr)
 		}
-		verifyNotes(stderr, unverifiable, verr)
+		verifyNotes(stderr, unverifiable, verr, false)
 	} else if isFlagSet(fs, "token") || isFlagSet(fs, "api-url") {
 		fmt.Fprintln(stderr, idleCredentialNote)
 	}
