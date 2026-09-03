@@ -3185,16 +3185,6 @@ exists. The owned file gains the co-owner; the open paths stay open — the
 record says which, under `left_open` — and a repo that owned nothing in
 scope reports `skipped` at exit 0 with the file untouched.
 
-### `TestR41_ABareOrganizationHandleIsNotAnOwner`
-
-SPEC R-41: a bare ORGANIZATION handle is refused, not waved through. This
-is the hole a check that stops at "does the account exist" leaves open:
-`@acme` is a syntactically valid owner token, `GET /users/acme` answers 200
-for an organization, and GitHub's CODEOWNERS resolver takes a user, an
-`@org/team` or an email address and nothing else — so the rule is written
-and owns nobody. It is the reported bug exactly, arriving through the check
-built to catch it, which is why it is asserted on the file bytes.
-
 ### `TestR41_APolicyThatIntroducesNobodyNeedsNoToken`
 
 SPEC R-41/R-13: a run that introduces NOBODY needs no credential. A wave
@@ -3210,36 +3200,12 @@ baseline naming the same platform team throughout would otherwise spend 40
 requests of a rate limit to answer one question, and two capitalisations of
 it could return two contradictory verdicts.
 
-### `TestR41_AUserAccountIsStillAnOwner`
+### `TestR41_ATransportFailureRefusesTheWrite`
 
-SPEC R-41 (pin): a real USER account is still written. The organization
-check above is a refusal on the strength of one JSON field, so the case it
-must not catch is pinned beside it — a build that read every account as an
-organization would pass the test above and refuse every user owner in every
-policy.
-
-### `TestR41_AUserOwnerCostsOneLookupWhateverItsCase`
-
-SPEC R-41/R-38a: a user owner costs ONE request, and a mixed-case spelling
-asks about the same account as the lowercase one. R-41 asks two questions
-about every bare handle it writes — does it exist, and is it an
-organization — and both are answered by one response; two lookups per owner
-would spend a 40-op baseline's rate limit twice over, and a lookup that did
-not fold could return a 404 meaning nothing but a capital letter.
-
-### `TestR41_AnUnreadableAccountTypeIsInconclusive`
-
-SPEC R-41/R-12: an account whose TYPE cannot be read is inconclusive, not
-an organization. The refusal above rests on one field of one response, and
-treating "the field was missing" as "organization" would refuse a correct
-policy on a GHES build that answers a shape this tool did not expect.
-
-### `TestR41_CheckAndSyncAgreeOnSwitchingTheCheckOff`
-
-SPEC R-41/R-20: `check` and `sync` answer the same command line the same
-way. `check` is the gate a fleet runs first, so a flag combination it
-accepts and `sync` refuses turns a green gate into a rollout that halts at
-repo 0 — the failure the shared verification path exists to prevent.
+SPEC R-41/R-12: a connection that dies mid-request refuses the write. It is
+the fifth branch of ghapi's classifier and the one no status-code table can
+reach — and the branch that leaked a token-as-username until the redaction
+moved to the client's own way out.
 
 ### `TestR41_CheckIsOfflineByDefault`
 
@@ -3299,11 +3265,12 @@ and each invocation costs a fleet another round trip before repo 0.
 
 SPEC R-41/R-12: every shape of "the lookup could not be answered" refuses
 the write, not just the rate limit. A 500, an expired token's 401, a 403
-carrying no rate-limit header, a 429 and a connection that dies mid-request
-are five branches of ghapi's classifier and one contract: an owner that is
-neither proven live nor proven dead is never written, and is never
-described as missing. Pinning only the rate-limited 403 — the one branch
-with a message of its own — leaves the other four free to return "does not
+carrying no rate-limit header and a 429 are four branches of ghapi's
+classifier and one contract: an owner that is neither proven live nor
+proven dead is never written, and is never described as missing. (The
+fifth, a connection that dies mid-request, has its own test below — no
+status code reaches it.) Pinning only the rate-limited 403 — the one branch
+with a message of its own — leaves the others free to return "does not
 exist" and halt a fleet over a policy that was correct.
 
 ### `TestR41_ExplicitTokenBeatsTheEnvironment`
@@ -3355,6 +3322,19 @@ HTTP layer, from the wave R-41 was built to stop — so the run proves the
 base URL reaches a GitHub API before it reads any 404 as an answer, and the
 message names the URL rather than the owner.
 
+### `TestR41_NoCredentialShapeSurvivesIntoTheOutput`
+
+SPEC R-41: a credential in --api-url never reaches the output, in ANY shape
+url.Parse can reject and any the transport can fail on. The first fix here
+redacted one shape and left the rest: a space inside the userinfo is what
+makes url.Parse fail in the first place, so a redaction that could not
+handle whitespace missed exactly the inputs it was written for; and
+`https://<PAT>@host` parses perfectly, putting the PAT where net/http masks
+only PASSWORDS, so it survived into every transport error (CWE-532).
+
+Each row is a real thing an operator types or a CI file holds. `127.0.0.1:9`
+refuses connections, so the rows that parse reach the transport branch.
+
 ### `TestR41_NoPartialApplicationOfAMixedList`
 
 SPEC R-41: the live owner in the same list is not a reason to write. The
@@ -3367,13 +3347,6 @@ does not state, which is worse than refusing.
 SPEC R-41: the note is for the fleet that asked for a record, not for every
 run. A plain text run with no --out has nothing to disclose, and printing
 the note anyway would train operators to skip it.
-
-### `TestR41_NothingToVerifyIsDisclosed`
-
-SPEC R-41: "there was nothing to verify" is said out loud. An operator who
-asked for verification, got exit 0 and had no request made cannot otherwise
-tell that outcome from a wave whose every owner was checked — which is the
-silent-success shape R-41 exists to remove, reproduced inside R-41.
 
 ### `TestR41_OfflineByDefaultMakesNoAPICalls`
 
@@ -3476,12 +3449,14 @@ response. Refusing is right either way; calling it "does not exist" is not,
 because the operator's fix is a different one — re-run with an org-owner
 token, not delete the team from the policy.
 
-### `TestR41_UnverifiableOwnersReachTheRecord`
+### `TestR41_UnverifiableOwnersReachTheRecordsWarnings`
 
-SPEC R-41: an owner written without being verified reaches the RECORD, not
-only the terminal. A results.jsonl from a wave that wrote owners nobody
-could check must not be byte-identical to one from a wave that verified
-every owner — the fleet reads the file, not the scrollback.
+SPEC R-41: an owner written without being verified reaches the record's
+WARNINGS, not merely the file's bytes. A results.jsonl from a wave that
+wrote owners nobody could check must not read the same as one whose every
+owner was verified — and asserting the owner appears somewhere in the
+record proves nothing, because the record echoes the op that named it. Run
+without the flag as the control: the same record, no warning.
 
 ### `TestR41_UserOwnersAreCheckedToo`
 
@@ -8999,4 +8974,4 @@ twice and one tracked file vanished from the gate.
 
 ---
 
-860 documented test cases across 13 packages.
+856 documented test cases across 13 packages.

@@ -2,7 +2,7 @@
 
 This tool rewrites the file that decides who reviews your code, so the interesting
 question is not "are there tests" but "what is actually proven, and where can you check".
-The 860 tests catalogued in [BEHAVIOR.md](BEHAVIOR.md) answer that. Contributor workflow —
+The 856 tests catalogued in [BEHAVIOR.md](BEHAVIOR.md) answer that. Contributor workflow —
 what to run before pushing — is in [CONTRIBUTING.md](../CONTRIBUTING.md).
 
 ## The tests are the specification

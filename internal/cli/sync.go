@@ -223,9 +223,10 @@ func cmdSync(args []string, stdout, stderr io.Writer) int {
 	dryRun := fs.Bool("dry-run", false, "change no CODEOWNERS; --out and --summary-out still emit")
 	format := fs.String("format", "text", "text|json — governs stdout only")
 	// R-41. Off by default: a sync that required a token would break every
-	// offline run the fleet verbs were built for. --token and --api-url are
-	// environment, not intent, so unlike --create they are legal beside
-	// --policy; --verify-owners states intent and is not (R-20).
+	// offline run the fleet verbs were built for. All three are legal beside
+	// --policy — --token and --api-url are environment rather than intent, and
+	// --verify-owners can only ADD the check, never drop one the policy asked
+	// for (the =false direction is refused below).
 	verifyOwnersFlag := fs.Bool("verify-owners", false, "check with GitHub that every owner the run would write exists, and refuse the run if one does not (R-41); needs --token. A policy's \"verify_owners\": true turns it on for every run")
 	token := fs.String("token", "", "GitHub token for --verify-owners (default $GITHUB_TOKEN)")
 	apiURL := fs.String("api-url", "", "GitHub API base URL for --verify-owners (GHES needs /api/v3)")
@@ -385,12 +386,18 @@ func cmdSync(args []string, stdout, stderr io.Writer) int {
 		unverifiable, err := verifyOwnersFor(*token, *apiURL, opList)
 		switch {
 		case errors.Is(err, errNothingToVerify):
-			fmt.Fprintln(stderr, nothingToVerifyNote)
+			// Only when there is genuinely nothing to say. With email owners
+			// present the disclosure below is the accurate one, and printing
+			// both said "nothing to verify" and "written without
+			// verification" in consecutive lines.
+			if len(unverifiable) == 0 {
+				fmt.Fprintln(stderr, nothingToVerifyNote)
+			}
 		case err != nil:
 			return exit3sGuided(err, verifyGuidance(err))
 		}
 		if len(unverifiable) > 0 {
-			fmt.Fprintln(stderr, unverifiableNote(unverifiable))
+			fmt.Fprintln(stderr, "note:", unverifiableNote(unverifiable))
 			// Also into the record and the PR body: a results.jsonl from a
 			// wave that wrote owners nobody could check must not be
 			// byte-identical to one from a wave that verified every owner.
@@ -1924,7 +1931,7 @@ func cmdCheck(args []string, stdout, stderr io.Writer) int {
 			return exit3guided(stderr, err, verifyGuidance(err))
 		}
 		if len(unverifiable) > 0 {
-			fmt.Fprintln(stderr, unverifiableNote(unverifiable))
+			fmt.Fprintln(stderr, "note:", unverifiableNote(unverifiable))
 		}
 	} else if passed["token"] || passed["api-url"] {
 		fmt.Fprintln(stderr, idleCredentialNote)

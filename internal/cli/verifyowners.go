@@ -100,7 +100,11 @@ func (e *inconclusiveOwnersError) Reasons() []string { return e.reasons }
 // inconclusiveGuidance is the remedy for the error above, and the reason
 // exit3 takes a guidance line at all: sending an operator to edit a correct
 // policy because their token was rate-limited costs them the rollout twice.
-const inconclusiveGuidance = "nothing was written and no repository was opened — this is not a policy error; re-run when the lookup can be answered, or drop the owner check to write without it"
+// Deliberately does NOT offer "drop the owner check and write anyway": a
+// policy carrying `verify_owners` cannot be overridden from the command line
+// (that is the point of putting it in the artifact), so the advice would be
+// impossible to follow on exactly the fleet path R-12's guidance exists for.
+const inconclusiveGuidance = "nothing was written and no repository was opened — this is not a policy error; re-run when the lookup can be answered"
 
 // verifyOwners runs R-41 over owners already known to be checkable, returning
 // one error naming every owner that failed.
@@ -122,7 +126,7 @@ type verifier interface {
 	AccountIsOrganization(login string) (bool, error)
 }
 
-func verifyOwners(v verifier, owners []string) error {
+func verifyOwners(v verifier, owners []string) (kindUnknown []string, err error) {
 	var dead []string
 	// Inconclusive lookups are grouped by REASON, not listed per owner. One
 	// dead resolver or one rate limit makes every lookup in a 40-op baseline
@@ -149,8 +153,20 @@ func verifyOwners(v verifier, owners []string) error {
 				// means nothing more than a capital letter.
 				isOrg, orgErr := v.AccountIsOrganization(strings.ToLower(strings.TrimPrefix(o, "@")))
 				switch {
-				case orgErr != nil:
+				case orgErr != nil && !errors.Is(orgErr, ghapi.ErrUnreadableAccountType):
 					lookupErr = orgErr
+				case orgErr != nil:
+					// The account EXISTS — that much is proven — and the
+					// server did not say what kind it is. Refusing would be
+					// permanent, not fail-closed: re-running asks the same
+					// server the same question, and a policy carrying
+					// `verify_owners` has no way to proceed at all, so one
+					// GHES build that trims a field would deadlock every wave
+					// against it. The narrower claim is the honest one: the
+					// owner is proven to exist, its kind is not, and R-13's
+					// treatment of a permanently unverifiable owner applies —
+					// written, and said out loud.
+					kindUnknown = append(kindUnknown, o)
 				case isOrg:
 					gone = true
 					reason = fmt.Sprintf("%s names an organization, not a user or a team; CODEOWNERS resolves an owner only as a user, an @org/team or an email address, so this one is nobody — you probably meant %s/<team>", o, o)
@@ -181,11 +197,11 @@ func verifyOwners(v verifier, owners []string) error {
 	}
 	switch {
 	case len(dead) > 0:
-		return &deadOwnersError{reasons: append(dead, inconclusive...), mixed: len(inconclusive) > 0}
+		return kindUnknown, &deadOwnersError{reasons: append(dead, inconclusive...), mixed: len(inconclusive) > 0}
 	case len(inconclusive) > 0:
-		return &inconclusiveOwnersError{reasons: inconclusive}
+		return kindUnknown, &inconclusiveOwnersError{reasons: inconclusive}
 	}
-	return nil
+	return kindUnknown, nil
 }
 
 // verifyGuidance is the advice line for one of R-41's two refusals, and the
@@ -211,11 +227,17 @@ func verifyGuidance(err error) string {
 	return inconclusiveGuidance
 }
 
-// unverifiableNote discloses the owners R-41 wrote without checking. Silence
-// would be the defect: the operator asked for verification and got a partial
-// one, and "verified" is exactly what they would otherwise read into exit 0.
+// unverifiableNote discloses the owners R-41 wrote without checking: email
+// owners, whose address the API cannot see (R-13), and accounts whose kind the
+// server would not report. Silence would be the defect — the operator asked
+// for verification and got a partial one, and "verified" is exactly what they
+// would otherwise read into exit 0.
+//
+// No "note:" prefix: this string also goes into the run's warnings, where the
+// record and the PR body add their own label, and a baked-in one rendered as
+// "warning: note: …".
 func unverifiableNote(owners []string) string {
-	return fmt.Sprintf("note: %s written without verification — an email owner resolves through a verified address the API cannot see (R-13); confirm by hand",
+	return fmt.Sprintf("%s written without verification — an owner the GitHub API cannot vouch for (an email address, or an account whose type it would not report; R-13); confirm by hand",
 		strings.Join(owners, ", "))
 }
 
@@ -275,7 +297,8 @@ func verifyOwnersFor(token, apiURL string, list []ops.Op) (unverifiable []string
 			"cannot verify any owner (%s) — refusing to write owners whose existence is unproven (R-12)",
 			ownerid.Reason(err))}}
 	}
-	return unverifiable, verifyOwners(client, checkable)
+	kindUnknown, err := verifyOwners(client, checkable)
+	return append(unverifiable, kindUnknown...), err
 }
 
 // errNothingToVerify is returned when the run introduces no owner the API can

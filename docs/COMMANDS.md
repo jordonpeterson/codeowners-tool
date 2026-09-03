@@ -73,7 +73,7 @@ at once, because fixing a generated 40-op policy one error per run is miserable.
 | `--on-empty` | Policy when `remove_owner` empties an owner set. Allowed only with `--op`; with `--policy`, set `on_empty` in the file instead. An unknown value is exit 3, checked before any repository is opened. |
 | `--create` | Permission to write a CODEOWNERS if the repo has none — not an instruction to. Off by default, never overwrites, and a run with nothing to write creates nothing (no file, no `.github/`). With `--file`, the file is created at that path instead of `.github/CODEOWNERS` — unless that path outranks the CODEOWNERS this repo is already governed by, which is exit 2, since the new file would supersede it under S-8. Allowed only with `--op`; with `--policy`, set `create` in the file instead (R-34b), or the artifact in git is not the policy that ran. |
 | `--max-paths-changed` | R-25 ceiling: refuse (exit 2) if the run would change the owners of more than N paths. Off by default. Allowed only with `--op`; with `--policy`, set `max_paths_changed` in the file. |
-| `--verify-owners` | Ask GitHub whether every owner the run would put into force exists, and refuse the whole run (exit 3) if one does not — the check that stops a typo'd team being written as a rule that owns nothing (R-41). Off by default; needs a token. May be passed beside `--policy`, unlike `--create`: it changes nothing that gets written, only whether the run happens. `--verify-owners=false` against a policy that set `verify_owners` is exit 3. |
+| `--verify-owners` | Ask GitHub whether every owner the run would put into force exists, and refuse the whole run (exit 3) if one does not — the check that stops a typo'd team being written as a rule that owns nothing (R-41). Off by default; needs a token. May be passed beside `--policy`, unlike `--create`: it changes nothing that gets written, only whether the run happens. `--verify-owners=false` against a policy that set `verify_owners` to **true** is exit 3, on `check` as well as `sync`. |
 | `--token` / `--api-url` | Credential and API base URL for `--verify-owners`. `--token` defaults to `$GITHUB_TOKEN`; GHES needs `/api/v3` on the URL. Environment rather than intent, so both are legal beside `--policy`. |
 | `--dry-run` | Makes no change to CODEOWNERS. `--out` and `--summary-out` still emit. |
 | `--format` | `text` (default) or `json`. Under `json`, stdout is data and stderr is logs. |
@@ -130,6 +130,12 @@ An owner that *exists* is still not necessarily one GitHub will route a review t
 organization handle (`@acme` rather than `@acme/team`) is refused — CODEOWNERS resolves
 only a user, an `@org/team` or an email — but write access is not checked here; that is
 `audit`'s A-3, which needs the repository the token is standing in.
+
+`audit` and `lint` do not yet make the organization-handle judgement: A-1 asks only whether
+the account exists, so `audit` will report an `@acme` already in a file as live and `lint`
+will not remove it, while `sync --verify-owners` refuses to write one. The asymmetry is
+deliberate for now — `lint` DELETES on A-1, and widening what it deletes is a change to
+Engine B's contract that belongs in its own review.
 
 A lookup that cannot be answered — rate limit, 5xx, an expired token, or a team 404 seen
 by a token that is not an org owner (a secret team returns the same 404 as a deleted one)
@@ -240,7 +246,8 @@ classes for scripts that already read `3` as "stop".
 `check` keeps its own two-code contract for the same reason — `0` for a valid policy, `3`
 otherwise, including an owner lookup that could not be answered. `plan` is on the precise
 taxonomy and does distinguish them: `3` for an owner that does not exist, `5` for a lookup
-that could not be answered. `apply` runs no check at all; it executes a plan a human has
+that could not be answered — and `3` when a run has both, since the dead owner is settled
+whatever the lookup would have said. `apply` runs no check at all; it executes a plan a human has
 already approved, and `plan` is where that approval is earned.
 
 | Code | Meaning |

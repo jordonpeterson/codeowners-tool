@@ -15,17 +15,23 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"sync"
 	"time"
 )
+
+// ErrUnreadableAccountType reports that an account exists but the API did not
+// say whether it is a user or an organization. Permanent rather than
+// transient: unlike every other inconclusive answer, re-running asks the same
+// server the same question and gets the same silence.
+var ErrUnreadableAccountType = errors.New("the API did not report an account type")
 
 // Inconclusive is R-12's error: the lookup could not be answered
 // definitively; the caller must report `unknown`, exit 5, and propose
@@ -149,21 +155,47 @@ func New(baseURL, token string, cache Cache) *Client {
 
 func (c *Client) key(k string) string { return c.scope + ":" + k }
 
+// rawUserinfo returns the userinfo of a URL-shaped string — everything
+// between "://" and the first "@" — or "" if there is none.
+//
+// Deliberately its own scanner rather than url.Parse: the strings that MUST be
+// redacted are exactly the ones url.Parse rejects, and a space inside the
+// userinfo is the commonest way to produce one. It is also why the first
+// attempt at this leaked: a regex that excluded whitespace from userinfo
+// missed every input it was written for.
+//
+// The "/" guard is what keeps it from claiming an "@" that belongs to a path
+// (`https://host/a@b`): userinfo cannot span a slash.
+func rawUserinfo(raw string) string {
+	i := strings.Index(raw, "://")
+	if i < 0 {
+		return ""
+	}
+	rest := raw[i+3:]
+	at := strings.IndexByte(rest, '@')
+	if at < 0 {
+		return ""
+	}
+	if slash := strings.IndexByte(rest, '/'); slash >= 0 && slash < at {
+		return ""
+	}
+	return rest[:at]
+}
+
 // redactURL strips userinfo before a base URL reaches a message.
 //
 // `--api-url https://svc:hunter2@ghes.example/api/v3` is a legal thing to type,
 // and the "base URL looks wrong" path is the single most likely error a GHES
 // operator hits — so the credential landed in stderr, and from there into a CI
-// log (CWE-532). Go's own transport redacts userinfo in its error strings; the
-// tool was leaking what its runtime deliberately hides.
+// log (CWE-532).
 //
-// UNPARSEABLE input is redacted too, textually. The first version returned it
-// as-is on the reasoning that a string url.Parse rejects "is not a URL, so it
-// has no userinfo to expose" — which is false in the one case that matters:
-// `--api-url "ht tp://svc:hunter2@ghes.example/api/v3"` is rejected for the
-// space and still carries the password, and the parse error is exactly the
-// message that renders it. Everything but the credential is preserved,
-// because the operator needs the rest of the string to see their typo.
+// UNPARSEABLE input is redacted too. The first version returned it as-is on
+// the reasoning that a string url.Parse rejects "is not a URL, so it has no
+// userinfo to expose", which is false in the one case that matters: an
+// --api-url with a space in it is rejected FOR the space and still carries the
+// password into the parse error that renders it. Everything but the credential
+// is preserved, because the operator needs the rest of the string to see their
+// typo.
 func redactURL(raw string) string {
 	if u, err := url.Parse(raw); err == nil {
 		if u.User == nil {
@@ -172,13 +204,36 @@ func redactURL(raw string) string {
 		u.User = url.User("REDACTED")
 		return u.String()
 	}
-	return userinfoRe.ReplaceAllString(raw, "://REDACTED@")
+	info := rawUserinfo(raw)
+	if info == "" {
+		return raw
+	}
+	return strings.Replace(raw, info+"@", "REDACTED@", 1)
 }
 
-// userinfoRe matches the `://user:password@` of a URL that url.Parse will not
-// accept. Deliberately requires the colon: `://host@` has no credential in it,
-// and a scheme-relative string with an @ in a path segment is not userinfo.
-var userinfoRe = regexp.MustCompile(`://[^/@\s]*:[^/@\s]*@`)
+// redact removes this client's secrets from a message on its way to stderr.
+//
+// Every earlier attempt redacted at ONE site and was defeated somewhere else:
+// url.Error renders its URL with %q, so a base URL holding a control character
+// no longer matches the raw string a caller was substituting; and the
+// transport branch was never redacted at all, so the canonical
+// `https://<PAT>@host` spelling — which parses perfectly, and whose PAT is a
+// USERNAME, which net/http does not mask — reached the log on any connection
+// failure. So redaction happens here, on the way out, keyed on the secret
+// rather than on the shape of the message.
+//
+// The token is only substituted when it is long enough to be a real
+// credential: `--token t` in a test would otherwise redact every "t" in the
+// sentence, which is both useless and a way to hide the message's meaning.
+func (c *Client) redact(s string) string {
+	if info := rawUserinfo(c.BaseURL); info != "" {
+		s = strings.ReplaceAll(s, info, "REDACTED")
+	}
+	if len(c.Token) >= 8 {
+		s = strings.ReplaceAll(s, c.Token, "REDACTED")
+	}
+	return s
+}
 
 // pathSeg encodes one value as exactly one URL path segment.
 //
@@ -206,7 +261,7 @@ func (c *Client) get(path, accept string) (int, []byte, error) {
 		// put the credential in stderr and from there into a CI log
 		// (CWE-532), which is exactly what redactURL exists to stop
 		// everywhere else.
-		return 0, nil, &Inconclusive{Reason: strings.ReplaceAll(err.Error(), c.BaseURL, redactURL(c.BaseURL))}
+		return 0, nil, &Inconclusive{Reason: c.redact(err.Error())}
 	}
 	if c.Token != "" {
 		req.Header.Set("Authorization", "Bearer "+c.Token)
@@ -216,7 +271,7 @@ func (c *Client) get(path, accept string) (int, []byte, error) {
 	}
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
-		return 0, nil, &Inconclusive{Reason: "network: " + err.Error()}
+		return 0, nil, &Inconclusive{Reason: c.redact("network: " + err.Error())}
 	}
 	defer resp.Body.Close()
 	body, rerr := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
@@ -373,15 +428,24 @@ func (c *Client) AccountIsOrganization(login string) (bool, error) {
 			return false, err
 		}
 		if status == 404 {
-			// Not an account at all; existence is UserExists' question and it
-			// has already been asked. Nothing here to call an organization.
-			return false, nil
+			// NOT rendered as "not an organization". Callers reach this only
+			// after proving the account exists, so a 404 now means the
+			// precondition was skipped or the account vanished between two
+			// requests — and "false" here is the write-it direction, which is
+			// the one answer a bare 404 must never buy in this package (R-12).
+			return false, &Inconclusive{Reason: fmt.Sprintf(
+				"@%s was not found when its account type was read, though it existed a moment earlier", login)}
 		}
 		var out struct {
 			Type string `json:"type"`
 		}
 		if json.Unmarshal(body, &out) != nil || out.Type == "" {
-			return false, &Inconclusive{Reason: "unreadable account type for @" + login}
+			// Distinguishable from every other inconclusive answer, because
+			// it is the only one re-running cannot settle: the server will
+			// answer identically forever. A caller that fails closed on it
+			// would refuse a correct policy permanently, so it is given its
+			// own sentinel to recognise.
+			return false, fmt.Errorf("%w for @%s", ErrUnreadableAccountType, login)
 		}
 		return out.Type == "Organization", nil
 	})
