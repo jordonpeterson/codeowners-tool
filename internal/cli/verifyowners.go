@@ -142,7 +142,12 @@ func verifyOwners(v verifier, owners []string) error {
 		// only for a bare handle.
 		if lookupErr == nil && !gone {
 			if _, _, isTeam := ownerid.SplitTeam(o); !isTeam {
-				isOrg, orgErr := v.AccountIsOrganization(strings.TrimPrefix(o, "@"))
+				// Folded, exactly as ownerid.IsGone folds its own lookups
+				// (R-38a): `@Acme` and `@acme` are one account, and asking
+				// about the spelling the operator typed would both miss the
+				// cache the existence check just filled and risk a 404 that
+				// means nothing more than a capital letter.
+				isOrg, orgErr := v.AccountIsOrganization(strings.ToLower(strings.TrimPrefix(o, "@")))
 				switch {
 				case orgErr != nil:
 					lookupErr = orgErr

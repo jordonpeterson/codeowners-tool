@@ -327,7 +327,7 @@ func (c *Client) ProbeAPI() error {
 // GitHub API".
 func (c *Client) UserExists(login string) (bool, error) {
 	return c.cachedBool("user:"+login, func() (bool, error) {
-		status, _, err := c.get("/users/"+pathSeg(login), "")
+		status, body, err := c.get("/users/"+pathSeg(login), "")
 		if err != nil {
 			return false, err
 		}
@@ -336,6 +336,20 @@ func (c *Client) UserExists(login string) (bool, error) {
 				return false, err
 			}
 			return false, nil
+		}
+		// The same response answers AccountIsOrganization, and R-41 asks both
+		// questions about every bare handle it writes. Filing the answer here
+		// makes that one request instead of two identical ones; the lookup
+		// below still stands on its own for any caller that skips this.
+		var out struct {
+			Type string `json:"type"`
+		}
+		if json.Unmarshal(body, &out) == nil && out.Type != "" {
+			b := []byte("0")
+			if out.Type == "Organization" {
+				b = []byte("1")
+			}
+			c.cache.Set(c.key("account-is-org:"+login), b)
 		}
 		return true, nil
 	})

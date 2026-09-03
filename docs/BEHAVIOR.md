@@ -3218,6 +3218,15 @@ must not catch is pinned beside it — a build that read every account as an
 organization would pass the test above and refuse every user owner in every
 policy.
 
+### `TestR41_AUserOwnerCostsOneLookupWhateverItsCase`
+
+SPEC R-41/R-38a: a user owner costs ONE request, and a mixed-case spelling
+asks about the same account as the lowercase one. R-41 asks two questions
+about every bare handle it writes — does it exist, and is it an
+organization — and both are answered by one response; two lookups per owner
+would spend a 40-op baseline's rate limit twice over, and a lookup that did
+not fold could return a 404 meaning nothing but a capital letter.
+
 ### `TestR41_AnUnreadableAccountTypeIsInconclusive`
 
 SPEC R-41/R-12: an account whose TYPE cannot be read is inconclusive, not
@@ -8990,4 +8999,4 @@ twice and one tracked file vanished from the gate.
 
 ---
 
-859 documented test cases across 13 packages.
+860 documented test cases across 13 packages.

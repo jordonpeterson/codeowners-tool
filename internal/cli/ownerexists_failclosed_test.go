@@ -689,3 +689,43 @@ func TestR41_NothingToVerifyIsDisclosed(t *testing.T) {
 		t.Errorf("a verification that checked nothing said nothing:\n%s", errb)
 	}
 }
+
+// SPEC R-41/R-38a: a user owner costs ONE request, and a mixed-case spelling
+// asks about the same account as the lowercase one. R-41 asks two questions
+// about every bare handle it writes — does it exist, and is it an
+// organization — and both are answered by one response; two lookups per owner
+// would spend a 40-op baseline's rate limit twice over, and a lookup that did
+// not fold could return a 404 meaning nothing but a capital letter.
+func TestR41_AUserOwnerCostsOneLookupWhateverItsCase(t *testing.T) {
+	repo := oeRepo(t)
+	api, calls := oeAPIWithOverride(t, func(w http.ResponseWriter, r *http.Request) bool {
+		if r.URL.Path == "/users/some-dev" {
+			oeReply(w, http.StatusOK, `{"login":"some-dev","type":"User"}`)
+			return true
+		}
+		return false
+	}, "org/api-team", "org/everyone")
+	pol := oePolicy(t, `{"version":1,
+	  "ops":["add_owner(/services/api/, @Some-Dev)","add_owner(/top.md, @some-dev)"]}`)
+
+	code, _, errb := runCLI(t, "sync", "--repo", repo, "--policy", pol,
+		"--verify-owners", "--token", "t", "--api-url", api)
+
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr:\n%s", code, errb)
+	}
+	n := 0
+	for _, c := range calls.all() {
+		if strings.HasPrefix(c, "/users/") {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Errorf("user lookups = %d, want 1: %v", n, calls.all())
+	}
+	// R-38b: folding governs matching, never output.
+	want := "* @org/everyone\n/top.md @org/everyone @some-dev\n/services/api/ @org/api-team @Some-Dev\n"
+	if got := oeContent(t, repo); got != want {
+		t.Errorf("CODEOWNERS:\ngot:\n%s\nwant:\n%s", got, want)
+	}
+}
