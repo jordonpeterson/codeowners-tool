@@ -122,6 +122,13 @@ performs the second. (Ops can also carve out sub-paths with an
 Anything it can't prove → it refuses and writes nothing. Refusing is a normal outcome for
 some repos, not a bug — [GUIDE.md](docs/GUIDE.md#when-it-refuses) shows what to do.
 
+**Both are about *paths*, and say nothing about whether the owner is real.** GitHub
+resolves an owner it doesn't recognise to nobody, silently, so one typo'd team writes a
+rule that owns nothing. `--verify-owners` (or `"verify_owners": true` in the policy) asks
+GitHub first and refuses the run rather than writing a dead line — `check --policy p.json
+--verify-owners` catches it before repo #1. Off by default: without it, nothing here
+touches the network. See [COMMANDS.md](docs/COMMANDS.md#proving-the-owners-exist-r-41).
+
 > **Pattern note.** `README.md` is unanchored, so like gitignore it matches a `README.md`
 > at *any* depth. Write `/README.md` if you mean only the one at the root.
 

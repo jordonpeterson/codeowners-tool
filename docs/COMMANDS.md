@@ -10,10 +10,13 @@ Every command, its flags, and what each exit code means. Policy file fields are 
 sync     (--op 'OP' ... | --policy FILE) [--on-empty error|inherit|unowned]
          [--repo DIR] [--branch REF] [--file PATH] [--create] [--dry-run]
          [--max-paths-changed N] [--format text|json] [--out FILE] [--summary-out FILE]
+         [--verify-owners [--token T | $GITHUB_TOKEN] [--api-url URL]]
 check    (--op 'OP' ... | --policy FILE) [--format text|json]
+         [--verify-owners [--token T | $GITHUB_TOKEN] [--api-url URL]]
 plan     --op 'OP' ... [--on-empty error|inherit|unowned]
          [--repo DIR] [--branch REF] [--file PATH] [--out plan.json]
          [--max-size BYTES] [--warn-size BYTES]
+         [--verify-owners [--token T | $GITHUB_TOKEN] [--api-url URL]]
 apply    --plan plan.json [--repo DIR]
 audit    [--checks a1,a3,a6] [--fail-on any|warning|error|never] [--format json|text]
          [--github-repo owner/name] [--token T | $GITHUB_TOKEN] [--api-url URL]
@@ -70,6 +73,8 @@ at once, because fixing a generated 40-op policy one error per run is miserable.
 | `--on-empty` | Policy when `remove_owner` empties an owner set. Allowed only with `--op`; with `--policy`, set `on_empty` in the file instead. An unknown value is exit 3, checked before any repository is opened. |
 | `--create` | Permission to write a CODEOWNERS if the repo has none — not an instruction to. Off by default, never overwrites, and a run with nothing to write creates nothing (no file, no `.github/`). With `--file`, the file is created at that path instead of `.github/CODEOWNERS` — unless that path outranks the CODEOWNERS this repo is already governed by, which is exit 2, since the new file would supersede it under S-8. Allowed only with `--op`; with `--policy`, set `create` in the file instead (R-34b), or the artifact in git is not the policy that ran. |
 | `--max-paths-changed` | R-25 ceiling: refuse (exit 2) if the run would change the owners of more than N paths. Off by default. Allowed only with `--op`; with `--policy`, set `max_paths_changed` in the file. |
+| `--verify-owners` | Ask GitHub whether every owner the run would put into force exists, and refuse the whole run (exit 3) if one does not — the check that stops a typo'd team being written as a rule that owns nothing (R-41). Off by default; needs a token. May be passed beside `--policy`, unlike `--create`: it changes nothing that gets written, only whether the run happens. `--verify-owners=false` against a policy that set `verify_owners` is exit 3. |
+| `--token` / `--api-url` | Credential and API base URL for `--verify-owners`. `--token` defaults to `$GITHUB_TOKEN`; GHES needs `/api/v3` on the URL. Environment rather than intent, so both are legal beside `--policy`. |
 | `--dry-run` | Makes no change to CODEOWNERS. `--out` and `--summary-out` still emit. |
 | `--format` | `text` (default) or `json`. Under `json`, stdout is data and stderr is logs. |
 | `--out` | **Also** write the JSON record here — always JSON, whatever `--format` says. Stdout is unaffected, which is what lets a fleet loop append to `results.jsonl` and keep a per-repo record at the same time. (`plan --out` and `snapshot --out` do replace stdout; `sync` does not.) |
@@ -84,6 +89,52 @@ an edit — `sync`, `plan`, `apply`, `lint`. After a conflicted merge, rebase or
 the file holds both sides at once (`=======` is a legal zero-owner rule, S-9), so the
 "before" ownership is a state no commit ever had. Resolve it and `git add`, then re-run; a
 conflict in any *other* file is not refused.
+
+### Proving the owners exist (R-41)
+
+Everything else this tool proves is checked against the repository's own files, which
+settles *which paths a rule governs* and says nothing about the other half of the line.
+GitHub resolves an owner it does not recognise to nobody and reports no error, so
+`add_owner(/services/api/, @org/plaform)` is written, reported `proven: tree`, exits 0 —
+and owns nothing. `audit` finds it afterwards (A-1), in a run a clean exit 0 gives nobody
+a reason to make.
+
+`--verify-owners`, or `"verify_owners": true` in the policy, asks first:
+
+```console
+$ codeowners-tool sync --policy ownership.json --verify-owners
+error: @org/plaform cannot be written: team @org/plaform does not exist (deleted or renamed); review requests to it silently do nothing — GitHub resolves an unknown owner to nobody and reports no error, so the rule would be written and own nothing (A-1, R-41)
+this is a policy error — it will fail identically on every repo; fix the policy, do not retry
+```
+
+Only owners the run puts **into force** are checked: `add_owner` and `set_owners` owners,
+and `rename_owner`'s new name. `remove_owner`'s are not — dropping a team that was deleted
+is the repair, not the risk. Email owners are **unverifiable, never dead** (R-13): they
+resolve through a verified address the API cannot see, so they are written and disclosed
+on stderr rather than refused.
+
+The refusal is **exit 3**, decided before the repository is opened: "this owner does not
+exist" is a fact about the policy, identical on every clone, so a fleet halts at repo 0.
+`check --policy p.json --verify-owners` reaches the same verdict with no repository at all
+— one lookup instead of a hundred refusals. `plan --verify-owners` is the same check on
+the reviewable half of the pipeline, and the only place it belongs there: a dead owner is
+invalid input (exit 3) and an unanswerable lookup is exit 5, both before a plan file
+exists. `apply` does not check — it executes a plan a human has already approved.
+
+**Known limitation.** `plan` takes no `--policy`, so there it depends on the call site
+passing the flag; only the `sync`/`check` route can put the requirement in a reviewed
+artifact. A pipeline that must guarantee the check should run `check --policy p.json
+--verify-owners` as its gate.
+
+An owner that *exists* is still not necessarily one GitHub will route a review to. A bare
+organization handle (`@acme` rather than `@acme/team`) is refused — CODEOWNERS resolves
+only a user, an `@org/team` or an email — but write access is not checked here; that is
+`audit`'s A-3, which needs the repository the token is standing in.
+
+A lookup that cannot be answered — rate limit, 5xx, an expired token, or a team 404 seen
+by a token that is not an org owner (a secret team returns the same 404 as a deleted one)
+— is **not** a licence to write. The run refuses, writes nothing, and says so as something
+to re-run rather than as a policy to fix (R-12).
 
 Three things here are called "policy". `--policy` is your ops file, always "the policy
 file"; `--on-empty` and `on_zero_match` are per-situation rules the tool follows.
@@ -177,8 +228,20 @@ the exit code is the signal, and `sync` says so on stderr when either sink was a
 | 2 over the R-25 ceiling | **2** | How big this repo is, is this repo's fact |
 | 3 malformed op, bad policy | **3** | Will fail identically on all 100 |
 | 6 rolled back | **2** | A rolled-back write is about that one repo, not your policy |
+| 5 owner lookup inconclusive (R-41) | **3** | Repo-independent, and a fleet halting once beats 99 more refusals — but the advice line says re-run, not "fix the policy" |
+| 3 owner does not exist (R-41) | **3** | Will fail identically on all 100 |
 
-`sync` makes no network calls, so it never returns 4 or 5.
+Without `--verify-owners` (and without a policy setting `verify_owners`), `sync` makes no
+network calls at all — the default, and what keeps it usable offline. With it, the two
+verdicts above are the only ones the network adds, and both land in `sync`'s existing exit
+`3`: it has no code for "inconclusive", and inventing one would move a failure between
+classes for scripts that already read `3` as "stop".
+
+`check` keeps its own two-code contract for the same reason — `0` for a valid policy, `3`
+otherwise, including an owner lookup that could not be answered. `plan` is on the precise
+taxonomy and does distinguish them: `3` for an owner that does not exist, `5` for a lookup
+that could not be answered. `apply` runs no check at all; it executes a plan a human has
+already approved, and `plan` is where that approval is earned.
 
 | Code | Meaning |
 |---|---|

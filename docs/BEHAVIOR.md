@@ -645,6 +645,63 @@ a bare line deletion.
 > Vacuity, per CONTRIBUTING.md: no test name here contains a fragment any
 > assertion looks for.
 
+**`ownerexists_failclosed_test.go`**
+
+> R-41's adversarial half: everything the owner check must refuse to do.
+>
+> The first file proves R-41 catches the reported bug. This one proves it
+> cannot cause a worse one. A check that runs before a hundred writes has two
+> failure modes and they point in opposite directions:
+>
+>   - It reads an unanswerable lookup as "does not exist" and halts a wave
+>     whose policy was correct. One expired token, one 5xx, one GHES URL
+>     missing /api/v3, and every owner in the file looks deleted — the mass
+>     false negative R-12 exists to prevent, arriving now on the verb that
+>     WRITES rather than the one that reports.
+>   - It reaches the network at all with a credential the operator did not
+>     mean to spend, or renders that credential into a CI log (CWE-532).
+>
+> Every case below therefore asserts what the run did NOT say as well as what
+> it did: an inconclusive verdict that contains "does not exist" is the bug,
+> not the fix, and an exit code alone cannot tell the two apart.
+
+**`ownerexists_test.go`**
+
+> Owner-existence end-to-end tests (R-41). Written ahead of the implementation
+> per CONTRIBUTING.md.
+>
+> The failure this file is about was reported from a real rollout. A policy
+> named a live team and a team that had been renamed months earlier:
+>
+> 	add_owner(/services/api/, [@org/api-team, @org/plaform])
+>
+> `sync` applied it, reported `proven: tree`, exit 0, and wrote both owners.
+> The proof was sound and the line was dead: GitHub silently ignores an owner
+> it cannot resolve, so `/services/api/` ended up owned by @org/api-team alone
+> and the co-ownership the wave existed to establish was never in force. This
+> is the "applied, dead on arrival" outcome the fleet verbs are supposed to
+> make impossible, and it landed in 100 repositories at once because nothing
+> in the write path ever asks GitHub whether an owner exists — `audit` asks,
+> after the fact, in a run nobody had a reason to make.
+>
+> The vacuity trap here is the usual one for a feature that does not exist
+> yet: today's binary rejects `--verify-owners` as an unknown flag and exits
+> 3, which is the same code a correct refusal returns. Every negative case
+> therefore asserts a message fragment as well, and every fragment names
+> something only the implemented feature can say. The positive cases —
+> verification passing, and the offline default — assert the FILE BYTES, so a
+> build that refuses everything cannot pass them.
+>
+> Ownership assertions never use strings.Contains on file content: under
+> last-match-wins (S-1) a substring check is satisfied by a file whose line
+> ORDER hands the path to the wrong owner.
+
+> ---------- stub GitHub ----------
+
+> ---------- fixtures ----------
+
+> ---------- the reported bug ----------
+
 **`owneridentity_test.go`**
 
 > Owner-identity end-to-end tests (R-38). Written ahead of
@@ -3127,6 +3184,333 @@ SPEC R-40: sync with on_unowned=skip grants only where an owner already
 exists. The owned file gains the co-owner; the open paths stay open — the
 record says which, under `left_open` — and a repo that owned nothing in
 scope reports `skipped` at exit 0 with the file untouched.
+
+### `TestR41_ABareOrganizationHandleIsNotAnOwner`
+
+SPEC R-41: a bare ORGANIZATION handle is refused, not waved through. This
+is the hole a check that stops at "does the account exist" leaves open:
+`@acme` is a syntactically valid owner token, `GET /users/acme` answers 200
+for an organization, and GitHub's CODEOWNERS resolver takes a user, an
+`@org/team` or an email address and nothing else — so the rule is written
+and owns nobody. It is the reported bug exactly, arriving through the check
+built to catch it, which is why it is asserted on the file bytes.
+
+### `TestR41_APolicyThatIntroducesNobodyNeedsNoToken`
+
+SPEC R-41/R-13: a run that introduces NOBODY needs no credential. A wave
+whose ops only remove owners is the deleted-team cleanup this whole area
+recommends, and refusing it for want of a token would refuse the repair on
+the strength of a check with nothing to check. Same for a policy whose only
+new owners are email owners, which are unverifiable by construction.
+
+### `TestR41_ARepeatedOwnerIsLookedUpOnce`
+
+SPEC R-41/R-38a: one owner named by many ops costs ONE lookup. A 40-op
+baseline naming the same platform team throughout would otherwise spend 40
+requests of a rate limit to answer one question, and two capitalisations of
+it could return two contradictory verdicts.
+
+### `TestR41_AUserAccountIsStillAnOwner`
+
+SPEC R-41 (pin): a real USER account is still written. The organization
+check above is a refusal on the strength of one JSON field, so the case it
+must not catch is pinned beside it — a build that read every account as an
+organization would pass the test above and refuse every user owner in every
+policy.
+
+### `TestR41_AnUnreadableAccountTypeIsInconclusive`
+
+SPEC R-41/R-12: an account whose TYPE cannot be read is inconclusive, not
+an organization. The refusal above rests on one field of one response, and
+treating "the field was missing" as "organization" would refuse a correct
+policy on a GHES build that answers a shape this tool did not expect.
+
+### `TestR41_CheckAndSyncAgreeOnSwitchingTheCheckOff`
+
+SPEC R-41/R-20: `check` and `sync` answer the same command line the same
+way. `check` is the gate a fleet runs first, so a flag combination it
+accepts and `sync` refuses turns a green gate into a rollout that halts at
+repo 0 — the failure the shared verification path exists to prevent.
+
+### `TestR41_CheckIsOfflineByDefault`
+
+SPEC R-41: `check` without the flag stays what it has always been — a
+policy read that opens nothing and reaches nothing. A fleet gate that
+started making network calls because a validator was added would fail in
+exactly the environments `check` is cheapest in.
+
+### `TestR41_CheckJSONStaysOneObjectOnStdout`
+
+SPEC R-41: `check --format json` stays a clean machine gate. R-41's own
+disclosures go to stderr, so stdout is still exactly one JSON object for
+`jq` — a note on stdout would break the fleet gate it is meant to serve.
+
+### `TestR41_CheckVerifiesWithNoRepository`
+
+SPEC R-41: `check` answers the same question with no repository open, which
+is the point — one lookup at repo 0 instead of a hundred refusals. It is
+the cheapest place to catch the reported typo.
+
+### `TestR41_DeadOwnerBesideAnInconclusiveOneIsRefusedAsDead`
+
+SPEC R-41: a definitive "does not exist" beside an unanswerable lookup is
+reported as the dead owner, and the advice line says BOTH things. The dead
+owner is true whatever the rate limiter does next, so calling the whole run
+something to re-run would send the operator back for the same refusal; but
+the plain "fix the policy, do not retry" is false of the lookup nobody
+could answer, and an operator who believes it ships the fix and meets a
+second refusal they were told would not happen.
+
+### `TestR41_DryRunVerifiesToo`
+
+SPEC R-41: --dry-run verifies too. The preview is where a fleet operator
+expects to find this, and a --dry-run that reported "applied" for a policy
+the real run would refuse is a preview of something that never happens.
+
+### `TestR41_EmailOwnersAreUnverifiableNotDead`
+
+SPEC R-41/R-13: an email owner resolves through a verified address the API
+cannot see, so it is UNVERIFIABLE rather than dead. Refusing it would make
+R-41 unusable for every policy that has one, and treating "cannot check" as
+"does not exist" is the mass false negative R-12 exists to prevent.
+
+### `TestR41_EnvTokenIsUsedAndReachesTheWire`
+
+SPEC R-41: $GITHUB_TOKEN is the documented fallback and reaches the wire.
+Asserting only exit 0 would pass against a build that sent no credential at
+all, against a stub that does not check one.
+
+### `TestR41_EveryDeadOwnerIsReportedInOneRun`
+
+SPEC R-41/R-22: every bad owner in the policy is reported in ONE run.
+Fixing a generated 40-op baseline one refusal per invocation is miserable,
+and each invocation costs a fleet another round trip before repo 0.
+
+### `TestR41_EveryUndecidableLookupRefusesTheWrite`
+
+SPEC R-41/R-12: every shape of "the lookup could not be answered" refuses
+the write, not just the rate limit. A 500, an expired token's 401, a 403
+carrying no rate-limit header, a 429 and a connection that dies mid-request
+are five branches of ghapi's classifier and one contract: an owner that is
+neither proven live nor proven dead is never written, and is never
+described as missing. Pinning only the rate-limited 403 — the one branch
+with a message of its own — leaves the other four free to return "does not
+exist" and halt a fleet over a policy that was correct.
+
+### `TestR41_ExplicitTokenBeatsTheEnvironment`
+
+SPEC R-41: an explicit --token wins over the environment. One line of code
+and one precedence rule an operator relies on when a CI runner exports a
+token they did not choose.
+
+### `TestR41_FlagCannotSwitchOffAReviewedPolicy`
+
+SPEC R-41/R-20: the command line may add the owner check but never remove
+it. `--verify-owners` beside `--policy` is legal precisely because it
+changes nothing that gets written — it can only refuse — so the artifact in
+git still means what it says; `--verify-owners=false` against a policy that
+asked for verification is the direction that would make a reviewed
+guarantee depend on one call site remembering not to drop it.
+
+### `TestR41_InconclusiveLookupWritesNothing`
+
+SPEC R-41/R-12: an undecidable lookup is not a licence to write. A rate
+limit, a 5xx or an expired token makes "does this owner exist" unanswerable,
+and the run refuses exactly as it does for a dead owner — the fail-closed
+posture the audit engine already takes, applied to the verb that WRITES.
+
+The message must not read as a policy error: the operator's next action is
+to re-run, not to edit the policy, and "fix the policy, do not retry" would
+send them to change a file that is correct.
+
+### `TestR41_LiveOwnersAreWritten`
+
+SPEC R-41: an owner that exists is written exactly as before. This is the
+case that makes every refusal above mean something — a build that refused
+unconditionally would pass all of them — so it asserts the resulting BYTES
+rather than the exit code.
+
+### `TestR41_LookupsAreCaseFolded`
+
+SPEC R-41/R-38a: the lookup is case-folded, the file's bytes are not.
+GitHub treats `@Org/API-Team` and `@org/api-team` as one owner; asking the
+API about the mixed-case spelling risks a 404 that means nothing more than
+"you typed it differently", and under R-41 a 404 REFUSES a whole wave.
+
+### `TestR41_MistypedApiUrlDoesNotMakeEveryOwnerLookDead`
+
+SPEC R-41/R-12: a GHES base URL missing /api/v3 returns 404 from EVERY
+endpoint, so every owner in the policy looks deleted at once. Refusing a
+hundred repositories over one typo in a URL is indistinguishable, at the
+HTTP layer, from the wave R-41 was built to stop — so the run proves the
+base URL reaches a GitHub API before it reads any 404 as an answer, and the
+message names the URL rather than the owner.
+
+### `TestR41_NoPartialApplicationOfAMixedList`
+
+SPEC R-41: the live owner in the same list is not a reason to write. The
+bug report's list was [live, dead]; a fix that dropped only the dead owner
+and applied the rest would silently apply an ownership the reviewed policy
+does not state, which is worse than refusing.
+
+### `TestR41_NoRecordNoteIsAbsentWhenNoRecordWasAskedFor`
+
+SPEC R-41: the note is for the fleet that asked for a record, not for every
+run. A plain text run with no --out has nothing to disclose, and printing
+the note anyway would train operators to skip it.
+
+### `TestR41_NothingToVerifyIsDisclosed`
+
+SPEC R-41: "there was nothing to verify" is said out loud. An operator who
+asked for verification, got exit 0 and had no request made cannot otherwise
+tell that outcome from a wave whose every owner was checked — which is the
+silent-success shape R-41 exists to remove, reproduced inside R-41.
+
+### `TestR41_OfflineByDefaultMakesNoAPICalls`
+
+SPEC R-41: verification is opt-in and the default run touches no network at
+all. The claim is not "it exits 0" — an implementation that called the API
+and happened to succeed would too — it is that ZERO requests were made, so
+a sync in an air-gapped runner or with no token keeps working exactly as it
+did before R-41.
+
+### `TestR41_OneReasonIsReportedOnceForAllTheOwnersItCovers`
+
+SPEC R-41/R-12: one dead resolver makes every lookup in the run fail the
+same way, and forty lines of the same sentence bury the one fact that
+matters — which is the reason, not the roll call. Owners sharing a reason
+are named together, once.
+
+### `TestR41_OpRouteVerifiesWithoutAPolicyFile`
+
+SPEC R-41: the --op route has no policy file, so the flag is the only thing
+that can arm the check — a different branch from every policy case, and the
+one an operator explores with before writing the artifact.
+
+### `TestR41_PlanRefusesAnOwnerThatDoesNotExist`
+
+SPEC R-41: `plan` is the other route into a write, and it is checked where
+intent is stated rather than where it is executed. A plan file naming a team
+that does not exist is an artifact a human APPROVES, after which every
+downstream refusal is too late to matter — so no plan file is produced at
+all. Exit 3: a dead owner is invalid input, not a property of this clone.
+
+### `TestR41_PlanReportsAnUnanswerableLookupAsInconclusive`
+
+SPEC R-41/R-12: `plan` has an exit code for "the check could not be made"
+that `sync` does not — 5, inconclusive, fail-closed — and an unanswerable
+owner lookup is exactly what it is for. Reporting it as exit 3 would tell
+the operator their ops are wrong when the ops are fine.
+
+### `TestR41_PolicyFieldTurnsVerificationOn`
+
+SPEC R-41: the requirement belongs in the reviewed artifact. A fleet's
+guarantee cannot depend on every call site remembering a flag, so
+`"verify_owners": true` turns it on for every run of that policy — the same
+argument `create` and `max_paths_changed` are policy fields for (R-34,
+R-25).
+
+### `TestR41_ProbeOrgFailureIsNotADeadTeam`
+
+SPEC R-41/R-12: until ProbeOrg succeeds, a team 404 means "invisible to
+these scopes" as readily as "deleted", so a failing probe stops the run
+before TeamExists is ever consulted. Acting on the team lookup first is the
+bug the probe exists to prevent, and under R-41 it would halt a
+hundred-repo wave over a scope the token never had.
+
+### `TestR41_RefusalSaysNoRecordWasWritten`
+
+SPEC R-41/R-24: a refusal decided before the repository is opened writes no
+record, and a fleet that asked for one has to be told. Silence drops the
+repo out of results.jsonl entirely — the aggregation shows 99 rows for a
+100-repo wave and nothing says which one is missing, so the count of repos
+needing attention goes DOWN. Both R-41 refusals go through their own
+closure, so a test through one leaves the other unproven.
+
+### `TestR41_RemoveOwnerDoesNotRequireTheOwnerToExist`
+
+SPEC R-41: remove_owner's owners are never looked up. Removing a team that
+was deleted is the whole reason the op exists, and verifying it would refuse
+exactly the cleanup R-41's sibling checks recommend.
+
+### `TestR41_RenameChecksTheNewNameOnly`
+
+SPEC R-41: rename_owner checks the NEW name and not the old one. The old
+name is on its way out — a rename away from a deleted team is the common
+case — while the new name is what the run puts into force.
+
+### `TestR41_RenameToANameThatDoesNotExistIsRefused`
+
+SPEC R-41: a rename to a name that does not exist is refused. The op is the
+one that rewrites owners as plain text, so nothing downstream would ever
+notice that the file now names a team GitHub cannot resolve.
+
+### `TestR41_SyncRefusesAnOwnerThatDoesNotExist`
+
+SPEC R-41: the reported failure. A policy naming one live team and one team
+that does not exist is refused under --verify-owners, and NOTHING is
+written — not even the live half of the list, which is the whole point: a
+partial application would put a rule in force that states an ownership
+nobody asked for.
+
+Exit 3, not 2: "@org/not-real-team does not exist" is a fact about the
+policy and about GitHub, not about which clone the run is standing in, so
+it is identical on every repository in the wave and halting at repo 0 beats
+recording the same refusal 100 times (CONTRIBUTING, "exit codes are a
+contract").
+
+### `TestR41_TeamNotFoundIsInconclusiveForANonOwnerToken`
+
+SPEC R-41/R-12: a team 404 seen by a token that is not an org owner means
+"deleted OR secret and invisible to you", and those are the same HTTP
+response. Refusing is right either way; calling it "does not exist" is not,
+because the operator's fix is a different one — re-run with an org-owner
+token, not delete the team from the policy.
+
+### `TestR41_UnverifiableOwnersReachTheRecord`
+
+SPEC R-41: an owner written without being verified reaches the RECORD, not
+only the terminal. A results.jsonl from a wave that wrote owners nobody
+could check must not be byte-identical to one from a wave that verified
+every owner — the fleet reads the file, not the scrollback.
+
+### `TestR41_UserOwnersAreCheckedToo`
+
+SPEC R-41: a user owner is checked the same way a team is. `@jdoe` who left
+the company two years ago is the same dead line as a deleted team, and the
+user endpoint is a different code path from the team one.
+
+### `TestR41_VerifyOwnersFieldIsValidated`
+
+SPEC R-41/R-36: `verify_owners` is validated like every other policy field
+— a wrong type is a hard error naming the TYPE, and a near-miss spelling is
+an unknown field with a suggestion. The typo is the reported incident one
+level up: a policy that silently does NOT verify is the same failure class
+as an owner that silently owns nothing.
+
+### `TestR41_VerifyOwnersNeverPrintsTheCredential`
+
+SPEC R-41: the credential never reaches stderr. `--api-url` and `--token`
+exist on the WRITING verbs for the first time, so redaction has to hold on
+a path nothing has ever driven — and
+`--api-url https://svc:hunter2@ghes.example` is a legal thing to type, in
+the one message a GHES operator is most likely to see (CWE-532). Every
+shape of R-41's output is driven, because the leak only has to happen once.
+
+### `TestR41_VerifyOwnersWithoutATokenIsRefused`
+
+SPEC R-41: --verify-owners with no token is exit 3, never a silent skip.
+"Verify these owners" and "I have no way to" cannot both be honoured, and
+quietly doing the offline thing would report success for the very run the
+operator asked to be checked — the vacuous pass that made this bug possible
+in the first place.
+
+### `TestR41_ViewerIsOrgAdminFailureIsInconclusive`
+
+SPEC R-41/R-12: the org-owner question is asked from a point where the team
+already looks gone, so an implementation that swallows its error into "not
+an owner" reports the wrong remedy — "re-run with an org-owner token" for
+what is actually a 5xx. Neither answer may become a write.
 
 ### `TestR22b_CheckCannotDecideDeclaredPairs`
 
@@ -8606,4 +8990,4 @@ twice and one tracked file vanished from the gate.
 
 ---
 
-816 documented test cases across 13 packages.
+859 documented test cases across 13 packages.

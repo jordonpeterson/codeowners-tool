@@ -21,6 +21,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -154,18 +155,30 @@ func (c *Client) key(k string) string { return c.scope + ":" + k }
 // and the "base URL looks wrong" path is the single most likely error a GHES
 // operator hits — so the credential landed in stderr, and from there into a CI
 // log (CWE-532). Go's own transport redacts userinfo in its error strings; the
-// tool was leaking what its runtime deliberately hides. Unparseable input is
-// returned as-is: it is not a URL, so it has no userinfo to expose, and
-// dropping the string entirely would cost the operator the very detail the
-// message exists to give them.
+// tool was leaking what its runtime deliberately hides.
+//
+// UNPARSEABLE input is redacted too, textually. The first version returned it
+// as-is on the reasoning that a string url.Parse rejects "is not a URL, so it
+// has no userinfo to expose" — which is false in the one case that matters:
+// `--api-url "ht tp://svc:hunter2@ghes.example/api/v3"` is rejected for the
+// space and still carries the password, and the parse error is exactly the
+// message that renders it. Everything but the credential is preserved,
+// because the operator needs the rest of the string to see their typo.
 func redactURL(raw string) string {
-	u, err := url.Parse(raw)
-	if err != nil || u.User == nil {
-		return raw
+	if u, err := url.Parse(raw); err == nil {
+		if u.User == nil {
+			return raw
+		}
+		u.User = url.User("REDACTED")
+		return u.String()
 	}
-	u.User = url.User("REDACTED")
-	return u.String()
+	return userinfoRe.ReplaceAllString(raw, "://REDACTED@")
 }
+
+// userinfoRe matches the `://user:password@` of a URL that url.Parse will not
+// accept. Deliberately requires the colon: `://host@` has no credential in it,
+// and a scheme-relative string with an @ in a path segment is not userinfo.
+var userinfoRe = regexp.MustCompile(`://[^/@\s]*:[^/@\s]*@`)
 
 // pathSeg encodes one value as exactly one URL path segment.
 //
@@ -186,7 +199,14 @@ func pathSeg(s string) string {
 func (c *Client) get(path, accept string) (int, []byte, error) {
 	req, err := http.NewRequest("GET", c.BaseURL+path, nil)
 	if err != nil {
-		return 0, nil, &Inconclusive{Reason: err.Error()}
+		// url.Parse's error quotes the WHOLE input, userinfo included, and
+		// this is the one branch that renders it raw: an --api-url the parser
+		// rejects never reaches the transport, whose own error strings mask
+		// the password for us. `--api-url "ht tp://svc:hunter2@ghes/api/v3"`
+		// put the credential in stderr and from there into a CI log
+		// (CWE-532), which is exactly what redactURL exists to stop
+		// everywhere else.
+		return 0, nil, &Inconclusive{Reason: strings.ReplaceAll(err.Error(), c.BaseURL, redactURL(c.BaseURL))}
 	}
 	if c.Token != "" {
 		req.Header.Set("Authorization", "Bearer "+c.Token)
@@ -318,6 +338,38 @@ func (c *Client) UserExists(login string) (bool, error) {
 			return false, nil
 		}
 		return true, nil
+	})
+}
+
+// AccountIsOrganization reports whether a bare @handle names an ORGANIZATION
+// rather than a user. Callers must establish that the account exists first.
+//
+// It exists for a gap only a caller that PROVES something has to close.
+// `@acme` is a syntactically valid owner token and `GET /users/acme` answers
+// 200 for an organization, so "this account exists" is true and useless:
+// GitHub's CODEOWNERS resolver accepts a user, an `@org/team` or an email
+// address and nothing else, so an org handle on a rule is silently nobody —
+// the same dead line R-41 exists to refuse, reached through the check itself.
+//
+// A response this cannot classify is inconclusive, never a negative (R-12).
+func (c *Client) AccountIsOrganization(login string) (bool, error) {
+	return c.cachedBool("account-is-org:"+login, func() (bool, error) {
+		status, body, err := c.get("/users/"+pathSeg(login), "")
+		if err != nil {
+			return false, err
+		}
+		if status == 404 {
+			// Not an account at all; existence is UserExists' question and it
+			// has already been asked. Nothing here to call an organization.
+			return false, nil
+		}
+		var out struct {
+			Type string `json:"type"`
+		}
+		if json.Unmarshal(body, &out) != nil || out.Type == "" {
+			return false, &Inconclusive{Reason: "unreadable account type for @" + login}
+		}
+		return out.Type == "Organization", nil
 	})
 }
 

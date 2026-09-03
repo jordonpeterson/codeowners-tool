@@ -37,7 +37,7 @@ const MaxPolicyBytes = 1 << 20
 // the top and meaningless on an op; accepting it in both places would let a
 // generator put the policy's description on op 17 and nothing would notice.
 var (
-	topFields = []string{"version", "name", "description", "create", "on_empty", "max_paths_changed", "defaults", "lint", "ops"}
+	topFields = []string{"version", "name", "description", "create", "verify_owners", "on_empty", "max_paths_changed", "defaults", "lint", "ops"}
 	opFields  = []string{"op", "id", "on_zero_match", "on_except_zero_match", "on_unowned", "except", "owners", "note"}
 	// `defaults` carries the genuinely PER-OP settings and nothing else
 	// (R-35c). on_empty is one policy for the run and stays top-level: two
@@ -85,6 +85,11 @@ type Policy struct {
 	// existing file is never overwritten and this is safe to leave true for a
 	// fleet where only some repositories have a file.
 	Create bool
+	// VerifyOwners is R-41: before writing, prove with the GitHub API that
+	// every owner the ops would put into force actually exists. Off by
+	// default — an owner check needs a credential, and the fleet verbs are
+	// designed to run offline.
+	VerifyOwners bool
 	// Defaults is R-35, supplying the per-op settings an op does not state.
 	// It reaches only ops that can carry the setting (R-35e).
 	Defaults Defaults
@@ -280,6 +285,7 @@ func (v *validator) policy(root *jsonValue) *Policy {
 	p.Name = v.optString(fields["name"], "name", -1, "")
 	p.Description = v.optString(fields["description"], "description", -1, "")
 	v.create(p, fields["create"])
+	v.verifyOwners(p, fields["verify_owners"])
 	v.onEmpty(p, fields["on_empty"])
 	v.maxPathsChanged(p, fields["max_paths_changed"])
 	// Before the ops: the block supplies what an op does not state, so it has
@@ -409,6 +415,23 @@ func (v *validator) create(p *Policy, m *member) {
 		return
 	}
 	p.Create = val.b
+}
+
+// verifyOwners validates R-41's boolean. It lives in the policy rather than in
+// a flag for the reason `create` and `max_paths_changed` do: "no rule this
+// wave writes may name an owner GitHub cannot resolve" is a claim about the
+// intent, and a claim that depends on every call site remembering a flag is
+// not a guarantee across a hundred repositories.
+func (v *validator) verifyOwners(p *Policy, m *member) {
+	if m == nil {
+		return
+	}
+	val := m.val
+	if val.kind != kBool {
+		v.at(val.off, -1, "", `field "verify_owners" must be a boolean, got %s; write true or false — whether a run proves its owners exist before writing them is a decision the reviewed artifact makes (R-41)`, val.describe())
+		return
+	}
+	p.VerifyOwners = val.b
 }
 
 // defaults validates R-35's block: the per-op settings a policy states once so

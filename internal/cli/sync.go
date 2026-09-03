@@ -40,17 +40,38 @@ const policyGuidance = "this is a policy error — it will fail identically on e
 
 // exit3 reports a member of the exit-3 class and returns its code.
 func exit3(stderr io.Writer, err error) int {
+	return exit3guided(stderr, err, policyGuidance)
+}
+
+// multiReasons is any error carrying several independent problems, each of
+// which prints on its own line (R-22).
+type multiReasons interface{ Reasons() []string }
+
+// exit3guided is exit3 with the advice line stated rather than assumed.
+//
+// Every exit-3 verdict but one really does mean "fix the policy, do not
+// retry". R-41's inconclusive lookup is the exception: the policy may be
+// perfect and the token merely rate-limited, and sending that operator to
+// edit a correct file costs them the rollout twice. The parameter exists so
+// the guidance can be wrong-free rather than usually-right.
+func exit3guided(stderr io.Writer, err error, guidance string) int {
 	var multi *policy.MultiError
-	if errors.As(err, &multi) {
+	var reasons multiReasons
+	switch {
+	case errors.As(err, &multi):
 		// Every accumulated problem prints in one run (R-22): fixing a generated
 		// 40-op policy one error per invocation is miserable.
 		for _, e := range multi.Errs {
 			fmt.Fprintln(stderr, "error:", e)
 		}
-	} else {
+	case errors.As(err, &reasons):
+		for _, r := range reasons.Reasons() {
+			fmt.Fprintln(stderr, "error:", r)
+		}
+	default:
 		fmt.Fprintln(stderr, "error:", err)
 	}
-	fmt.Fprintln(stderr, policyGuidance)
+	fmt.Fprintln(stderr, guidance)
 	return ExitInvalid
 }
 
@@ -180,6 +201,11 @@ type syncRun struct {
 	// and they cannot make it without knowing which knob they are holding.
 	maxPaths       int
 	maxPathsSource string
+	// preWarnings are warnings settled before the repository is opened — today
+	// only R-41's disclosure that an owner was written without being verified.
+	// They lead rec.Warnings so every sink downstream (the record, the summary)
+	// carries them.
+	preWarnings []string
 }
 
 func cmdSync(args []string, stdout, stderr io.Writer) int {
@@ -196,6 +222,13 @@ func cmdSync(args []string, stdout, stderr io.Writer) int {
 	maxPaths := fs.Int("max-paths-changed", -1, "R-25 ceiling: refuse (exit 2) if more than N paths would change owners; omit for no ceiling (only with --op)")
 	dryRun := fs.Bool("dry-run", false, "change no CODEOWNERS; --out and --summary-out still emit")
 	format := fs.String("format", "text", "text|json — governs stdout only")
+	// R-41. Off by default: a sync that required a token would break every
+	// offline run the fleet verbs were built for. --token and --api-url are
+	// environment, not intent, so unlike --create they are legal beside
+	// --policy; --verify-owners states intent and is not (R-20).
+	verifyOwnersFlag := fs.Bool("verify-owners", false, "check with GitHub that every owner the run would write exists, and refuse the run if one does not (R-41); needs --token. A policy's \"verify_owners\": true turns it on for every run")
+	token := fs.String("token", "", "GitHub token for --verify-owners (default $GITHUB_TOKEN)")
+	apiURL := fs.String("api-url", "", "GitHub API base URL for --verify-owners (GHES needs /api/v3)")
 	// Trusted operator input, deliberately not contained to --repo: unlike --file
 	// and the discovered CODEOWNERS path, no repository can influence these. Their
 	// real uses are outside the clone anyway (`--out records/$repo.json`,
@@ -216,6 +249,12 @@ func cmdSync(args []string, stdout, stderr io.Writer) int {
 	// paths, and the other eight lost repos silently.
 	exit3s := func(err error) int {
 		return noRecordNote(stderr, *format, *out, *summaryOut, exit3(stderr, err))
+	}
+	// The same choke point for the one exit-3 verdict whose remedy is not
+	// "fix the policy" (R-41/R-12): it too is reached before the repository is
+	// opened, so it too produces no record.
+	exit3sGuided := func(err error, guidance string) int {
+		return noRecordNote(stderr, *format, *out, *summaryOut, exit3guided(stderr, err, guidance))
 	}
 	// Argument-only, like every exit-3 verdict below: a stray positional arg
 	// means the parser read nothing after it, flags included.
@@ -322,6 +361,44 @@ func cmdSync(args []string, stdout, stderr io.Writer) int {
 	if err := ops.StaticConflict(opList); err != nil {
 		return exit3s(err)
 	}
+	// R-41 runs if EITHER spelling asks for it, and the command line can only
+	// ever add the check, never remove it. That is why this is not the ban
+	// --create and --max-paths-changed get (R-20/R-34): those change what gets
+	// WRITTEN, so a flag able to override the file would make the artifact in
+	// git not the policy that ran. An owner check changes nothing that is
+	// written — it can only refuse — so forcing it on at one call site leaves
+	// the reviewed policy's meaning intact. Switching it OFF would not, and is
+	// refused below.
+	verify := *verifyOwnersFlag || (pol != nil && pol.VerifyOwners)
+	var preWarnings []string
+	// Keyed on presence AND value, unlike the bans above: `--verify-owners`
+	// defaults to false, so "was it typed" alone would reject the harmless
+	// spelling that merely agrees with the policy.
+	if passed["verify-owners"] && !*verifyOwnersFlag && pol != nil && pol.VerifyOwners {
+		return exit3s(errors.New(`--verify-owners=false cannot switch off a policy's "verify_owners": true — a reviewed guarantee that one call site can drop is not a guarantee; remove the field from the policy if that is the intent (R-20/R-41)`))
+	}
+	if verify {
+		// Before the repository is opened, like every other exit-3 verdict:
+		// the answer is a fact about the policy and about GitHub, identical on
+		// every clone in the wave, so a fleet halts at repo 0 rather than
+		// recording the same refusal a hundred times.
+		unverifiable, err := verifyOwnersFor(*token, *apiURL, opList)
+		switch {
+		case errors.Is(err, errNothingToVerify):
+			fmt.Fprintln(stderr, nothingToVerifyNote)
+		case err != nil:
+			return exit3sGuided(err, verifyGuidance(err))
+		}
+		if len(unverifiable) > 0 {
+			fmt.Fprintln(stderr, unverifiableNote(unverifiable))
+			// Also into the record and the PR body: a results.jsonl from a
+			// wave that wrote owners nobody could check must not be
+			// byte-identical to one from a wave that verified every owner.
+			preWarnings = append(preWarnings, unverifiableNote(unverifiable))
+		}
+	} else if passed["token"] || passed["api-url"] {
+		fmt.Fprintln(stderr, idleCredentialNote)
+	}
 
 	run := &syncRun{
 		repoArg:  *repo,
@@ -332,6 +409,8 @@ func cmdSync(args []string, stdout, stderr io.Writer) int {
 		onEmpty:  *onEmpty,
 		ops:      opList,
 		policy:   pol,
+
+		preWarnings: preWarnings,
 
 		maxPaths:       *maxPaths,
 		maxPathsSource: "--max-paths-changed",
@@ -412,7 +491,7 @@ func (r *syncRun) execute() (SyncRecord, int) {
 	// Warnings about the FILE, gathered before anything is planned so a repo
 	// that goes on to refuse still reports them: the conditions below are
 	// exactly the ones an operator wants listed across the fleet afterwards.
-	fileWarnings := governingWarnings(tree, r.branch, rel, creating, content)
+	fileWarnings := append(append([]string(nil), r.preWarnings...), governingWarnings(tree, r.branch, rel, creating, content)...)
 	rec.Warnings = fileWarnings
 
 	// Where the write would actually land, decided before anything is planned.
@@ -1793,6 +1872,15 @@ func cmdCheck(args []string, stdout, stderr io.Writer) int {
 	fs.Var(&opSpecs, "op", "operation to syntax-check (repeatable); mutually exclusive with --policy")
 	fs.Var(&policyPaths, "policy", "policy file to validate; mutually exclusive with --op")
 	format := fs.String("format", "text", "text|json")
+	// R-41, and the cheapest place to run it: one lookup before repo #1
+	// instead of a hundred identical refusals. Unlike sync's, this flag IS
+	// legal beside --policy — check writes nothing, so it cannot make the
+	// artifact in git differ from the policy that ran, and forcing the check
+	// on can only find more problems, never approve something the policy's
+	// own "verify_owners" would have caught.
+	verifyOwnersFlag := fs.Bool("verify-owners", false, "check with GitHub that every owner the policy would write exists (R-41); needs --token")
+	token := fs.String("token", "", "GitHub token for --verify-owners (default $GITHUB_TOKEN)")
+	apiURL := fs.String("api-url", "", "GitHub API base URL for --verify-owners (GHES needs /api/v3)")
 	// No --repo, --branch, --file, --create, --dry-run or --summary-out: check
 	// reads no repository, and the shape of the verb is what enforces that (R-22).
 	// An unknown flag is a parse error, which is exit 3 below.
@@ -1805,6 +1893,7 @@ func cmdCheck(args []string, stdout, stderr io.Writer) int {
 	if *format != "text" && *format != "json" {
 		return exit3(stderr, fmt.Errorf("unknown --format %q; want text or json", *format))
 	}
+	passed := flagsPassed(fs)
 	pol, opList, err := opSource(opSpecs, policyPaths)
 	if err != nil {
 		return exit3(stderr, err)
@@ -1818,6 +1907,27 @@ func cmdCheck(args []string, stdout, stderr io.Writer) int {
 	// reveals stays exit 2, per repo, and the fleet loop still steps over it.
 	if err := ops.StaticConflict(opList); err != nil {
 		return exit3(stderr, err)
+	}
+	// The same guard `sync` applies, and here for the same reason stated the
+	// other way round: `check` is the gate a fleet runs before `sync`, so a
+	// command line the two verbs answer differently turns a green gate into a
+	// rollout that halts at repo 0.
+	if passed["verify-owners"] && !*verifyOwnersFlag && pol != nil && pol.VerifyOwners {
+		return exit3(stderr, errors.New(`--verify-owners=false cannot switch off a policy's "verify_owners": true — a reviewed guarantee that one call site can drop is not a guarantee; remove the field from the policy if that is the intent (R-20/R-41)`))
+	}
+	if *verifyOwnersFlag || (pol != nil && pol.VerifyOwners) {
+		unverifiable, err := verifyOwnersFor(*token, *apiURL, opList)
+		switch {
+		case errors.Is(err, errNothingToVerify):
+			fmt.Fprintln(stderr, nothingToVerifyNote)
+		case err != nil:
+			return exit3guided(stderr, err, verifyGuidance(err))
+		}
+		if len(unverifiable) > 0 {
+			fmt.Fprintln(stderr, unverifiableNote(unverifiable))
+		}
+	} else if passed["token"] || passed["api-url"] {
+		fmt.Fprintln(stderr, idleCredentialNote)
 	}
 
 	// Exit 0, never 1. `check` is the first line of every fleet script under
